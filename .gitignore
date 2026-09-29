@@ -1,0 +1,34 @@
+# Binaries
+bin/
+distrikv
+distrikv-bench
+/server
+/client
+/bench
+
+# Data / persistence
+data/
+*.db
+*.log
+*.snap
+*.raftlog
+
+# Go
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Env / secrets
+.env
+*.key
+*.pem
+
+# Coverage
+coverage.out
+coverage.html
+*.prof

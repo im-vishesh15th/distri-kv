@@ -95,7 +95,7 @@ client-supplied tenant ID.
 
 ## 7. Persistence design
 
-On-disk Raft log record framing (exact byte layout fixed in Phase 3):
+On-disk Raft log record framing (normative spec in [persistence.md](persistence.md)):
 
 ```
 [len:u32][crc32:u32][index:u64][term:u64][payload...]

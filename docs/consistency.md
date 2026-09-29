@@ -1,7 +1,7 @@
 # Consistency — DistriKV
 
-> Status: Phase 0 — definitions first. Implementations and their proofs are
-> added phase by phase; every claim below must eventually name the test that
+> Status: through Phase 6 (log replication). Implementations and their proofs
+> are added phase by phase; every claim below must eventually name the test that
 > demonstrates it. Vague phrases like "strong consistency" are forbidden in
 > this project unless immediately defined.
 
@@ -28,9 +28,9 @@
 
 | # | Guarantee | Mechanism | Verified by | Since phase |
 |---|---|---|---|---|
-| W1 | An acknowledged write is durable across process crash | fsync'd persistent Raft log before ack | torn-write/restart tests | 3 (planned) |
-| W2 | Writes commit only with majority agreement | Raft majority commit rule | partition fault tests | 6 (planned) |
-| W3 | No acknowledged write is lost across leader change | Raft safety + persisted hard state | leader-kill tests | 5–6 (planned) |
+| W1 | An acknowledged write is durable across process crash | fsync'd persistent Raft log before ack | torn-tail/restart tests (log); commit-before-ack in replication tests | 3, 6 |
+| W2 | Writes commit only with majority agreement | Raft majority commit rule | `TestCommitRequiresMajority`; partition fault tests (Phase 14–15) | 6 |
+| W3 | No acknowledged write is lost across leader change | Raft safety + persisted hard state | `TestReplicationSurvivesLeaderKill` | 6 |
 | R1 | Reads are linearizable | ReadIndex: confirm leadership in current term → wait for `lastApplied ≥ readIndex` → serve | stale-follower & leader-change read tests | 11 (planned) |
 | S1 | A retried mutation applies at most once | replicated session table `(client_id, seq) → cached response` | lost-response retry tests | 9 (planned) |
 | S2 | Session/dedup state survives restart and snapshots | session table is part of state-machine snapshot | restart & snapshot tests | 9/12 (planned) |

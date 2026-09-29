@@ -8,8 +8,11 @@ package raft_test
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -43,6 +46,16 @@ type liveNode struct {
 	dead   bool
 }
 
+// debugLogger writes per-node Raft debug logs next to the log directory for
+// diagnosing test failures.
+func debugLogger(dir string, id transport.NodeID) *slog.Logger {
+	f, err := os.Create(filepath.Join(dir, "raftdebug.log"))
+	if err != nil {
+		return nil
+	}
+	return slog.New(slog.NewJSONHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
 // bootNode starts one full node (log + transport + raft + gRPC server +
 // ticker). lis is pre-allocated by the cluster builder; pass nil to listen
 // on addr itself (restart path).
@@ -72,7 +85,8 @@ func bootNode(t *testing.T, id transport.NodeID, addr, dir string, peers []trans
 		HeartbeatTicks: heartbeatTicks,
 		// Distinct seed per boot: identical seeds across nodes would make
 		// their randomized timeouts collide every round (livelock).
-		RNG: rand.New(rand.NewSource(time.Now().UnixNano() + int64(len(dir)))),
+		RNG:    rand.New(rand.NewSource(time.Now().UnixNano() + int64(len(dir)))),
+		Logger: debugLogger(dir, id),
 	})
 	if err != nil {
 		t.Fatalf("%s: raft.New: %v", id, err)
@@ -92,7 +106,15 @@ func bootNode(t *testing.T, id transport.NodeID, addr, dir string, peers []trans
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
-	go func() { runErr <- rnode.Run(ctx) }()
+	go func() {
+		err := rnode.Run(ctx)
+		if err != nil {
+			// A halted loop is a test-visible failure (disk error or logic
+			// bug): print loudly rather than letting nodes silently vanish.
+			fmt.Fprintf(os.Stderr, "RAFT_HALTED %s: %v\n", id, err)
+		}
+		runErr <- err
+	}()
 	raft.StartTicker(ctx, rnode, tickPeriod)
 
 	return &liveNode{
@@ -236,6 +258,97 @@ func TestThreeNodeElectsLeaderKillReelect(t *testing.T) {
 
 	if s := old.rnode.Status(); s.Term < oldTerm {
 		t.Fatalf("restarted node lost its persisted term: %+v", s)
+	}
+}
+
+// TestReplicationSurvivesLeaderKill is the Phase 6 end-to-end: committed
+// proposals survive the leader dying, a down follower catches up on restart,
+// and the newly elected leader provably contains every committed entry (the
+// election restriction doing its job).
+func TestReplicationSurvivesLeaderKill(t *testing.T) {
+	nodes := startCluster(t, 3)
+	ctx := context.Background()
+
+	leader := waitForLeadership(t, 10*time.Second, "initial leader", nodes)
+
+	var followers []*liveNode
+	for _, n := range nodes {
+		if n != leader {
+			followers = append(followers, n)
+		}
+	}
+
+	// Eight sequential proposals: no-op occupies index 1, payloads v0..v7
+	// land at 2..9. One follower dies after the first five — a majority of
+	// 3 still holds with the remaining one.
+	for i := 0; i < 5; i++ {
+		idx, err := leader.rnode.Propose(ctx, []byte(fmt.Sprintf("v%d", i)))
+		if err != nil {
+			t.Fatalf("propose %d: %v", i, err)
+		}
+		if want := uint64(i + 2); idx != want {
+			t.Fatalf("propose %d got index %d, want %d", i, idx, want)
+		}
+	}
+
+	down := followers[0]
+	down.kill()
+	for i := 5; i < 8; i++ {
+		if _, err := leader.rnode.Propose(ctx, []byte(fmt.Sprintf("v%d", i))); err != nil {
+			t.Fatalf("propose %d with follower down: %v", i, err)
+		}
+	}
+
+	// Restart the dead follower: it must converge to the leader's log.
+	restartNode(t, down)
+	waitFor(t, 10*time.Second, "restarted follower caught up", func() bool {
+		return down.rnode.Status().LastLogIndex >= 9
+	})
+	lst, flst := leader.rnode.Status().LastLogIndex, down.rnode.Status().LastLogIndex
+	for i := uint64(1); i <= lst && i <= flst; i++ {
+		le, lerr := leader.rlog.Get(i)
+		fe, ferr := down.rlog.Get(i)
+		if lerr != nil || ferr != nil || le.Term != fe.Term || string(le.Payload) != string(fe.Payload) {
+			t.Fatalf("log divergence at %d: leader=%+v(%v) follower=%+v(%v)", i, le, lerr, fe, ferr)
+		}
+	}
+
+	// Kill whoever currently leads (leadership may have churned during the
+	// restart — a real possibility, since peers take ~200ms of grpc backoff
+	// to reconnect while election timeouts are 100–190ms; churn is correct
+	// Raft behavior and must not break our guarantees). The survivors must
+	// then elect a strictly newer leader that has committed everything.
+	cur := waitForLeadership(t, 10*time.Second, "stable leader before kill", nodes)
+	prevTerm := cur.rnode.Status().Term
+	cur.kill()
+	survivors := make([]*liveNode, 0, 2)
+	for _, n := range nodes {
+		if n != cur {
+			survivors = append(survivors, n)
+		}
+	}
+	var newLeader *liveNode
+	waitFor(t, 10*time.Second, "survivors elect a new leader", func() bool {
+		ls := leadersOf(survivors)
+		if len(ls) != 1 {
+			return false
+		}
+		if s := ls[0].rnode.Status(); s.Term <= prevTerm || s.CommitIndex < 9 {
+			return false
+		}
+		newLeader = ls[0]
+		return true
+	})
+
+	// All eight committed payloads survive the leader change.
+	for i := 0; i < 8; i++ {
+		e, err := newLeader.rlog.Get(uint64(i + 2))
+		if err != nil {
+			t.Fatalf("committed entry %d missing on new leader: %v", i+2, err)
+		}
+		if want := fmt.Sprintf("v%d", i); string(e.Payload) != want {
+			t.Fatalf("entry %d payload %q, want %q", i+2, e.Payload, want)
+		}
 	}
 }
 

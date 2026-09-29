@@ -1,8 +1,8 @@
 # DistriKV's Raft core
 
 Custom implementation — no Hashicorp Raft, no etcd/raft. This document covers
-what exists **now (Phase 5: leader election)** and how it is built; log
-replication and the commit rule append here in Phase 6.
+what exists **now (Phases 5–6: leader election + log replication)** and how it
+is built; state-machine apply appends here in Phase 7.
 
 ## Concurrency model: one event loop owns all state
 
@@ -47,8 +47,8 @@ atomic rename before any message that assumes them):
 | `votedFor` | at most one vote per term per node, durably recorded |
 
 **Volatile** (rebuilt at start): `role` (follower/candidate/leader),
-`leaderID`, election/heartbeat timers, per-term vote set, and (declared,
-advanced from Phase 6) `commitIndex`, `lastApplied`.
+`leaderID`, election/heartbeat timers, per-term vote set, `commitIndex`,
+`lastApplied`, and the leader's per-peer replication progress (below).
 
 On `New`, term and vote are recovered from the log's hard state *before* the
 node may participate — a restarted node can never forget a vote it cast.
@@ -79,26 +79,100 @@ step-down: adopt term, clear vote, persist, become follower, fresh randomized
 timeout. Stale responses (older term) and duplicates (already-counted voter)
 are ignored — vote counts are keyed by voter ID, never incremented blindly.
 
-## AppendEntries in Phase 5
+## AppendEntries: receiving side
 
-Phase 5's leader sends **empty heartbeats only**. The receiver implements
-the liveness half plus an honest consistency reply:
+A follower processes every AppendEntries in this order (Raft §5.3):
 
-- term < ours → reject, *no* timer reset (a partitioned ex-leader must not
-  postpone our elections);
-- term > ours → adopt + persist; valid-term message → step down if needed,
-  learn `leaderID`, **reset the election timer** (even on a rejected
-  consistency check — the leader is alive, that is what matters);
-- `prevLogIndex/prevLogTerm` checked against our log (`index 0` is the base
-  case; below the compaction point fails);
-- **entries in the request are refused**, not silently ignored: replication
-  lands in Phase 6, and the Phase-5 leader never sends them.
+1. **Term handling** — term < ours → reject untouched, *no* timer reset (a
+   partitioned ex-leader must not postpone our elections); term > ours →
+   adopt + persist, old vote cleared.
+2. **Leadership acceptance** — any valid-term message steps us down if
+   needed, teaches `leaderID`, and **resets the election timer** — even if
+   the request is rejected below. The timer measures leader liveness, not
+   request validity.
+3. **Consistency check** on `(prevLogIndex, prevLogTerm)` — *before any
+   mutation*. A rejected request never truncates our log; index 0 is the
+   base case (`Term(0) = 0`), below the compaction point fails.
+4. **Append** — entries must form the exact continuation of `prevLog`
+   (malformed indexes are refused untouched). We skip entries we already
+   hold with the same term, truncate our suffix at the first divergent
+   index (logged as `log_truncated`), append the rest and **fsync before
+   acknowledging** — fsync-before-ack, so an acked entry survives our crash.
+5. **Commit propagation** — `commitIndex = max(commitIndex,
+   min(LeaderCommit, last index we now know about))`: never backward, never
+   past what our log actually holds.
 
-## What is deliberately not here yet (Phase 6+)
+## Replication: the leader's side (Phase 6)
 
-Entries in heartbeats, `nextIndex/matchIndex`, majority-based commit,
-`LeaderCommit` propagation, `AppendEntries` response handling on the leader,
-conflict-index fast backoff, proposals from clients.
+Each leader rebuilds per-peer progress at `becomeLeader` — never carried
+across terms:
+
+| Field | Meaning |
+|---|---|
+| `next` | next index to send that peer; starts optimistically at `lastIndex + 1` |
+| `match` | highest index **confirmed durable** on that peer; starts at 0, only acks raise it |
+| `inflight` | one AppendEntries RPC outstanding to this peer (responses can't reorder against each other) |
+| `pending` | a trigger (proposal/heartbeat) arrived while busy — resend as soon as the response lands |
+
+Sends are triggered by proposals, by the heartbeat tick (30 ms), and by
+responses (remainder after the batch cap, or rejection backoff). Entries are
+capped at 64 per RPC; a leader farther ahead continues on the response.
+Heartbeats ride the same path: empty `Entries` when caught up, with
+`LeaderCommit` piggybacked — the commit watermark reaches followers within
+one heartbeat period.
+
+On a **rejection**, `next` steps back one index and retries immediately;
+because it strictly decreases, the loop terminates at the true match point.
+(The dissertation's conflict-term hints — jumping whole terms in one round
+trip — are deliberately deferred: correctness first, and the cost of the
+baseline only shows up in measurement phases.)
+
+Outbound RPC failures never spin: the slot is cleared and the next
+heartbeat retries (~30 ms), which is also how transport recovery plays out.
+
+## Commit rule (Raft §5.4.2, Figure 8)
+
+`commitIndex` advances to the highest index `N` where **both** hold:
+
+1. a **majority** of the cluster has `N` durable (leader's own synced log
+   counts as one replica), and
+2. `term(N) == currentTerm`.
+
+The term condition is the whole point of Figure 8: counting replicas of a
+*previous* term's entry can commit an entry that a later divergent leader
+would overwrite. Previous-term entries commit **indirectly** — a current-term
+entry above them commits, carrying them along.
+
+That is why `becomeLeader` appends a **no-op entry** (empty payload, current
+term) before anything else: it confirms leadership with current-term content
+and gives the commit rule something in the current term to wait on, so a
+restarted leader's `commitIndex` never stalls waiting for a client to write.
+
+Followers advance `commitIndex` only via `LeaderCommit`; the leader only via
+the rule above. Both are reflected in `Status()`.
+
+## Proposals (Phase 6)
+
+`Node.Propose(ctx, payload)` is leader-only and blocks until the entry is
+**committed** — durable on a majority under the rule above — returning its
+log index:
+
+- follower/candidate → `ErrNotLeader` immediately (client routing is Phase 8);
+- leadership lost while in flight → `ErrLeadershipLost`, *fast* — the entry's
+  fate is unknowable from the old leader (it may still commit under the new
+  one), which is exactly why blind client retries wait for Phase 9 dedup;
+- empty payload → `ErrEmptyProposal` (empty is reserved for internal no-ops);
+- cancelling `ctx` does **not** retract an appended entry.
+
+Waiters are registered per index in the loop and released when `commitIndex`
+passes them — or failed en masse on step-down. A single-node cluster commits
+inside `Propose` itself (majority of one).
+
+## What is deliberately not here yet (Phase 7+)
+
+Apply to the state machine (`lastApplied`, serving reads), conflict-term
+backoff hints (deferred to measurement), snapshots/`InstallSnapshot`,
+client request routing, dedup, ReadIndex.
 
 ## How this phase is tested
 
@@ -111,10 +185,16 @@ conflict-index fast backoff, proposals from clients.
 | `TestSplitVoteResolvesOnRetry` | zero-grant round → new term → eventual leader |
 | `TestVotePersistedBeforeResponse` | on-disk vote matches the response the instant it is sent; double vote in one term refused; stale term refused |
 | `TestVoteDeniedWhenCandidateLogBehind` | election restriction (§5.4.1) incl. equal-term/shorter-log cases |
-| `TestAppendEntriesHeartbeatAndConsistency` | stale heartbeat rejected without timer reset; valid one adopts leader + resets timer; entries refused; prevLog checked |
+| `TestAppendEntriesHeartbeatAndConsistency` | stale heartbeat rejected without timer reset; valid one adopts leader + resets timer; prevLog checked |
 | `TestStaleVoteResponseIgnored`, `TestDuplicateGrantCountsOnce`, `TestHigherTermResponseStepDownClearsVote`, `TestUnreachablePeerDoesNotBlockElection` | response-handling safety, driven synchronously (no polling) |
-| `TestThreeNodeElectsLeaderKillReelect` (real gRPC) | elect → kill leader → re-elect at higher term → restart old leader → converge to one leader |
-| `TestFiveNodeMinorityCannotElect` (real gRPC) | 2-of-5 minority never elects; restoring a third node enables election |
+| `TestLeaderReplicatesAndCommits` | proposal ships with correct prevLog anchor; one follower ack commits a 3-node majority; entry durable in the log; commit watermark rides the next heartbeat |
+| `TestCommitRequiresMajority` | 5-node: one ack commits nothing (however long we wait); the second completes 3-of-5 |
+| `TestCommitRuleRequiresCurrentTerm` | Figure 8 in isolation: majority on a prior-term entry does **not** commit; a current-term entry above it does |
+| `TestFollowerLogReplication` | divergent suffix replaced; rejected consistency check mutates nothing; extensions fsync'd; LeaderCommit clamped; malformed requests refused untouched |
+| `TestNextIndexBacksOffOnReject` | rejection walks `next` back to the follower's real log; resend anchored correctly |
+| `TestProposeValidation`, `TestPendingProposalFailsOnLeadershipLoss` | not-leader/empty rejections; in-flight proposal fails fast on step-down |
+| `TestThreeNodeElectsLeaderKillReelect`, `TestFiveNodeMinorityCannotElect` (real gRPC) | election under the replication/no-op traffic |
+| `TestReplicationSurvivesLeaderKill` (real gRPC) | sequential proposals commit; a killed follower restarts and converges byte-for-byte; killing the leader yields a newer leader holding every committed payload |
 
 Unit tests inject time (`Tick`) and the network (scripted transport)
 directly, so all timeout/ordering claims are deterministic; the two

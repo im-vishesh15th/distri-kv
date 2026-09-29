@@ -303,13 +303,20 @@ func TestMajorityGrantsElectLeader(t *testing.T) {
 		return s.Role == raft.RoleLeader && s.Term == 1 && s.LeaderID == "n1"
 	})
 
-	// Immediate heartbeat asserts authority (empty entries, correct term).
+	// Immediate replication asserts authority: the term-1 no-op entry (one
+	// entry, empty payload) rides the first AppendEntries.
 	hb := recvAppCall(t, h.tr.appCalls)
 	if hb.to != "n2" && hb.to != "n3" {
 		t.Fatalf("heartbeat to unknown peer %s", hb.to)
 	}
-	if hb.req.Term != 1 || hb.req.LeaderId != "n1" || len(hb.req.Entries) != 0 {
-		t.Fatalf("bad heartbeat: %+v", hb.req)
+	if hb.req.Term != 1 || hb.req.LeaderId != "n1" {
+		t.Fatalf("bad heartbeat header: %+v", hb.req)
+	}
+	if len(hb.req.Entries) != 1 {
+		t.Fatalf("expected the leader no-op entry, got %d entries", len(hb.req.Entries))
+	}
+	if e := hb.req.Entries[0]; e.Index != 1 || e.Term != 1 || len(e.Payload) != 0 {
+		t.Fatalf("bad no-op entry: %+v", e)
 	}
 }
 
@@ -497,8 +504,7 @@ func TestVoteDeniedWhenCandidateLogBehind(t *testing.T) {
 }
 
 // AppendEntries: stale leaders rejected (no timer reset), valid leaders
-// recognized (timer reset, leader learned), entries refused (Phase 6),
-// prevLog consistency enforced.
+// recognized (timer reset, leader learned), prevLog consistency enforced.
 func TestAppendEntriesHeartbeatAndConsistency(t *testing.T) {
 	h := startNode(t, "n1", 1, "n1", "n2", "n3")
 	ctx := context.Background()
@@ -538,16 +544,9 @@ func TestAppendEntriesHeartbeatAndConsistency(t *testing.T) {
 		t.Fatalf("campaigned too early after heartbeat: %+v", s)
 	}
 
-	// Entries are refused until Phase 6 — never silently swallowed.
-	r, err = h.n.HandleAppendEntries(ctx, &raftpb.AppendEntriesRequest{
-		Term: 7, LeaderId: "n3", PrevLogIndex: 0, PrevLogTerm: 0,
-		Entries: []*raftpb.LogEntry{{Index: 1, Term: 7, Payload: []byte("x")}},
-	})
-	if err != nil || r.Success {
-		t.Fatalf("entries should be refused in Phase 5: %+v err=%v", r, err)
-	}
-
-	// prevLog consistency on an empty log: index 5 can't match…
+	// Entries now replicate (Phase 6) — see TestFollowerLogReplication for
+	// the append/truncate/commit matrix. Here: prevLog consistency on an
+	// empty log — index 5 can't match…
 	r, err = h.n.HandleAppendEntries(ctx, &raftpb.AppendEntriesRequest{
 		Term: 7, LeaderId: "n3", PrevLogIndex: 5, PrevLogTerm: 0,
 	})

@@ -17,9 +17,9 @@ func (n *Node) onTick() error {
 		n.heartbeatElapsed++
 		if n.heartbeatElapsed >= n.heartTO {
 			n.heartbeatElapsed = 0
-			if err := n.broadcastHeartbeat(); err != nil {
-				return err
-			}
+			// Heartbeats ride the replication path: entries when behind,
+			// empty prevLog probe when caught up, LeaderCommit piggybacked.
+			n.broadcastAppend()
 		}
 	default:
 		n.electionElapsed++
@@ -117,16 +117,54 @@ func (n *Node) onVoteResponse(e voteRespEvent) error {
 	return nil
 }
 
-// becomeLeader installs leader state and asserts authority immediately with
-// an empty AppendEntries heartbeat (followers reset their timers on it).
+// becomeLeader installs leader state, per-peer replication progress, and a
+// no-op entry for this term — then replicates immediately.
+//
+// The no-op (empty payload, current term) does two jobs: it asserts
+// leadership with current-term content, and it lets the commit rule see a
+// current-term entry so entries carried over from previous terms can commit
+// indirectly (Figure 8). Without it, a new leader's commitIndex would stall
+// until some client happened to write.
 func (n *Node) becomeLeader() error {
 	n.role = RoleLeader
 	n.leaderID = n.id
 	n.votes = nil
 	n.heartbeatElapsed = 0
-	// nextIndex/matchIndex: Phase 6 (replication).
+
+	// Progress starts optimistically at last+1; rejections walk it back to
+	// the true match point. match starts at 0 — only acknowledgments count.
+	next := n.rlog.LastIndex() + 1
+	n.progress = make(map[transport.NodeID]*peerProgress, len(n.peers))
+	for _, p := range n.peers {
+		if p == n.id {
+			continue
+		}
+		n.progress[p] = &peerProgress{next: next, match: 0}
+	}
+
 	n.logfInfo("became_leader")
-	return n.broadcastHeartbeat()
+
+	if err := n.rlog.Append([]raftlog.Entry{{Index: next, Term: n.term, Payload: nil}}); err != nil {
+		return fmt.Errorf("append leader no-op: %w", err)
+	}
+	if err := n.rlog.Sync(); err != nil {
+		return fmt.Errorf("sync leader no-op: %w", err)
+	}
+
+	n.broadcastAppend()
+	// Single-node cluster: majority is ourselves; the no-op commits now.
+	return n.maybeAdvanceCommit()
+}
+
+// leaveLeadership transitions any role → follower, failing proposals this
+// node can no longer commit on its own authority. Callers log the transition.
+func (n *Node) leaveLeadership() {
+	if n.role == RoleLeader {
+		n.failWaiters(ErrLeadershipLost)
+	}
+	n.role = RoleFollower
+	n.votes = nil
+	n.progress = nil
 }
 
 // stepDown abandons candidacy/leadership because a higher term was observed.
@@ -143,36 +181,9 @@ func (n *Node) stepDown(newTerm uint64, reason string) error {
 	if n.role != RoleFollower {
 		n.logf("step_down", "reason", reason, "prev_term", prev, "was", string(n.role))
 	}
-	n.role = RoleFollower
-	n.votes = nil
+	n.leaveLeadership()
 	n.leaderID = ""
 	n.resetElectionTimer()
-	return nil
-}
-
-// broadcastHeartbeat sends an empty AppendEntries to every peer. In Phase 5
-// this is pure liveness (timer reset + leadership assertion); Phase 6 puts
-// entries in it.
-func (n *Node) broadcastHeartbeat() error {
-	for _, p := range n.peers {
-		if p == n.id {
-			continue
-		}
-		to := p
-		// Fresh message per peer — protobuf messages are never copied.
-		req := &raftpb.AppendEntriesRequest{
-			Term:         n.term,
-			LeaderId:     string(n.id),
-			PrevLogIndex: n.rlog.LastIndex(),
-			PrevLogTerm:  n.rlog.LastTerm(),
-			LeaderCommit: n.commitIndex,
-		}
-		go func() {
-			// Phase 6 consumes the response for replication bookkeeping;
-			// Phase 5 needs only the sending side (liveness).
-			_, _ = n.transport.AppendEntries(n.rpcCtx, to, req)
-		}()
-	}
 	return nil
 }
 

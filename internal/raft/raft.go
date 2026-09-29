@@ -51,6 +51,25 @@ const (
 // ErrStopped is returned by node entry points after Run has exited.
 var ErrStopped = errors.New("raft: node stopped")
 
+// Proposal errors (Phase 6).
+var (
+	// ErrNotLeader: Propose was called on a follower/candidate. Check
+	// Status().LeaderID for the redirect target (Phase 8 does this for
+	// clients).
+	ErrNotLeader = errors.New("raft: not leader")
+
+	// ErrLeadershipLost: the proposal was appended locally but the node
+	// stopped being leader before it committed. The entry MAY still commit
+	// under the new leader — the outcome is unknowable here, which is
+	// exactly why client retries wait for Phase 9 dedup.
+	ErrLeadershipLost = errors.New("raft: leadership lost before commit")
+
+	// ErrEmptyProposal: empty payloads are reserved for internal no-op
+	// entries (appended by new leaders), so a client empty proposal would
+	// be indistinguishable from one.
+	ErrEmptyProposal = errors.New("raft: empty proposal")
+)
+
 // Status is a snapshot of node state for observability and tests.
 // It is safe to call from any goroutine.
 type Status struct {
@@ -162,9 +181,36 @@ type appReply struct {
 	err  error
 }
 
+// appRespEvent is an outbound AppendEntries reply (Phase 6). term is the
+// REQUEST's term — errors carry no response, so the event must remember
+// which leadership epoch it belongs to.
+type appRespEvent struct {
+	from transport.NodeID
+	term uint64
+	resp *raftpb.AppendEntriesResponse
+	err  error
+}
+
+func (appRespEvent) isEvent() {}
+
 type statusEvent struct{ reply chan Status }
 
 func (statusEvent) isEvent() {}
+
+// proposeEvent asks the leader to replicate a payload. The reply is NOT
+// written here: it is released when the entry commits (or fails fast on
+// leadership loss), see Propose.
+type proposeEvent struct {
+	payload []byte
+	reply   chan proposeReply
+}
+
+func (proposeEvent) isEvent() {}
+
+type proposeReply struct {
+	index uint64
+	err   error
+}
 
 // Node is a single Raft replica. Create with New, then run exactly one
 // goroutine via Run; drive time with Tick (or StartTicker).
@@ -198,14 +244,23 @@ type Node struct {
 	votedFor transport.NodeID
 	leaderID transport.NodeID
 
-	// commitIndex/lastApplied are advanced by Phase 6/7; declared now so
-	// Status is stable.
+	// commitIndex advances by majority ack (Phase 6, leader) or LeaderCommit
+	// (follower); lastApplied advances when the state machine consumes
+	// committed entries (Phase 7). Status reports both.
 	commitIndex uint64
 	lastApplied uint64
 
 	// votes dedupes grants for the current candidacy; len() is the
 	// distinct-vote count.
 	votes map[transport.NodeID]bool
+
+	// progress is the leader's per-peer replication state (next/match/
+	// in-flight), rebuilt fresh at every becomeLeader. Nil while follower.
+	progress map[transport.NodeID]*peerProgress
+
+	// waiters holds Propose callers blocked until their index commits;
+	// released on commit advance, failed on leadership loss.
+	waiters map[uint64][]chan proposeReply
 
 	electionElapsed  int
 	electionTimeout  int
@@ -264,6 +319,7 @@ func New(cfg Config) (*Node, error) {
 
 		role:            RoleFollower,
 		votes:           make(map[transport.NodeID]bool),
+		waiters:         make(map[uint64][]chan proposeReply),
 		electionTimeout: cfg.ElectionTicks,
 	}
 
@@ -323,6 +379,41 @@ func (n *Node) Status() Status {
 		return s
 	case <-n.done:
 		return Status{ID: n.id}
+	}
+}
+
+// Propose replicates payload through the Raft log and blocks until the entry
+// is COMMITTED — durable on a majority, with the current-term commit rule
+// applied. Returns the entry's log index.
+//
+// Errors: ErrNotLeader (follower/candidate — see Status().LeaderID),
+// ErrLeadershipLost (appended locally but the node lost leadership before
+// commit; the entry may still commit elsewhere), ErrEmptyProposal,
+// ErrStopped, or ctx.Err().
+//
+// Cancelling ctx does NOT retract an appended entry: it may still commit.
+// Distinguishing "committed" from "never happened" on retry is Phase 9's
+// dedup job — until then, callers must not blindly retry writes.
+func (n *Node) Propose(ctx context.Context, payload []byte) (uint64, error) {
+	if len(payload) == 0 {
+		return 0, ErrEmptyProposal
+	}
+	reply := make(chan proposeReply, 1)
+	ev := proposeEvent{payload: append([]byte(nil), payload...), reply: reply}
+	select {
+	case n.events <- ev:
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-n.done:
+		return 0, ErrStopped
+	}
+	select {
+	case r := <-reply:
+		return r.index, r.err
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-n.done:
+		return 0, ErrStopped
 	}
 }
 
@@ -399,6 +490,9 @@ func (n *Node) handle(ev event) error {
 	case voteRespEvent:
 		return n.onVoteResponse(e)
 
+	case appRespEvent:
+		return n.onAppendResponse(e)
+
 	case appReqEvent:
 		resp, err := n.onAppendEntries(e.req)
 		e.reply <- appReply{resp: resp, err: err}
@@ -407,6 +501,9 @@ func (n *Node) handle(ev event) error {
 	case statusEvent:
 		e.reply <- n.snapshot()
 		return nil
+
+	case proposeEvent:
+		return n.onPropose(e)
 
 	default:
 		return fmt.Errorf("raft: unknown event %T", ev)

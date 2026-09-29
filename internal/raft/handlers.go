@@ -1,7 +1,10 @@
 package raft
 
 import (
+	"fmt"
+
 	raftpb "distrikv/gen/raft/v1"
+	"distrikv/internal/raftlog"
 	"distrikv/internal/transport"
 )
 
@@ -39,8 +42,7 @@ func (n *Node) onVoteRequest(req *raftpb.RequestVoteRequest) (*raftpb.RequestVot
 		if n.role != RoleFollower {
 			n.logf("step_down", "reason", "higher_term_in_vote_request", "was", string(n.role))
 		}
-		n.role = RoleFollower
-		n.votes = nil
+		n.leaveLeadership()
 		n.leaderID = ""
 		n.resetElectionTimer()
 	}
@@ -69,14 +71,21 @@ func (n *Node) logUpToDate(candIndex, candTerm uint64) bool {
 	return candTerm > myTerm || (candTerm == myTerm && candIndex >= myIndex)
 }
 
-// onAppendEntries decides one AppendEntries (loop goroutine).
+// onAppendEntries processes one AppendEntries (loop goroutine) — heartbeat
+// liveness AND log replication (Phase 6).
 //
-// Phase 5 uses this for leader liveness: a follower that hears a valid-term
-// leader resets its election timer (the leader keeps the cluster alive by
-// voice alone). The log-consistency half of the reply is already honest —
-// the prevLog check below is the same one replication will rely on in Phase 6
-// — but entry transfer itself is not implemented yet, so a request carrying
-// entries is refused rather than silently ignored.
+// Order matters and mirrors Raft §5.3:
+//
+//  1. Term handling (stale → reject untouched; newer → adopt + persist).
+//  2. Leadership acceptance: step down, learn leaderID, RESET the election
+//     timer — for any valid-term message, even one we will reject below:
+//     an alive leader is what the timer measures.
+//  3. Consistency check on (prevLogIndex, prevLogTerm) — BEFORE any
+//     mutation: a rejected request must never truncate our log.
+//  4. Append: find the first divergent index, truncate the tail, append
+//     the rest, fsync — durable before we acknowledge.
+//  5. Commit propagation: commitIndex = max(current, min(leaderCommit,
+//     last index we now know exists)).
 func (n *Node) onAppendEntries(req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error) {
 	resp := &raftpb.AppendEntriesResponse{Term: n.term, Success: false}
 
@@ -95,29 +104,101 @@ func (n *Node) onAppendEntries(req *raftpb.AppendEntriesRequest) (*raftpb.Append
 	}
 
 	// Valid-term leader message: accept its authority, defer our election.
-	// This covers candidate→follower (another candidate won) and
-	// leader→leader (split brain at the same term — shouldn't happen, but
-	// stepping down keeps us safe if it ever does).
+	// Covers candidate→follower (another candidate won) and leader→leader
+	// (split brain at the same term — shouldn't happen, but stepping down
+	// keeps us safe if it ever does).
 	if n.role != RoleFollower {
-		n.logf("step_down", "reason", "valid_leader_heartbeat",
-			"was", string(n.role), "leader", req.LeaderId)
+		n.logf("step_down", "reason", "valid_leader_append", "was", string(n.role), "leader", req.LeaderId)
 	}
-	n.role = RoleFollower
-	n.votes = nil
+	n.leaveLeadership()
 	n.leaderID = transport.NodeID(req.LeaderId)
 	n.resetElectionTimer()
 
-	if len(req.Entries) > 0 {
-		// Entry transfer lands in Phase 6 (replication). Our Phase-5 leader
-		// only ever sends empty heartbeats, so this cannot fire yet; refuse
-		// loudly instead of pretending to accept.
+	// Consistency check first — nothing below may run on a failed match.
+	if !n.prevLogMatches(req.PrevLogIndex, req.PrevLogTerm) {
 		resp.Term = n.term
 		return resp, nil
 	}
 
-	resp.Success = n.prevLogMatches(req.PrevLogIndex, req.PrevLogTerm)
+	// Defensive: entries must form the exact continuation of prevLog.
+	// A violation is a protocol error at the sender; reject without mutation.
+	for i, e := range req.Entries {
+		if e.Index != req.PrevLogIndex+1+uint64(i) {
+			n.logf("append_entries_malformed", "leader", req.LeaderId, "position", i,
+				"got_index", e.Index, "want_index", req.PrevLogIndex+1+uint64(i))
+			resp.Term = n.term
+			return resp, nil
+		}
+	}
+
+	lastNew := req.PrevLogIndex + uint64(len(req.Entries))
+	if len(req.Entries) > 0 {
+		if err := n.applyEntries(req); err != nil {
+			return nil, err // disk failure: halt (cannot uphold safety)
+		}
+	}
+
+	// Commit propagation (never moves backward; never past what we have).
+	if req.LeaderCommit > n.commitIndex {
+		c := req.LeaderCommit
+		if c > lastNew {
+			c = lastNew
+		}
+		if c > n.commitIndex {
+			n.commitIndex = c
+			n.logf("commit_advanced", "commit_index", n.commitIndex, "via", "leader_commit")
+		}
+	}
+
+	resp.Success = true
 	resp.Term = n.term
 	return resp, nil
+}
+
+// applyEntries merges the request's entries into our log: matching prefixes
+// are skipped, the first divergent index truncates our tail, and everything
+// from there on is appended and fsynced. Loop goroutine only.
+func (n *Node) applyEntries(req *raftpb.AppendEntriesRequest) error {
+	followerLast := n.rlog.LastIndex()
+	for i, e := range req.Entries {
+		idx := req.PrevLogIndex + 1 + uint64(i)
+		if idx > followerLast {
+			// Past our end: append the remainder.
+			return n.appendTail(req.Entries[i:])
+		}
+		t, err := n.rlog.Term(idx)
+		if err != nil {
+			// idx is within [firstIndex, lastIndex] (prevLog matched), so
+			// this is a structural failure — refuse to guess.
+			return fmt.Errorf("term at %d: %w", idx, err)
+		}
+		if t == e.Term {
+			continue // identical entry already durable
+		}
+		// Divergence: our suffix was written by a different history.
+		if err := n.rlog.TruncateSuffix(idx); err != nil {
+			return fmt.Errorf("truncate divergent suffix at %d: %w", idx, err)
+		}
+		n.logf("log_truncated", "at", idx, "our_term", t, "leader_term", e.Term)
+		return n.appendTail(req.Entries[i:])
+	}
+	return nil // every entry already present and durable
+}
+
+// appendTail writes entries to disk and syncs before the caller
+// acknowledges them (fsync-before-ack).
+func (n *Node) appendTail(wire []*raftpb.LogEntry) error {
+	batch := make([]raftlog.Entry, 0, len(wire))
+	for _, e := range wire {
+		batch = append(batch, raftlog.Entry{Index: e.Index, Term: e.Term, Payload: e.Payload})
+	}
+	if err := n.rlog.Append(batch); err != nil {
+		return fmt.Errorf("append entries: %w", err)
+	}
+	if err := n.rlog.Sync(); err != nil {
+		return fmt.Errorf("sync entries: %w", err)
+	}
+	return nil
 }
 
 // prevLogMatches is the Raft §5.3 consistency check: does our log actually

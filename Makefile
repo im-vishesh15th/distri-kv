@@ -16,7 +16,7 @@ proto:
 	protoc \
 		--go_out=. --go_opt=module=distrikv \
 		--go-grpc_out=. --go-grpc_opt=module=distrikv \
-		proto/kv.proto
+		proto/kv.proto proto/raft.proto
 
 build:
 	go build -o bin/distrikv ./cmd/server

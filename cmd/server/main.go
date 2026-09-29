@@ -1,8 +1,9 @@
 // Command server runs a DistriKV node.
 //
-// Phase 3: single node, in-memory engine, gRPC API, persistent Raft log
-// opened at -data-dir (recovery reported at startup). Phase 4 adds peers
-// (cluster membership); Phase 5+ puts the Raft core on top of the log.
+// Phase 4: single node still (no Raft core yet), in-memory engine, gRPC API,
+// persistent Raft log at -data-dir, static cluster membership via -peers, and
+// the gRPC transport serving Ping/RequestVote/AppendEntries (inbound Raft RPCs
+// report Unimplemented until the Raft core attaches in Phase 5).
 package main
 
 import (
@@ -22,6 +23,8 @@ import (
 	"distrikv/internal/kv"
 	"distrikv/internal/raftlog"
 	"distrikv/internal/server"
+	"distrikv/internal/transport"
+	grpctransport "distrikv/internal/transport/grpc"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
@@ -29,10 +32,11 @@ import (
 
 func main() {
 	var (
-		id      = flag.String("id", "node1", "node identity (used from Phase 4)")
-		addr    = flag.String("addr", ":8080", "gRPC listen address")
-		dataDir = flag.String("data-dir", "data", "directory for persistent state (persistent Raft log)")
-		debug   = flag.Bool("debug", false, "enable debug-level structured logging")
+		id        = flag.String("id", "node1", "node identity")
+		addr      = flag.String("addr", ":8080", "gRPC listen address")
+		dataDir   = flag.String("data-dir", "data", "directory for persistent state (persistent Raft log)")
+		peersSpec = flag.String("peers", "", "static cluster membership: id@host:port,id@host:port,... (must include this node; empty = standalone)")
+		debug     = flag.Bool("debug", false, "enable debug-level structured logging")
 	)
 	flag.Parse()
 
@@ -42,13 +46,13 @@ func main() {
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 
-	if err := run(*id, *addr, *dataDir, log); err != nil {
+	if err := run(*id, *addr, *dataDir, *peersSpec, log); err != nil {
 		log.Error("server_exit", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 }
 
-func run(id, addr, dataDir string, log *slog.Logger) error {
+func run(id, addr, dataDir, peersSpec string, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -73,6 +77,32 @@ func run(id, addr, dataDir string, log *slog.Logger) error {
 		slog.Int64("truncated_bytes", rec.TruncatedBytes),
 	)
 
+	// Static cluster membership + transport (Phase 4). The Raft core is not
+	// attached yet (Phase 5): outbound Raft RPCs work, inbound ones report
+	// Unimplemented until SetHandler is called.
+	peers, err := transport.ParsePeers(peersSpec)
+	if err != nil {
+		return fmt.Errorf("parse peers: %w", err)
+	}
+	rt, err := grpctransport.New(transport.NodeID(id), peers, nil)
+	if err != nil {
+		return fmt.Errorf("transport: %w", err)
+	}
+	defer func() {
+		if cerr := rt.Close(); cerr != nil {
+			log.Error("transport_close", slog.String("error", cerr.Error()))
+		}
+	}()
+	peerIDs := make([]string, 0, len(peers))
+	for _, p := range peers {
+		peerIDs = append(peerIDs, string(p.ID))
+	}
+	log.Info("cluster_configured",
+		slog.String("node_id", id),
+		slog.String("addr", addr),
+		slog.Any("members", peerIDs),
+	)
+
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
@@ -80,6 +110,7 @@ func run(id, addr, dataDir string, log *slog.Logger) error {
 
 	grpcServer := grpc.NewServer()
 	kv1.RegisterKVServiceServer(grpcServer, server.NewService(engine, log))
+	grpctransport.RegisterRaftService(grpcServer, rt)
 	// Reflection lets grpcurl/gRPC tooling discover the API without stubs.
 	reflection.Register(grpcServer)
 

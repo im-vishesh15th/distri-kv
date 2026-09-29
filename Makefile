@@ -1,4 +1,4 @@
-.PHONY: test test-race vet fmt build run tidy
+.PHONY: test test-race vet fmt build run tidy proto
 
 test:
 	go test ./...
@@ -11,6 +11,12 @@ vet:
 
 fmt:
 	go fmt ./...
+
+proto:
+	protoc \
+		--go_out=. --go_opt=module=distrikv \
+		--go-grpc_out=. --go-grpc_opt=module=distrikv \
+		proto/kv.proto
 
 build:
 	go build -o bin/distrikv ./cmd/server

@@ -1,0 +1,145 @@
+// Package server implements the client-facing gRPC KVService over a kv.Engine.
+//
+// This is Phase 2: single node, in-memory. From Phase 4 on the same service
+// fronts the Raft layer; the wire API does not change.
+//
+// Error mapping (server -> wire -> SDK): the status code is the contract.
+//
+//	kv.ErrKeyNotFound          -> codes.NotFound        -> ErrKeyNotFound
+//	kv.ErrNotInteger           -> codes.FailedPrecondition -> ErrNotInteger
+//	kv.ErrOverflow             -> codes.OutOfRange      -> ErrOverflow
+//	kv.ErrUnknownOp            -> codes.Internal        -> passes through
+//	empty key                  -> codes.InvalidArgument
+//	context cancellation       -> passes through untouched
+//
+// CAS precondition failure is NOT an error: it returns applied=false.
+package server
+
+import (
+	"context"
+	"log/slog"
+	"strconv"
+
+	kv1 "distrikv/gen/kv/v1"
+	"distrikv/internal/kv"
+)
+
+// Service adapts a kv.Engine to the gRPC KVService.
+type Service struct {
+	kv1.UnimplementedKVServiceServer
+
+	engine kv.Engine
+	log    *slog.Logger
+}
+
+// NewService returns a KVService backed by engine. log may be nil (logging
+// is then disabled).
+func NewService(engine kv.Engine, log *slog.Logger) *Service {
+	return &Service{engine: engine, log: log}
+}
+
+// Get returns the value for key or codes.NotFound.
+func (s *Service) Get(ctx context.Context, req *kv1.GetRequest) (*kv1.GetResponse, error) {
+	if err := validateKey(req.Key); err != nil {
+		return nil, err
+	}
+	v, gerr := s.engine.Get(req.Key)
+	if gerr != nil {
+		return nil, mapError(gerr)
+	}
+	return &kv1.GetResponse{Value: v}, nil
+}
+
+// Put stores value at key (upsert).
+// client_id/sequence_number are accepted but ignored until Phase 9.
+func (s *Service) Put(ctx context.Context, req *kv1.PutRequest) (*kv1.PutResponse, error) {
+	if err := validateKey(req.Key); err != nil {
+		return nil, err
+	}
+	if _, perr := s.engine.Apply(kv.Set(req.Key, req.Value)); perr != nil {
+		return nil, mapError(perr)
+	}
+	s.logOp(ctx, "put", req.Key, req.ClientId, req.SequenceNumber)
+	return &kv1.PutResponse{}, nil
+}
+
+// Delete removes key (idempotent).
+func (s *Service) Delete(ctx context.Context, req *kv1.DeleteRequest) (*kv1.DeleteResponse, error) {
+	if err := validateKey(req.Key); err != nil {
+		return nil, err
+	}
+	if _, derr := s.engine.Apply(kv.Delete(req.Key)); derr != nil {
+		return nil, mapError(derr)
+	}
+	s.logOp(ctx, "delete", req.Key, req.ClientId, req.SequenceNumber)
+	return &kv1.DeleteResponse{}, nil
+}
+
+// Exists reports key presence.
+func (s *Service) Exists(ctx context.Context, req *kv1.ExistsRequest) (*kv1.ExistsResponse, error) {
+	if err := validateKey(req.Key); err != nil {
+		return nil, err
+	}
+	return &kv1.ExistsResponse{Exists: s.engine.Exists(req.Key)}, nil
+}
+
+// CAS conditionally stores new_value. applied=false is a normal outcome.
+func (s *Service) CAS(ctx context.Context, req *kv1.CASRequest) (*kv1.CASResponse, error) {
+	if err := validateKey(req.Key); err != nil {
+		return nil, err
+	}
+	// Reconstruct the kv.Command precondition: proto3 bytes cannot express
+	// nil, so expected_exists carries presence and an empty-but-present
+	// expected value becomes a non-nil empty slice.
+	var expected []byte
+	if req.ExpectedExists {
+		expected = req.ExpectedValue
+		if expected == nil {
+			expected = []byte{}
+		}
+	}
+	res, cerr := s.engine.Apply(kv.CAS(req.Key, expected, req.NewValue))
+	if cerr != nil {
+		return nil, mapError(cerr)
+	}
+	return &kv1.CASResponse{Applied: res.Applied}, nil
+}
+
+// Incr atomically adds delta (negative = decrement) to the int64 at key.
+func (s *Service) Incr(ctx context.Context, req *kv1.IncrRequest) (*kv1.IncrResponse, error) {
+	if err := validateKey(req.Key); err != nil {
+		return nil, err
+	}
+	res, ierr := s.engine.Apply(kv.IncrBy(req.Key, req.Delta))
+	if ierr != nil {
+		return nil, mapError(ierr)
+	}
+	n, perr := strconv.ParseInt(string(res.Value), 10, 64)
+	if perr != nil {
+		return nil, mapError(kv.ErrUnknownOp) // unreachable: Apply returns canonical ints
+	}
+	return &kv1.IncrResponse{Value: n}, nil
+}
+
+// validateKey rejects empty keys with codes.InvalidArgument.
+// Key/value size limits belong to the product gateway (Phase P2), not the core.
+func validateKey(key string) error {
+	if key == "" {
+		return statusInvalidKey()
+	}
+	return nil
+}
+
+// logOp emits one debug line per mutation. Debug level keeps normal operation
+// quiet while staying available for distributed-failure investigation.
+func (s *Service) logOp(ctx context.Context, op, key, clientID string, seq uint64) {
+	if s.log == nil {
+		return
+	}
+	s.log.DebugContext(ctx, "kv_op",
+		slog.String("op", op),
+		slog.String("key", key),
+		slog.String("client_id", clientID),
+		slog.Uint64("sequence_number", seq),
+	)
+}

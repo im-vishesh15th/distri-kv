@@ -1,0 +1,108 @@
+// DistriKV public KV API.
+//
+// Phase 2 status: single-node API. Fields client_id/sequence_number are
+// carried on every mutating request from day one so the wire format never
+// breaks when client-session deduplication lands in Phase 9 (the server
+// ignores them until then).
+//
+// Design notes:
+//   - GET/EXISTS are reads: they never enter the Raft log. Mutating RPCs are
+//     the future log entries.
+//   - CAS precondition failure is a NORMAL OUTCOME (applied=false), not a
+//     gRPC error: all replicas must agree on it and Phase 9 will cache it in
+//     the session table like any other response.
+//   - proto3 bytes fields cannot distinguish "absent" from "empty", so CAS
+//     carries an explicit expected_exists flag instead of relying on nil.
+
+syntax = "proto3";
+
+package distrikv.v1;
+
+option go_package = "distrikv/gen/kv/v1;kv1";
+
+// KVService is the DistriKV key-value API. Phases 4+ add a separate internal
+// Raft transport service; this service is the client-facing surface.
+service KVService {
+  // Get returns the value for key, or NOT_FOUND.
+  rpc Get(GetRequest) returns (GetResponse);
+
+  // Put stores value at key (upsert).
+  rpc Put(PutRequest) returns (PutResponse);
+
+  // Delete removes key (idempotent).
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+
+  // Exists reports key presence.
+  rpc Exists(ExistsRequest) returns (ExistsResponse);
+
+  // CAS atomically stores new_value iff the precondition holds.
+  rpc CAS(CASRequest) returns (CASResponse);
+
+  // Incr atomically adds delta to the int64 stored at key
+  // (negative delta = decrement; absent key treated as 0).
+  rpc Incr(IncrRequest) returns (IncrResponse);
+}
+
+message GetRequest {
+  string key = 1;
+}
+
+message GetResponse {
+  bytes value = 1;
+}
+
+message PutRequest {
+  string key = 1;
+  bytes value = 2;
+  // Reserved for Phase 9 client sessions (ignored by the server until then).
+  string client_id = 3;
+  uint64 sequence_number = 4;
+}
+
+message PutResponse {}
+
+message DeleteRequest {
+  string key = 1;
+  string client_id = 2;
+  uint64 sequence_number = 3;
+}
+
+message DeleteResponse {}
+
+message ExistsRequest {
+  string key = 1;
+}
+
+message ExistsResponse {
+  bool exists = 1;
+}
+
+message CASRequest {
+  string key = 1;
+  // expected_exists=false  => the key must be ABSENT for the swap to succeed.
+  // expected_exists=true   => the key must equal expected_value.
+  bool expected_exists = 2;
+  bytes expected_value = 3;
+  bytes new_value = 4;
+  string client_id = 5;
+  uint64 sequence_number = 6;
+}
+
+message CASResponse {
+  // applied=false means the precondition failed — a normal outcome, not an
+  // error.
+  bool applied = 1;
+}
+
+message IncrRequest {
+  string key = 1;
+  // Signed: +1 increments, -1 decrements.
+  int64 delta = 2;
+  string client_id = 3;
+  uint64 sequence_number = 4;
+}
+
+message IncrResponse {
+  // The new value after the operation.
+  int64 value = 1;
+}

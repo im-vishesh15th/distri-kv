@@ -25,10 +25,13 @@ compaction). One log, one source of order.
 ## Quick Start
 
 ```bash
-go run ./cmd/server          # single node (Phase 1+)
-make test                    # unit + integration
-make test-race               # race detector (required before merge)
+go run ./cmd/server &                # start a node (gRPC on :8080)
+go run ./cmd/client set hello world  # write
+go run ./cmd/client get hello        # read -> world
+make test                            # unit + integration
+make test-race                       # race detector (required before merge)
 make vet && make fmt
+make proto                           # regenerate gen/ from proto/kv.proto
 ```
 
 ## Roadmap
@@ -36,8 +39,8 @@ make vet && make fmt
 | Milestone | Phases | What you get | Status |
 |---|---|---|---|
 | **M0 Foundation** | 0 | Repo, design docs, baseline | ✅ done |
-| **M1 Single-node DB** | 1–2 | In-memory engine + gRPC API | 🔄 **current** (Phase 1 done) |
-| **M2 Durable consensus** | 3–7 | Persistent log, election, replication, state machine | ⬜ |
+| **M1 Single-node DB** | 1–2 | In-memory engine + gRPC API | ✅ done |
+| **M2 Durable consensus** | 3–7 | Persistent log, election, replication, state machine | 🔄 **current** (Phase 3 next) |
 | **M3 Hardening** | 8–11 | Leader routing, dedup, atomics, linearizable reads | ⬜ |
 | **M4 Lifecycle** | 12–13 | Snapshots, log compaction, InstallSnapshot | ⬜ |
 | **M5 Proof** | 14–16 | Simulated network, fault tests, linearizability checking | ⬜ |

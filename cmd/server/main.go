@@ -1,9 +1,9 @@
 // Command server runs a DistriKV node.
 //
-// Phase 4: single node still (no Raft core yet), in-memory engine, gRPC API,
-// persistent Raft log at -data-dir, static cluster membership via -peers, and
-// the gRPC transport serving Ping/RequestVote/AppendEntries (inbound Raft RPCs
-// report Unimplemented until the Raft core attaches in Phase 5).
+// Phase 5: single node plus the Raft core — leader election over the gRPC
+// transport with persistent term/vote in the Raft log, in-memory engine, gRPC
+// API, static cluster membership via -peers. Log replication arrives in
+// Phase 6.
 package main
 
 import (
@@ -21,6 +21,7 @@ import (
 
 	kv1 "distrikv/gen/kv/v1"
 	"distrikv/internal/kv"
+	"distrikv/internal/raft"
 	"distrikv/internal/raftlog"
 	"distrikv/internal/server"
 	"distrikv/internal/transport"
@@ -77,9 +78,7 @@ func run(id, addr, dataDir, peersSpec string, log *slog.Logger) error {
 		slog.Int64("truncated_bytes", rec.TruncatedBytes),
 	)
 
-	// Static cluster membership + transport (Phase 4). The Raft core is not
-	// attached yet (Phase 5): outbound Raft RPCs work, inbound ones report
-	// Unimplemented until SetHandler is called.
+	// Static cluster membership + transport (Phase 4).
 	peers, err := transport.ParsePeers(peersSpec)
 	if err != nil {
 		return fmt.Errorf("parse peers: %w", err)
@@ -103,6 +102,29 @@ func run(id, addr, dataDir, peersSpec string, log *slog.Logger) error {
 		slog.Any("members", peerIDs),
 	)
 
+	// Raft core (Phase 5): election over the transport above, hard state
+	// (term/vote) in the persistent log. Empty peers → standalone cluster
+	// of one (the node elects itself).
+	raftPeers := make([]transport.NodeID, len(peers))
+	for i, p := range peers {
+		raftPeers[i] = p.ID
+	}
+	rn, err := raft.New(raft.Config{
+		ID:             transport.NodeID(id),
+		Peers:          raftPeers,
+		Transport:      rt,
+		Log:            rlog,
+		ElectionTicks:  10, // randomized timeout: 100–190 ms at 10 ms/tick
+		HeartbeatTicks: 3,  // 30 ms heartbeats
+		Logger:         log,
+	})
+	if err != nil {
+		return fmt.Errorf("raft core: %w", err)
+	}
+	// Inbound Raft RPCs now reach the core instead of returning
+	// Unimplemented. Must happen before the server starts serving.
+	rt.SetHandler(rn)
+
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
@@ -125,9 +147,33 @@ func run(id, addr, dataDir, peersSpec string, log *slog.Logger) error {
 		}
 	}()
 
+	// Start the Raft event loop and its time source. A halted loop (disk
+	// failure persisting term/vote) takes the node down: without durable
+	// hard state it cannot uphold the one-vote-per-term guarantee.
+	go func() {
+		if raftErr := rn.Run(ctx); raftErr != nil {
+			log.Error("raft_halted",
+				slog.String("node_id", id),
+				slog.String("error", raftErr.Error()),
+			)
+			select {
+			case errCh <- raftErr:
+			default:
+			}
+		}
+	}()
+	raft.StartTicker(ctx, rn, 10*time.Millisecond)
+	if s := rn.Status(); s.Role != "" {
+		log.Info("raft_started",
+			slog.String("node_id", id),
+			slog.String("role", string(s.Role)),
+			slog.Uint64("term", s.Term),
+		)
+	}
+
 	select {
 	case serveErr := <-errCh:
-		return fmt.Errorf("serve: %w", serveErr)
+		return fmt.Errorf("server component stopped: %w", serveErr)
 	case <-ctx.Done():
 		log.Info("server_shutting_down", slog.String("node_id", id))
 	}

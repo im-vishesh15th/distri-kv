@@ -151,7 +151,7 @@ correctness.
 
 | Milestone | Phases | Outcome |
 |---|---|---|
-| M0 Foundation | 0 | Repo, design docs, baseline (✅ current) |
+| M0 Foundation | 0 | Repo, design docs, baseline |
 | M1 Single-node DB | 1–2 | In-memory engine + gRPC API |
 | M2 Durable consensus | 3–7 | Persistent log, election, replication, state machine |
 | M3 Hardening | 8–11 | Routing, dedup, atomics, linearizable reads |

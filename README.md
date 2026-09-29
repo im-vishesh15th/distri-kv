@@ -35,8 +35,8 @@ make vet && make fmt
 
 | Milestone | Phases | What you get | Status |
 |---|---|---|---|
-| **M0 Foundation** | 0 | Repo, design docs, baseline | ✅ **current** |
-| **M1 Single-node DB** | 1–2 | In-memory engine + gRPC API | ⬜ |
+| **M0 Foundation** | 0 | Repo, design docs, baseline | ✅ done |
+| **M1 Single-node DB** | 1–2 | In-memory engine + gRPC API | 🔄 **current** (Phase 1 done) |
 | **M2 Durable consensus** | 3–7 | Persistent log, election, replication, state machine | ⬜ |
 | **M3 Hardening** | 8–11 | Leader routing, dedup, atomics, linearizable reads | ⬜ |
 | **M4 Lifecycle** | 12–13 | Snapshots, log compaction, InstallSnapshot | ⬜ |

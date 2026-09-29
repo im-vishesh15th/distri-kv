@@ -1,15 +1,19 @@
-// Package kv defines the key-value engine contract for DistriKV.
+// Package kv defines the key-value engine contract for DistriKV — the
+// replicated state machine's storage layer.
 //
-// Phase 0 status: interface only — no implementation yet.
+// Phase 1 status: Engine interface + MemEngine (map behind RWMutex) +
+// Command/Apply single-writer path.
 //
 // Design notes (see docs/architecture.md):
 //
-//   - The engine is the replicated state machine's storage layer: Raft commits
-//     an ordered log of commands, and each replica applies those commands to an
-//     Engine in the same order. Determinism of Apply is therefore an invariant.
-//   - The initial implementation (Phase 1) is map[string][]byte behind a
-//     sync.RWMutex, hidden behind this interface so storage internals can
-//     improve later without touching Raft or the state machine.
+//   - Raft commits an ordered log of Commands; every replica applies them to
+//     its Engine in the same order. Determinism of Apply is an invariant.
+//   - All mutations flow through Apply. Reads (Get/Exists) bypass it and are
+//     served under the linearizable-read path (Phase 11).
+//   - The initial implementation is map[string][]byte behind a sync.RWMutex,
+//     hidden behind this interface so storage internals can improve later
+//     without touching Raft or the state machine. Snapshot/Restore join the
+//     interface in Phase 12.
 //   - There is intentionally no separate WAL: the persistent Raft log is the
 //     only durable ordered log in the system.
 package kv
@@ -39,4 +43,9 @@ type Engine interface {
 
 	// Exists reports whether key is present.
 	Exists(key string) bool
+
+	// Apply executes cmd atomically and deterministically, returning the
+	// result recorded for the client response. This is the sole mutation
+	// entry point for the replicated state machine.
+	Apply(cmd Command) (Result, error)
 }

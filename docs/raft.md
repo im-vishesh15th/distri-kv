@@ -206,8 +206,8 @@ engine — identical order, identical commands, identical state.
 The seam back toward clients: `kv.EncodeCommand` serializes a `kv.Command`
 into the entry payload; `kv.SM` decodes and applies it to the engine and
 returns `kv.Result`, which travels back through `Propose` to the gRPC
-service. The service's mutations go through this path; reads (until
-Phase 11) hit the engine directly.
+service. The service's mutations go through this path; reads pass
+`ReadIndex` first (below), then hit the engine.
 
 Since Phase 9, `kv.SM` also owns the **replicated session table** (spec
 §13): before touching the engine it checks the logged command's
@@ -219,10 +219,40 @@ from the entry bytes themselves, in log order, every replica makes it
 identically — dedup is ordinary deterministic SM state, rebuilt by log
 replay on restart and owed a place in future snapshots (Phase 12).
 
-## What is deliberately not here yet (Phase 10+)
+## Linearizable reads: ReadIndex (Phase 11)
+
+"Reads go to the leader" is not a safety argument (spec §14) — a deposed
+leader can still believe it leads while a newer leader commits writes it
+has never seen. `Node.ReadIndex(ctx)` establishes the condition instead,
+in three gates, all enforced by the event loop before it returns
+(`internal/raft/readindex.go`):
+
+1. **Fresh leadership proof.** Raft elects at most one leader per term,
+   so a majority acknowledging *our* term — for `AppendEntries` requests
+   sent *after* the read began — rules out any other leader existing as
+   of that quorum. Freshness is enforced with a send-generation number
+   (`peerProgress.gen`): each read records the generation it needs, and
+   responses to pre-read requests are excluded, so a delayed message
+   from before a partition cannot fake the proof.
+2. **Current-term no-op committed** (Figure 8). Leader completeness
+   already put every previously committed entry in this leader's log at
+   election; the term's no-op committing is what pulls `commitIndex`
+   over them, so the read point genuinely covers everything committed
+   by earlier leaders.
+3. **Applied ≥ read point**, guaranteed *before* `ReadIndex` returns —
+   the state machine, not just the commit cursor, reflects the read.
+
+The gRPC service calls this barrier before every `Get`/`Exists`; a
+follower or candidate returns `ErrNotLeader` → `codes.Aborted`, and the
+SDK discovers the leader and redirects (a read has no side effects, so
+retrying is trivially safe). `GetStatus` deliberately skips the barrier:
+it is a routing hint, not data. Reads cost one heartbeat round trip —
+concurrent reads batch naturally onto the same forced send.
+
+## What is deliberately not here yet (Phase 12+)
 
 Conflict-term backoff hints (deferred to measurement), snapshots/
-`InstallSnapshot` (which must serialize the session table too), ReadIndex.
+`InstallSnapshot` (which must serialize the session table too).
 
 ## How this phase is tested
 
@@ -250,6 +280,9 @@ Conflict-term backoff hints (deferred to measurement), snapshots/
 | `TestFollowerAppliesOnlyCommitted` | uncommitted entries apply nothing; `LeaderCommit` advances apply exactly once, in order |
 | `TestLastAppliedTracksCommitWithoutSM` | nil state machine: apply cursor still tracks commit |
 | `TestStateMachinesConverge` (real gRPC) | D1: mixed workload (set/incr/CAS) converges byte-identically on all replicas; a crashed node with a fresh empty engine replays the recovered log back to identical state |
+| `TestFollowerRefusesDataReads` (real gRPC) | R1's safety condition: a follower holding the value still answers `Aborted` (never a value) to raw `Get`/`Exists`; an SDK dialed at the follower reads by redirect |
+| `TestReadAfterFailoverSeesAcknowledgedWrite` (real gRPC) | acknowledged write → leader killed → immediate read on the new leader sees it (no-op commit + applied-wait close the window) |
+| `TestReadIndexContract` (real gRPC) | `ReadIndex` returns only with `lastApplied ≥ index` (and `commitIndex ≥ index`); a follower's call fails `ErrNotLeader` |
 
 Unit tests inject time (`Tick`) and the network (scripted transport)
 directly, so all timeout/ordering claims are deterministic; the integration

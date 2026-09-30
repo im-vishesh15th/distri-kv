@@ -200,10 +200,13 @@ type appReply struct {
 
 // appRespEvent is an outbound AppendEntries reply (Phase 6). term is the
 // REQUEST's term — errors carry no response, so the event must remember
-// which leadership epoch it belongs to.
+// which leadership epoch it belongs to. gen is the send generation
+// number: ReadIndex uses it to tell fresh acknowledgments (sent after a
+// read began) from delayed responses to older requests (Phase 11).
 type appRespEvent struct {
 	from transport.NodeID
 	term uint64
+	gen  uint64
 	resp *raftpb.AppendEntriesResponse
 	err  error
 }
@@ -280,6 +283,11 @@ type Node struct {
 	// waiters holds Propose callers blocked until their index commits;
 	// released on commit advance, failed on leadership loss.
 	waiters map[uint64][]chan proposeReply
+
+	// ReadIndex (Phase 11): noopIndex is this term's leader no-op (0 =
+	// not leader); readWaiters are reads awaiting the gates in readindex.go.
+	noopIndex   uint64
+	readWaiters []*readWait
 
 	electionElapsed  int
 	electionTimeout  int
@@ -500,8 +508,20 @@ func StartTicker(ctx context.Context, n *Node, period time.Duration) {
 	}()
 }
 
-// handle dispatches one event. A returned error halts the node.
+// handle dispatches one event, then runs the ReadIndex hook: commit
+// advance, apply advance, and fresh quorum acks all arrive as ordinary
+// events, so one post-event point is exactly where pending reads
+// activate and release. A returned error halts the node.
 func (n *Node) handle(ev event) error {
+	if err := n.dispatch(ev); err != nil {
+		return err
+	}
+	n.checkReads()
+	return nil
+}
+
+// dispatch runs the event itself (see handle for the ReadIndex hook).
+func (n *Node) dispatch(ev event) error {
 	switch e := ev.(type) {
 	case tickEvent:
 		return n.onTick()
@@ -528,6 +548,9 @@ func (n *Node) handle(ev event) error {
 
 	case proposeEvent:
 		return n.onPropose(e)
+
+	case readIndexEvent:
+		return n.onReadIndex(e)
 
 	default:
 		return fmt.Errorf("raft: unknown event %T", ev)

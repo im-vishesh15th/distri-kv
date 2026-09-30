@@ -144,6 +144,9 @@ func (n *Node) becomeLeader() error {
 
 	n.logfInfo("became_leader")
 
+	// Remember the no-op's index: ReadIndex gates on this term committing
+	// it (Figure 8 — the read point must cover prior-term commits).
+	n.noopIndex = next
 	if err := n.rlog.Append([]raftlog.Entry{{Index: next, Term: n.term, Payload: nil}}); err != nil {
 		return fmt.Errorf("append leader no-op: %w", err)
 	}
@@ -157,11 +160,14 @@ func (n *Node) becomeLeader() error {
 }
 
 // leaveLeadership transitions any role → follower, failing proposals this
-// node can no longer commit on its own authority. Callers log the transition.
+// node can no longer commit on its own authority, and reads whose
+// leadership proof died with the role. Callers log the transition.
 func (n *Node) leaveLeadership() {
 	if n.role == RoleLeader {
 		n.failWaiters(ErrLeadershipLost)
 	}
+	n.failReads(ErrNotLeader)
+	n.noopIndex = 0
 	n.role = RoleFollower
 	n.votes = nil
 	n.progress = nil

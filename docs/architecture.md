@@ -126,7 +126,9 @@ seeds (Phases 14–15), then verified for linearizability (Phase 16).
 
 - Writes: linearizable — committed only on majority quorum; acknowledged ⇒
   durable across the defined crash model.
-- Reads: linearizable via ReadIndex (Phase 11+).
+- Reads: linearizable via ReadIndex (Phase 11: fresh heartbeat quorum →
+  current-term no-op committed → applied ≥ read point; non-leaders refuse
+  and the SDK redirects).
 - Retries: effectively-once per `(client_id, sequence_number)` with the exact
   guarantee bounds documented (Phase 9). We do not casually claim "exactly once".
 - Atomics: CAS/INCREMENT/DECREMENT apply as one indivisible step in the log's

@@ -2,9 +2,14 @@
 //
 // Phase 7: every mutation is encoded as a kv.Command and replicated through
 // Raft (the Proposer seam) — the engine is mutated only by the apply path,
-// in log order, so all replicas see identical state. Reads (Get/Exists) are
-// served straight from the local engine; making them linearizable is
-// Phase 11's job.
+// in log order, so all replicas see identical state.
+//
+// Phase 11: reads (Get/Exists) pass through Node.ReadIndex before touching
+// the engine — current-term leadership proven by a fresh heartbeat quorum,
+// then wait for apply to reach the read point. Followers and candidates
+// answer codes.Aborted (ErrNotLeader) instead of a possibly stale value;
+// the SDK redirects to the leader. GetStatus stays deliberately
+// non-linearizable: it is a routing hint, not data.
 //
 // Error mapping (server -> wire -> SDK): the status code is the contract.
 //
@@ -19,7 +24,8 @@
 //	missing session fields     -> codes.InvalidArgument
 //	  (Phase 9: mutations require client_id + sequence_number >= 1)
 //	raft.ErrNotLeader          -> codes.Aborted          -> ErrNotLeader
-//	  (provably rejected before append: safe for the SDK to redirect and retry)
+//	  (mutations: rejected before append; reads: not the leader — either
+//	   way provably nothing happened: the SDK redirects and retries)
 //	raft.ErrLeadershipLost /
 //	raft.ErrStopped            -> codes.Unavailable      -> retried (Phase 9)
 //	  (outcome ambiguous, but the retry reuses the same session sequence,
@@ -46,18 +52,28 @@ import (
 type StatusFunc func() raft.Status
 
 // Proposer replicates one encoded Command through Raft and waits for it to
-// be applied, returning the state machine's result for that entry.
-// *raft.Node implements it; the seam exists so the service can be tested
-// against any implementation without importing raft's internals.
+// be applied, returning the state machine's result for that entry; it also
+// exposes ReadIndex, the linearizable-read barrier (Phase 11). *raft.Node
+// implements it; the seam exists so the service can be tested against any
+// implementation without importing raft's internals.
 type Proposer interface {
 	Propose(ctx context.Context, payload []byte) (index uint64, result any, err error)
+
+	// ReadIndex blocks until it is safe to read the local state machine:
+	// current-term leadership proven by a fresh quorum acknowledgment, the
+	// term's no-op committed (so commitIndex covers prior-term commits),
+	// and lastApplied >= the returned index — i.e. a subsequent engine read
+	// reflects every write acknowledged before this call began. Errors:
+	// raft.ErrNotLeader (follower/candidate or leadership lost while
+	// waiting), raft.ErrStopped, ctx.Err().
+	ReadIndex(ctx context.Context) (uint64, error)
 }
 
 // Service adapts a kv.Engine to the gRPC KVService.
 type Service struct {
 	kv1.UnimplementedKVServiceServer
 
-	engine   kv.Engine // reads (Phase 11 revisits); apply-path writes
+	engine   kv.Engine // reads after the ReadIndex barrier; apply-path writes
 	proposer Proposer
 	status   StatusFunc                  // routing: who am I / who leads
 	addrs    map[transport.NodeID]string // routing: leader ID -> dialable addr (-peers)
@@ -95,9 +111,13 @@ func (s *Service) GetStatus(ctx context.Context, _ *kv1.GetStatusRequest) (*kv1.
 	return resp, nil
 }
 
-// Get returns the value for key or codes.NotFound.
+// Get returns the value for key or codes.NotFound. The read is
+// linearizable (spec §14): the ReadIndex barrier gates it.
 func (s *Service) Get(ctx context.Context, req *kv1.GetRequest) (*kv1.GetResponse, error) {
 	if err := validateKey(req.Key); err != nil {
+		return nil, err
+	}
+	if err := s.linearizableRead(ctx); err != nil {
 		return nil, err
 	}
 	v, gerr := s.engine.Get(req.Key)
@@ -105,6 +125,20 @@ func (s *Service) Get(ctx context.Context, req *kv1.GetRequest) (*kv1.GetRespons
 		return nil, mapError(gerr)
 	}
 	return &kv1.GetResponse{Value: v}, nil
+}
+
+// linearizableRead is the ReadIndex barrier every read passes through:
+// confirm this node still leads the current term (fresh heartbeat
+// quorum), wait until the state machine has applied everything committed
+// when the read began, then let the caller read the engine. A follower
+// or candidate returns ErrNotLeader -> codes.Aborted — the SDK redirects
+// rather than risk a stale answer (a read has no side effects, so the
+// redirect is trivially safe).
+func (s *Service) linearizableRead(ctx context.Context) error {
+	if _, err := s.proposer.ReadIndex(ctx); err != nil {
+		return mapRaftError(err)
+	}
+	return nil
 }
 
 // Put stores value at key (upsert), replicated through Raft.
@@ -137,9 +171,12 @@ func (s *Service) Delete(ctx context.Context, req *kv1.DeleteRequest) (*kv1.Dele
 	return &kv1.DeleteResponse{}, nil
 }
 
-// Exists reports key presence.
+// Exists reports key presence (same ReadIndex barrier as Get).
 func (s *Service) Exists(ctx context.Context, req *kv1.ExistsRequest) (*kv1.ExistsResponse, error) {
 	if err := validateKey(req.Key); err != nil {
+		return nil, err
+	}
+	if err := s.linearizableRead(ctx); err != nil {
 		return nil, err
 	}
 	return &kv1.ExistsResponse{Exists: s.engine.Exists(req.Key)}, nil

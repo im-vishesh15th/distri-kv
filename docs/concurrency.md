@@ -17,8 +17,8 @@
   state (`current` endpoint, connection map) is guarded by `mu`.
 - **`kv.MemEngine` is safe for concurrent use**: one `sync.RWMutex`
   around every operation, values defensively copied in and out.
-  Handler reads (`Get` direct-engine until Phase 11) therefore run
-  safely *while the apply loop writes*.
+  Handler reads (`Get`/`Exists`, gated by the ReadIndex barrier since
+  Phase 11) therefore run safely *while the apply loop writes*.
 
 ## Level 2 — the Raft total order (one goroutine owns the truth)
 
@@ -40,6 +40,11 @@
   the database.
 - **Proposer waiters**: `Propose` blocks on per-index channels the loop
   releases when that entry applies; a step-down fails them en masse.
+- **Linearizable reads (Phase 11)**: `ReadIndex` gates every data read
+  in the same loop — fresh heartbeat acknowledgments (send-generation
+  fenced), current-term no-op committed, applied ≥ read point — so a
+  read never observes state below its read point, and a non-leader
+  refuses instead of answering from a possibly stale replica.
 
 ## Level 3 — Multi-Raft / fixed-slot sharding (Phases 17–21, planned)
 
@@ -51,7 +56,7 @@ operation. Not implemented yet — DistriKV is one group until Phase 17.
 
 | State | Written by | Read by | Sync primitive |
 |---|---|---|---|
-| Engine KV data | apply loop (via `SM.Apply`) | gRPC handlers (direct reads until Phase 11) | `MemEngine` `sync.RWMutex` |
+| Engine KV data | apply loop (via `SM.Apply`) | gRPC handlers (after the ReadIndex barrier) | `MemEngine` `sync.RWMutex` |
 | Session table (Phase 9) | apply loop only | apply loop only | none needed — single goroutine, `-race` enforces |
 | Raft term/vote/commit/apply cursor | event loop only | `Status()` readers | loop single-threading; status snapshots |
 | Propose waiters | loop releases them | waiting proposers | per-index channels, failed on step-down |
@@ -67,6 +72,7 @@ operation. Not implemented yet — DistriKV is one group until Phase 17.
 | 1 — one session, many goroutines | `TestConcurrentIncrThroughWire` (exactly N×M through one session) |
 | 1 × 2 — many sessions, one loop | `TestMultiSessionConcurrentIncr`, `TestCASOptimisticLoopConvergence`, `TestDecrementIfPositiveExactlyOneWinner` (spec §8: exactly one winner) |
 | 1 × 2 on a real cluster | `TestConcurrentSessionsThroughCluster` (3 nodes, exact count on every replica) |
+| 2 — ReadIndex in the loop | `TestReadIndexContract` (returned index already applied), `TestFollowerRefusesDataReads`, `TestReadAfterFailoverSeesAcknowledgedWrite` |
 
 The whole suite runs under `go test -race`; any unsynchronized access
 above fails it regardless of assertions.

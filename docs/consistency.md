@@ -1,6 +1,6 @@
 # Consistency — DistriKV
 
-> Status: through Phase 10 (atomic operations + concurrency correctness).
+> Status: through Phase 11 (linearizable reads).
 > Implementations and their proofs are added phase by phase; every claim below
 > must eventually name the test that demonstrates it. Vague phrases like
 > "strong consistency" are forbidden in this project unless immediately
@@ -21,7 +21,9 @@
   point between its invocation and response, and observes all writes
   acknowledged before the read began.
 - **Stale read:** a read that returns a value older than what a completed
-  write established. DistriKV does not serve stale reads on its primary path.
+  write established. DistriKV never serves one on its primary path: data
+  reads pass the ReadIndex barrier (R1) and non-leaders refuse to answer
+  rather than risk it.
 - **Session:** a client identified by `client_id` with a monotonic
   `sequence_number` per request; used for retry deduplication.
 
@@ -32,7 +34,7 @@
 | W1 | An acknowledged write is durable across process crash | fsync'd persistent Raft log before ack | torn-tail/restart tests (log); commit-before-ack in replication tests | 3, 6 |
 | W2 | Writes commit only with majority agreement | Raft majority commit rule | `TestCommitRequiresMajority`; partition fault tests (Phase 14–15) | 6 |
 | W3 | No acknowledged write is lost across leader change | Raft safety + persisted hard state | `TestReplicationSurvivesLeaderKill` | 6 |
-| R1 | Reads are linearizable | ReadIndex: confirm leadership in current term → wait for `lastApplied ≥ readIndex` → serve | stale-follower & leader-change read tests | 11 (planned) |
+| R1 | Reads are linearizable | ReadIndex: fresh heartbeat quorum confirms leadership in the current term (send-generation fenced against delayed responses) → current-term no-op committed so `commitIndex` covers prior-term commits → wait for `lastApplied ≥ readIndex` → serve; non-leaders refuse (`Aborted`), SDK redirects | `TestFollowerRefusesDataReads`, `TestReadAfterFailoverSeesAcknowledgedWrite`, `TestReadIndexContract` (Raft layer: returned index already applied) | 11 |
 | A1 | Atomic operations apply indivisibly: among concurrent attempts exactly one CAS wins, and INCREMENT/DECREMENT never lose an update | each command is one indivisible step in the event loop's in-order apply (linearization point = position in the committed log); the engine holds one lock per operation | `TestMemEngineConcurrentCASExactlyOneWinner`, `TestMemEngineConcurrentApplyAtomicity` (engine); `TestMultiSessionConcurrentIncr`, `TestCASOptimisticLoopConvergence`, `TestDecrementIfPositiveExactlyOneWinner`, `TestConcurrentReadsDuringWrites` (full stack, cross-session); `TestConcurrentSessionsThroughCluster` (3-node); `TestConcurrentIncrThroughWire` (one session) | 10 |
 | S1 | A retried mutation applies at most once, and its original response is replayed | replicated session table in the SM: `(client_id → last seq, response)` decided from the logged command at apply time | `TestDedupReplaysCachedResult`, `TestDedupRejectsSupersededSequence`, `TestDedupReplaysCachedError`, `TestDedupReplaysCachedCASFailure`; `TestDuplicateRetryAppliesOnce` (full stack); failover INCR in `TestClientRoutesWritesToLeader` | 9 |
 | S2 | Session/dedup state survives replication and restart | session table is deterministic SM state: replicated via the log, rebuilt by replay (`TestSessionStateSurvivesReplay`); snapshot serialization still owed | `TestSessionStateSurvivesReplay`; snapshot tests 12 (planned) | 9/12 (planned) |

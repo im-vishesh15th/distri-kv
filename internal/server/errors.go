@@ -62,19 +62,21 @@ func statusErrorInternal(err error) error {
 	return status.Error(codes.Internal, err.Error())
 }
 
-// mapRaftError maps replication outcomes (the Propose seam) before falling
-// through to the kv domain mapping. The split is load-bearing for client
-// routing (Phase 8) and retry safety (Phase 9):
+// mapRaftError maps replication outcomes (the Propose seam) and ReadIndex
+// outcomes (the read barrier) before falling through to the kv domain
+// mapping. The split is load-bearing for client routing (Phase 8) and
+// retry safety (Phases 9/11):
 //
-//	ErrNotLeader -> codes.Aborted: the proposal was rejected BEFORE append,
-//	        so nothing happened — the SDK redirects to the discovered
-//	        leader and retries the same write (same session sequence)
-//	        without consulting the session table at all.
-//	ErrLeadershipLost / ErrStopped -> codes.Unavailable: ambiguous — the
-//	        entry may still commit under the new leader. The SDK retries
-//	        this class (Phase 9) with the SAME (client_id, sequence_number):
-//	        whether or not the original committed, the session table lets
-//	        it apply at most once (S1).
+//	ErrNotLeader -> codes.Aborted: a proposal was rejected BEFORE append
+//	        (nothing happened) or a read landed on a non-leader — in
+//	        either case the SDK redirects to the discovered leader and
+//	        retries; for writes it reuses the same session sequence.
+//	ErrLeadershipLost / ErrStopped -> codes.Unavailable: ambiguous for a
+//	        write (the entry may still commit under the new leader) — the
+//	        SDK retries it with the SAME (client_id, sequence_number), so
+//	        the session table guarantees at-most-once application (S1).
+//	        For a READ this class is trivially safe: no side effects, and
+//	        the ReadIndex barrier failed rather than answering stale.
 func mapRaftError(err error) error {
 	if err == nil {
 		return nil

@@ -1,9 +1,10 @@
 // Package client is the DistriKV Go SDK.
 //
-// Status (Phase 9): leader-aware routing + client sessions. The client
-// dials any node it is given, follows leader redirects for mutations,
-// retries transient failures under the session's sequence number, and
-// fails reads over between endpoints it has seen.
+// Status (Phase 11): leader-aware routing + client sessions + linearizable
+// reads. The client dials any node it is given, follows leader redirects
+// for mutations and data reads, retries transient failures (mutations
+// under the session's sequence number), and fails transport over between
+// endpoints it has seen.
 //
 // Session model: one Client == one session. A stable random client_id and
 // one sequence number per LOGICAL operation — retries of that operation
@@ -30,9 +31,14 @@
 //     elections; the caller's context bounds the whole call.
 //   - Domain outcomes (ErrKeyNotFound, ErrNotInteger, ...) and context
 //     errors return untouched — never retried by the SDK.
-//   - Reads never mutate: they fail over between known endpoints freely
-//     and may be served by any node (linearizability is server-side,
-//     Phase 11).
+//   - Reads never mutate: side-effect-free, so their retry policy is
+//     purely about reaching a node that can answer linearizably. Since
+//     Phase 11 a non-leader REFUSES data reads (Aborted) instead of
+//     serving a possibly stale value — the client discovers the leader
+//     and redirects exactly like a write (no session sequence needed);
+//     unreachable endpoints and election gaps back off and retry within
+//     maxTransientRetries. GetStatus stays answerable on any node: it is
+//     a routing hint, not data.
 package client
 
 import (
@@ -374,23 +380,52 @@ func sleepBackoff(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// read runs a read against the current endpoint and fails over to any
-// other known endpoint on transport failure.
+// read runs a read against the current endpoint. Reads never mutate, so
+// the policy is purely about reaching a node that can answer
+// linearizably (Phase 11):
+//
+//   - codes.Aborted (a non-leader refusing a data read): discover the
+//     leader, switch, retry immediately (bounded by maxLeaderHops); no
+//     routable leader yet — transient, retried with backoff below.
+//   - codes.Unavailable (endpoint dead): repair routing to a live
+//     endpoint and retry with backoff (maxTransientRetries).
+//   - anything else (domain outcomes, context errors): untouched.
 func (c *Client) read(ctx context.Context, op readOp) error {
-	stub, addr := c.endpoint()
-	err := op(stub)
-	if err == nil || status.Code(err) != codes.Unavailable {
-		return err
+	var err error
+	redirects, retries := 0, 0
+	backoff := initialRetryBackoff
+	for {
+		stub, addr := c.endpoint()
+		err = op(stub)
+		if err == nil {
+			return nil
+		}
+		switch status.Code(err) {
+		case codes.Aborted:
+			if redirects >= maxLeaderHops {
+				return err // redirect budget exhausted
+			}
+			if next, ok := c.discover(ctx, stub, addr); ok && c.switchTo(next) {
+				redirects++
+				continue // immediate: the redirect itself moved us
+			}
+			// No routable leader (election in progress): transient.
+		case codes.Unavailable:
+			c.repair(ctx, addr)
+		default:
+			return err // domain outcome or context error
+		}
+		if retries >= maxTransientRetries {
+			return err
+		}
+		retries++
+		if !sleepBackoff(ctx, backoff) {
+			return err // caller's deadline is our stop signal
+		}
+		if backoff < maxRetryBackoff {
+			backoff *= 2
+		}
 	}
-	alt, altStub, ok := c.otherConn(addr)
-	if !ok {
-		return err
-	}
-	err2 := op(altStub)
-	if status.Code(err2) != codes.Unavailable {
-		c.switchTo(alt) // it answered (even with a domain error) — adopt it
-	}
-	return err2
 }
 
 // discover asks the node that just redirected us where the leader lives.

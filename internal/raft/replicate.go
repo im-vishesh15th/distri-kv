@@ -27,6 +27,7 @@ type peerProgress struct {
 	inflight bool   // an AppendEntries RPC is outstanding
 	pending  bool   // a trigger arrived while inflight — resend on response
 	sentLast uint64 // last index carried by the in-flight request
+	gen      uint64 // send generation: bumps per request (ReadIndex freshness)
 }
 
 // onPropose appends a leader proposal to its own log (synced before it can
@@ -107,6 +108,8 @@ func (n *Node) sendAppendTo(to transport.NodeID) {
 	}
 
 	prog.inflight = true
+	prog.gen++
+	gen := prog.gen
 	prog.sentLast = prev + uint64(len(entries))
 	req := &raftpb.AppendEntriesRequest{
 		Term:         n.term,
@@ -119,7 +122,7 @@ func (n *Node) sendAppendTo(to transport.NodeID) {
 	go func() {
 		resp, err := n.transport.AppendEntries(n.rpcCtx, to, req)
 		select {
-		case n.events <- appRespEvent{from: to, term: req.Term, resp: resp, err: err}:
+		case n.events <- appRespEvent{from: to, term: req.Term, gen: gen, resp: resp, err: err}:
 		case <-n.rpcCtx.Done():
 		case <-n.done:
 		}
@@ -165,6 +168,10 @@ func (n *Node) onAppendResponse(e appRespEvent) error {
 			prog.match = prog.sentLast
 		}
 		prog.next = prog.match + 1
+		// ReadIndex: this follower accepted our CURRENT term as of this
+		// response — fold it into every pending read whose quorum proof
+		// this send post-dates (readindex.go gate 1).
+		n.countReadAck(e.from, e.term, e.gen)
 		if err := n.maybeAdvanceCommit(); err != nil {
 			return err
 		}

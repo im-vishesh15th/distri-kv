@@ -6,7 +6,9 @@
 // routing (this node's status + the -peers addresses as the hint map).
 // Phase 9: mutations require a client session (client_id +
 // sequence_number), replicated inside the command so the SM's session
-// table deduplicates retries. Leader election over the gRPC transport,
+// table deduplicates retries. Phase 11: reads pass Node.ReadIndex —
+// leader-only and linearizable; followers answer codes.Aborted so
+// clients redirect. Leader election over the gRPC transport,
 // persistent term/vote in the Raft log, in-memory engine, static cluster
 // membership via -peers.
 package main
@@ -144,9 +146,10 @@ func run(id, addr, dataDir, peersSpec string, log *slog.Logger) error {
 	}
 
 	grpcServer := grpc.NewServer()
-	// The service mutates through Raft (rn.Propose); reads hit the engine
-	// directly until Phase 11 makes them linearizable. rn.Status + the
-	// -peers addresses power GetStatus leader routing.
+	// The service mutates through Raft (rn.Propose) and reads through
+	// rn.ReadIndex (Phase 11: linearizable; followers refuse with
+	// codes.Aborted and clients redirect). rn.Status + the -peers
+	// addresses power GetStatus leader routing.
 	kv1.RegisterKVServiceServer(grpcServer, server.NewService(engine, rn, rn.Status, leaderAddrs, log))
 	grpctransport.RegisterRaftService(grpcServer, rt)
 	// Reflection lets grpcurl/gRPC tooling discover the API without stubs.

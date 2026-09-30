@@ -1,0 +1,242 @@
+package raft_test
+
+import (
+	"context"
+	"fmt"
+	"math/rand"
+	"os"
+	"testing"
+	"time"
+
+	"distrikv/internal/kv"
+	"distrikv/internal/raft"
+	"distrikv/internal/raftlog"
+	"distrikv/internal/transport"
+	"distrikv/internal/transport/sim"
+)
+
+// Phase 14: the same Raft core over the SimulatedTransport — election,
+// replication, partition, and heal with every RPC routed through the
+// deterministic in-process network (spec §18). No gRPC, no sockets, no
+// kernel in the loop; the transport seam is the only thing that changed
+// versus the integration harness.
+
+type simNode struct {
+	id     transport.NodeID
+	rnode  *raft.Node
+	rlog   *raftlog.Log
+	engine kv.Engine
+	cancel context.CancelFunc
+	runErr chan error
+	dead   bool
+}
+
+// startSimCluster boots n nodes whose RPCs all cross one shared
+// simulated network. The baseline is fault-free (delay 0, no drops):
+// tests inject faults and partitions explicitly, so every disturbance in
+// a test body is deliberate.
+func startSimCluster(t *testing.T, n int, seed int64) ([]*simNode, *sim.Network) {
+	t.Helper()
+	network := sim.New(sim.Config{Seed: seed, Auto: true})
+
+	ids := make([]transport.NodeID, n)
+	for i := range ids {
+		ids[i] = transport.NodeID(fmt.Sprintf("n%d", i+1))
+	}
+
+	nodes := make([]*simNode, n)
+	for i := 0; i < n; i++ {
+		dir := t.TempDir()
+		rlog, _, err := raftlog.Open(dir)
+		if err != nil {
+			t.Fatalf("%s: open raftlog: %v", ids[i], err)
+		}
+		engine := kv.NewMemEngine()
+		tpt := sim.NewTransport(network, ids[i])
+		rnode, err := raft.New(raft.Config{
+			ID:             ids[i],
+			Peers:          ids,
+			Transport:      tpt,
+			Log:            rlog,
+			ElectionTicks:  electionTicks,
+			HeartbeatTicks: heartbeatTicks,
+			// Distinct seed per node: identical seeds would make the
+			// randomized election timeouts collide every round.
+			RNG:          rand.New(rand.NewSource(time.Now().UnixNano() + int64(i))),
+			StateMachine: kv.NewSM(engine),
+		})
+		if err != nil {
+			t.Fatalf("%s: raft.New: %v", ids[i], err)
+		}
+		network.SetHandler(ids[i], rnode) // inbound RPCs now reach the core
+
+		ctx, cancel := context.WithCancel(context.Background())
+		runErr := make(chan error, 1)
+		go func() {
+			err := rnode.Run(ctx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "SIM_RAFT_HALTED %s: %v\n", ids[i], err)
+			}
+			runErr <- err
+		}()
+		raft.StartTicker(ctx, rnode, tickPeriod)
+
+		nodes[i] = &simNode{
+			id: ids[i], rnode: rnode, rlog: rlog, engine: engine,
+			cancel: cancel, runErr: runErr,
+		}
+	}
+	t.Cleanup(func() {
+		for _, sn := range nodes {
+			sn.shutdown(t)
+		}
+		network.Close()
+	})
+	return nodes, network
+}
+
+// shutdown stops the node's loop, waits for Run to exit, and closes the
+// log. Idempotent (teardown may overlap a failed test's early return).
+func (sn *simNode) shutdown(t *testing.T) {
+	if sn.dead {
+		return
+	}
+	sn.dead = true
+	sn.cancel()
+	select {
+	case <-sn.runErr:
+	case <-time.After(2 * time.Second):
+		t.Errorf("%s: sim raft Run did not exit", sn.id)
+	}
+	if err := sn.rlog.Close(); err != nil {
+		t.Errorf("%s: close log: %v", sn.id, err)
+	}
+}
+
+func simLeadersOf(nodes []*simNode) []*simNode {
+	var out []*simNode
+	for _, n := range nodes {
+		if n.dead {
+			continue
+		}
+		if n.rnode.Status().Role == raft.RoleLeader {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// waitForSimLeadership polls until exactly one node leads and every other
+// live node acknowledges it (same contract as waitForLeadership, over
+// simNode instead of liveNode).
+func waitForSimLeadership(t *testing.T, d time.Duration, what string, nodes []*simNode) *simNode {
+	t.Helper()
+	var leader *simNode
+	waitFor(t, d, what, func() bool {
+		ls := simLeadersOf(nodes)
+		if len(ls) != 1 {
+			return false
+		}
+		lead := ls[0]
+		for _, n := range nodes {
+			if n.dead || n == lead {
+				continue
+			}
+			if s := n.rnode.Status(); s.LeaderID != lead.id {
+				return false
+			}
+		}
+		leader = lead
+		return true
+	})
+	return leader
+}
+
+// TestRaftOverSimulatedNetwork proves the seam end to end: the identical
+// Raft core elects a leader, replicates, keeps committing with a follower
+// partitioned away (majority of 3 is 2), and after heal the isolated
+// replica catches up with byte-identical logs — every RPC having crossed
+// the deterministic in-process network, none gRPC.
+func TestRaftOverSimulatedNetwork(t *testing.T) {
+	nodes, network := startSimCluster(t, 3, 20260930)
+	ctx := context.Background()
+
+	// 1. Election over the sim network.
+	leader := waitForSimLeadership(t, 10*time.Second, "leader over sim network", nodes)
+
+	// 2. Replication: no-op holds index 1, k0..k2 land at 2..4. Propose
+	// blocks until applied, so the leader is at 4 when these return.
+	for i := 0; i < 3; i++ {
+		idx, _, err := leader.rnode.Propose(ctx, mustEncode(t, kv.Set(fmt.Sprintf("k%d", i), []byte(fmt.Sprintf("v%d", i)))))
+		if err != nil {
+			t.Fatalf("propose %d: %v", i, err)
+		}
+		if want := uint64(i + 2); idx != want {
+			t.Fatalf("propose %d index = %d, want %d", i, idx, want)
+		}
+	}
+	waitFor(t, 10*time.Second, "all replicas applied first batch", func() bool {
+		hw := leader.rnode.Status().LastApplied
+		for _, n := range nodes {
+			if n.rnode.Status().LastApplied < hw {
+				return false
+			}
+		}
+		return true
+	})
+
+	// 3. Isolate one follower. The majority side (leader + the other
+	// follower) must keep committing; the isolated node must not see
+	// entries 5..7 — those never existed before the partition closed, and
+	// every leader→isolated path is blocked from here.
+	var isolated *simNode
+	for _, n := range nodes {
+		if n != leader {
+			isolated = n
+			break
+		}
+	}
+	network.Isolate(isolated.id)
+	for i := 3; i < 6; i++ {
+		if _, _, err := leader.rnode.Propose(ctx, mustEncode(t, kv.Set(fmt.Sprintf("k%d", i), []byte(fmt.Sprintf("v%d", i))))); err != nil {
+			t.Fatalf("propose %d with follower isolated: %v", i, err)
+		}
+	}
+	if got := isolated.rnode.Status().LastLogIndex; got >= 5 {
+		t.Fatalf("isolated follower at index %d: writes committed in its absence crossed the partition", got)
+	}
+
+	// 4. Heal: the isolated node catches up, all logs are byte-identical,
+	// and applied state converges to the final high-water.
+	network.Heal()
+	leader = waitForSimLeadership(t, 10*time.Second, "stable leader after heal", nodes)
+	waitFor(t, 10*time.Second, "isolated follower caught up after heal", func() bool {
+		return isolated.rnode.Status().LastLogIndex >= leader.rnode.Status().LastLogIndex
+	})
+
+	lst := leader.rnode.Status().LastLogIndex
+	for i := uint64(1); i <= lst; i++ {
+		le, lerr := leader.rlog.Get(i)
+		if lerr != nil {
+			t.Fatalf("leader log get %d: %v", i, lerr)
+		}
+		for _, n := range nodes {
+			if n == leader {
+				continue
+			}
+			ne, nerr := n.rlog.Get(i)
+			if nerr != nil || le.Term != ne.Term || string(le.Payload) != string(ne.Payload) {
+				t.Fatalf("log divergence at %d: leader=%+v %s=%+v(%v)", i, le, n.id, ne, nerr)
+			}
+		}
+	}
+	waitFor(t, 10*time.Second, "final applied convergence", func() bool {
+		hw := leader.rnode.Status().LastApplied
+		for _, n := range nodes {
+			if n.rnode.Status().LastApplied < hw {
+				return false
+			}
+		}
+		return true
+	})
+}

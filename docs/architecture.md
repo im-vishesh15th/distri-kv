@@ -39,8 +39,9 @@ until the engine passes its correctness suite (Tier 1, end of Phase 16).
    State we handle: persistent `currentTerm / votedFor / log`; volatile
    `commitIndex / lastApplied`; leader `nextIndex[] / matchIndex[]`.
 3. **Transport abstraction** — Raft communicates only through a `Transport`
-   interface: `RealTransport` (gRPC) in production, `SimulatedTransport` in
-   tests (seeded delay / drop / reorder / duplicate / partition). Docker is for
+   interface: `RealTransport` (gRPC) in production, `SimulatedTransport`
+   (`internal/transport/sim`, Phase 14) in tests (seeded delay / drop /
+   reorder / duplicate / partition / isolation / slow node). Docker is for
    demos, never the foundation of correctness testing.
 4. **Fixed slots, not consistent hashing** — `slot = hash(key) % 16384`;
    routing follows `key → slot → shard → Raft group → leader → node`.
@@ -121,8 +122,10 @@ On-disk Raft log record framing (normative spec in [persistence.md](persistence.
 The system is tested against: process crash (leader/follower/multiple),
 network partition (majority/minority), delay, packet loss, reordering,
 duplication, slow node, and persistence failure (partial/corrupt record) —
-all injected deterministically through the simulated transport with reproducible
-seeds (Phases 14–15), then verified for linearizability (Phase 16).
+all injected deterministically through the simulated transport
+(`internal/transport/sim`, mechanism delivered in Phase 14, see
+docs/simulation.md) with reproducible seeds (scenario suite: Phase 15),
+then verified for linearizability (Phase 16).
 
 ## 9. Consistency guarantees (normative definitions in docs/consistency.md)
 

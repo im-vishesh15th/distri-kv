@@ -4,9 +4,9 @@
 //
 //   - Production uses RealTransport (internal/transport/grpc): Raft RPCs over
 //     gRPC.
-//   - Testing uses SimulatedTransport (Phase 14): a deterministic in-process
-//     network with seeded delay/drop/reorder/duplicate/partition faults and a
-//     virtual clock.
+//   - Testing uses SimulatedTransport (internal/transport/sim, Phase 14):
+//     a deterministic in-process network with seeded
+//     delay/drop/reorder/duplicate/partition faults and a virtual clock.
 //
 // The Raft core (Phase 5+) depends ONLY on this interface — never on gRPC,
 // sockets, or real time — so the same Raft code runs against both. That is

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
@@ -11,7 +12,11 @@ import (
 
 	kv1 "distrikv/gen/kv/v1"
 	"distrikv/internal/kv"
+	"distrikv/internal/raft"
+	"distrikv/internal/raftlog"
 	"distrikv/internal/server"
+	"distrikv/internal/transport"
+	grpctransport "distrikv/internal/transport/grpc"
 	"distrikv/pkg/client"
 
 	"google.golang.org/grpc"
@@ -20,15 +25,72 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 )
 
+// startSingleNode wires the full single-node stack — engine, persistent
+// Raft log, transport, event loop, ticker — and waits for self-election.
+// The engine is only ever mutated by this node's apply path, exactly as in
+// a cluster: mutations go Service -> Propose -> log -> apply -> engine.
+func startSingleNode(t *testing.T) (kv.Engine, *raft.Node) {
+	t.Helper()
+
+	engine := kv.NewMemEngine()
+	rlog, _, err := raftlog.Open(filepath.Join(t.TempDir(), "raft"))
+	if err != nil {
+		t.Fatalf("raftlog: %v", err)
+	}
+	tpt, err := grpctransport.New("n1", nil, nil)
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	node, err := raft.New(raft.Config{
+		ID:             "n1",
+		Peers:          []transport.NodeID{"n1"}, // standalone majority of one
+		Transport:      tpt,
+		Log:            rlog,
+		ElectionTicks:  10,
+		HeartbeatTicks: 3,
+		StateMachine:   kv.NewSM(engine),
+	})
+	if err != nil {
+		t.Fatalf("raft.New: %v", err)
+	}
+	tpt.SetHandler(node)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- node.Run(ctx) }()
+	raft.StartTicker(ctx, node, 10*time.Millisecond)
+	t.Cleanup(func() {
+		cancel()
+		<-runDone // loop stops before the log it reads is closed
+		_ = tpt.Close()
+		if cerr := rlog.Close(); cerr != nil {
+			t.Errorf("raftlog close: %v", cerr)
+		}
+	})
+
+	// Writes need a leader; self-election takes 100–190 ms.
+	deadline := time.Now().Add(5 * time.Second)
+	for node.Status().Role != raft.RoleLeader {
+		if time.Now().After(deadline) {
+			t.Fatal("standalone node never became leader")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return engine, node
+}
+
 // newTestClient wires a real gRPC server (bufconn) + the pkg/client SDK
 // entirely in-process, so these tests exercise the full wire stack:
-// SDK -> protobuf -> gRPC -> service -> engine, and the reverse.
+// SDK -> protobuf -> gRPC -> service -> Raft propose -> apply -> engine,
+// and the reverse.
 func newTestClient(t *testing.T) *client.Client {
 	t.Helper()
 
+	engine, node := startSingleNode(t)
+
 	lis := bufconn.Listen(1 << 20)
 	grpcServer := grpc.NewServer()
-	kv1.RegisterKVServiceServer(grpcServer, server.NewService(kv.NewMemEngine(), nil))
+	kv1.RegisterKVServiceServer(grpcServer, server.NewService(engine, node, nil))
 
 	go func() {
 		_ = grpcServer.Serve(lis)
@@ -203,7 +265,8 @@ func TestSessionFieldsOnWire(t *testing.T) {
 	}
 
 	grpcServer := grpc.NewServer(grpc.ChainUnaryInterceptor(capture))
-	kv1.RegisterKVServiceServer(grpcServer, server.NewService(kv.NewMemEngine(), nil))
+	engine, node := startSingleNode(t)
+	kv1.RegisterKVServiceServer(grpcServer, server.NewService(engine, node, nil))
 	go func() { _ = grpcServer.Serve(lis) }()
 	t.Cleanup(grpcServer.Stop)
 

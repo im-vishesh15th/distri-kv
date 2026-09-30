@@ -147,6 +147,9 @@ func (n *Node) onAppendEntries(req *raftpb.AppendEntriesRequest) (*raftpb.Append
 		if c > n.commitIndex {
 			n.commitIndex = c
 			n.logf("commit_advanced", "commit_index", n.commitIndex, "via", "leader_commit")
+			if err := n.applyCommitted(); err != nil {
+				return nil, err
+			}
 		}
 	}
 

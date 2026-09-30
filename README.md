@@ -40,8 +40,8 @@ make proto                           # regenerate gen/ from proto/kv.proto
 |---|---|---|---|
 | **M0 Foundation** | 0 | Repo, design docs, baseline | ✅ done |
 | **M1 Single-node DB** | 1–2 | In-memory engine + gRPC API | ✅ done |
-| **M2 Durable consensus** | 3–7 | Persistent log, election, replication, state machine | 🔄 **current** (Phases 3–6 done, Phase 7 next) |
-| **M3 Hardening** | 8–11 | Leader routing, dedup, atomics, linearizable reads | ⬜ |
+| **M2 Durable consensus** | 3–7 | Persistent log, election, replication, state machine | ✅ done |
+| **M3 Hardening** | 8–11 | Leader routing, dedup, atomics, linearizable reads | 🔄 **current** (Phase 8 next) |
 | **M4 Lifecycle** | 12–13 | Snapshots, log compaction, InstallSnapshot | ⬜ |
 | **M5 Proof** | 14–16 | Simulated network, fault tests, linearizability checking | ⬜ |
 | **M6 Scale** | 17–21 | Multi-Raft, fixed-slot sharding, cluster router | ⬜ |

@@ -42,7 +42,7 @@ Properties:
 - `len` outside `[16, 16 MiB]` is impossible for our writer → treated as
   corruption, not as a torn tail.
 - Payloads are opaque to this package; from Phase 7 they hold encoded
-  state-machine commands.
+  state-machine commands (`kv.EncodeCommand`).
 
 `hardstate` uses the same framing with body `term u64 | vlen u32 | votedFor`
 and is rewritten atomically (temp file → fsync → rename → dir sync), so disk

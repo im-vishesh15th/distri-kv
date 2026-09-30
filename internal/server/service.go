@@ -1,15 +1,21 @@
 // Package server implements the client-facing gRPC KVService over a kv.Engine.
 //
-// This is Phase 2: single node, in-memory. From Phase 4 on the same service
-// fronts the Raft layer; the wire API does not change.
+// Phase 7: every mutation is encoded as a kv.Command and replicated through
+// Raft (the Proposer seam) — the engine is mutated only by the apply path,
+// in log order, so all replicas see identical state. Reads (Get/Exists) are
+// served straight from the local engine; making them linearizable is
+// Phase 11's job.
 //
 // Error mapping (server -> wire -> SDK): the status code is the contract.
 //
-//	kv.ErrKeyNotFound          -> codes.NotFound        -> ErrKeyNotFound
+//	kv.ErrKeyNotFound          -> codes.NotFound         -> ErrKeyNotFound
 //	kv.ErrNotInteger           -> codes.FailedPrecondition -> ErrNotInteger
-//	kv.ErrOverflow             -> codes.OutOfRange      -> ErrOverflow
-//	kv.ErrUnknownOp            -> codes.Internal        -> passes through
+//	kv.ErrOverflow             -> codes.OutOfRange       -> ErrOverflow
+//	kv.ErrUnknownOp            -> codes.Internal         -> passes through
 //	empty key                  -> codes.InvalidArgument
+//	raft.ErrNotLeader /
+//	raft.ErrLeadershipLost /
+//	raft.ErrStopped            -> codes.Unavailable      -> retryable class
 //	context cancellation       -> passes through untouched
 //
 // CAS precondition failure is NOT an error: it returns applied=false.
@@ -17,6 +23,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strconv"
 
@@ -24,18 +31,27 @@ import (
 	"distrikv/internal/kv"
 )
 
+// Proposer replicates one encoded Command through Raft and waits for it to
+// be applied, returning the state machine's result for that entry.
+// *raft.Node implements it; the seam exists so the service can be tested
+// against any implementation without importing raft's internals.
+type Proposer interface {
+	Propose(ctx context.Context, payload []byte) (index uint64, result any, err error)
+}
+
 // Service adapts a kv.Engine to the gRPC KVService.
 type Service struct {
 	kv1.UnimplementedKVServiceServer
 
-	engine kv.Engine
-	log    *slog.Logger
+	engine   kv.Engine // reads (Phase 11 revisits); apply-path writes
+	proposer Proposer
+	log      *slog.Logger
 }
 
-// NewService returns a KVService backed by engine. log may be nil (logging
-// is then disabled).
-func NewService(engine kv.Engine, log *slog.Logger) *Service {
-	return &Service{engine: engine, log: log}
+// NewService returns a KVService reading from engine and replicating
+// mutations through proposer. log may be nil (logging then disabled).
+func NewService(engine kv.Engine, proposer Proposer, log *slog.Logger) *Service {
+	return &Service{engine: engine, proposer: proposer, log: log}
 }
 
 // Get returns the value for key or codes.NotFound.
@@ -50,26 +66,26 @@ func (s *Service) Get(ctx context.Context, req *kv1.GetRequest) (*kv1.GetRespons
 	return &kv1.GetResponse{Value: v}, nil
 }
 
-// Put stores value at key (upsert).
+// Put stores value at key (upsert), replicated through Raft.
 // client_id/sequence_number are accepted but ignored until Phase 9.
 func (s *Service) Put(ctx context.Context, req *kv1.PutRequest) (*kv1.PutResponse, error) {
 	if err := validateKey(req.Key); err != nil {
 		return nil, err
 	}
-	if _, perr := s.engine.Apply(kv.Set(req.Key, req.Value)); perr != nil {
-		return nil, mapError(perr)
+	if err := s.propose(ctx, kv.Set(req.Key, req.Value)); err != nil {
+		return nil, err
 	}
 	s.logOp(ctx, "put", req.Key, req.ClientId, req.SequenceNumber)
 	return &kv1.PutResponse{}, nil
 }
 
-// Delete removes key (idempotent).
+// Delete removes key (idempotent), replicated through Raft.
 func (s *Service) Delete(ctx context.Context, req *kv1.DeleteRequest) (*kv1.DeleteResponse, error) {
 	if err := validateKey(req.Key); err != nil {
 		return nil, err
 	}
-	if _, derr := s.engine.Apply(kv.Delete(req.Key)); derr != nil {
-		return nil, mapError(derr)
+	if err := s.propose(ctx, kv.Delete(req.Key)); err != nil {
+		return nil, err
 	}
 	s.logOp(ctx, "delete", req.Key, req.ClientId, req.SequenceNumber)
 	return &kv1.DeleteResponse{}, nil
@@ -83,14 +99,16 @@ func (s *Service) Exists(ctx context.Context, req *kv1.ExistsRequest) (*kv1.Exis
 	return &kv1.ExistsResponse{Exists: s.engine.Exists(req.Key)}, nil
 }
 
-// CAS conditionally stores new_value. applied=false is a normal outcome.
+// CAS conditionally stores new_value. applied=false is a normal outcome,
+// decided by the replicated apply — all replicas agree on it because they
+// all evaluated the same precondition in the same log position.
 func (s *Service) CAS(ctx context.Context, req *kv1.CASRequest) (*kv1.CASResponse, error) {
 	if err := validateKey(req.Key); err != nil {
 		return nil, err
 	}
 	// Reconstruct the kv.Command precondition: proto3 bytes cannot express
 	// nil, so expected_exists carries presence and an empty-but-present
-	// expected value becomes a non-nil empty slice.
+	// expected value becomes a non-nil empty slice (codec keeps it intact).
 	var expected []byte
 	if req.ExpectedExists {
 		expected = req.ExpectedValue
@@ -98,9 +116,9 @@ func (s *Service) CAS(ctx context.Context, req *kv1.CASRequest) (*kv1.CASRespons
 			expected = []byte{}
 		}
 	}
-	res, cerr := s.engine.Apply(kv.CAS(req.Key, expected, req.NewValue))
-	if cerr != nil {
-		return nil, mapError(cerr)
+	res, rerr := s.proposeResult(ctx, kv.CAS(req.Key, expected, req.NewValue))
+	if rerr != nil {
+		return nil, rerr
 	}
 	return &kv1.CASResponse{Applied: res.Applied}, nil
 }
@@ -110,15 +128,46 @@ func (s *Service) Incr(ctx context.Context, req *kv1.IncrRequest) (*kv1.IncrResp
 	if err := validateKey(req.Key); err != nil {
 		return nil, err
 	}
-	res, ierr := s.engine.Apply(kv.IncrBy(req.Key, req.Delta))
-	if ierr != nil {
-		return nil, mapError(ierr)
+	res, rerr := s.proposeResult(ctx, kv.IncrBy(req.Key, req.Delta))
+	if rerr != nil {
+		return nil, rerr
 	}
 	n, perr := strconv.ParseInt(string(res.Value), 10, 64)
 	if perr != nil {
-		return nil, mapError(kv.ErrUnknownOp) // unreachable: Apply returns canonical ints
+		// Unreachable: Engine.Apply returns canonical ints.
+		return nil, statusErrorInternal(kv.ErrUnknownOp)
 	}
 	return &kv1.IncrResponse{Value: n}, nil
+}
+
+// propose encodes cmd, replicates it, and maps any failure to a status.
+// Used by mutations whose engine result the response ignores.
+func (s *Service) propose(ctx context.Context, cmd kv.Command) error {
+	_, rerr := s.proposeResult(ctx, cmd)
+	return rerr
+}
+
+// proposeResult is the write path: encode -> Propose (replicate + apply)
+// -> extract the kv.Result the state machine produced for this entry.
+func (s *Service) proposeResult(ctx context.Context, cmd kv.Command) (kv.Result, error) {
+	payload, err := kv.EncodeCommand(cmd)
+	if err != nil {
+		// Constructors + key validation make this unreachable; if it
+		// happens it is a bug, not a client error.
+		return kv.Result{}, statusErrorInternal(err)
+	}
+	_, result, perr := s.proposer.Propose(ctx, payload)
+	if perr != nil {
+		return kv.Result{}, mapRaftError(perr)
+	}
+	res, ok := result.(kv.Result)
+	if !ok {
+		// Propose succeeded but carried no kv.Result — only possible if
+		// the node was wired without the KV state machine.
+		return kv.Result{}, statusErrorInternal(
+			fmt.Errorf("state machine returned %T, want kv.Result (node wired with kv.NewSM?)", result))
+	}
+	return res, nil
 }
 
 // validateKey rejects empty keys with codes.InvalidArgument.

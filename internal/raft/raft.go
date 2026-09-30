@@ -121,6 +121,23 @@ type Config struct {
 	// Logger receives election/leadership transitions (debug/info).
 	// Nil disables logging.
 	Logger *slog.Logger
+
+	// StateMachine receives committed log entries in order (Phase 7).
+	// Nil is legal: entries still replicate and commit, apply is a no-op
+	// (the raft layer alone, as in the election/replication tests).
+	StateMachine StateMachine
+}
+
+// StateMachine is the apply hook the Raft layer drives: payload in, result
+// out. It is called strictly in log order, exactly once per non-empty
+// committed entry, on the event-loop goroutine. The returned result is
+// delivered to the proposer waiting on that index; the returned error is a
+// domain outcome for that entry (the node keeps running — every replica
+// makes the same decision on the same bytes).
+//
+// Empty payloads (leader no-op entries) never reach Apply.
+type StateMachine interface {
+	Apply(payload []byte) (any, error)
 }
 
 func (c Config) validate() error {
@@ -198,8 +215,8 @@ type statusEvent struct{ reply chan Status }
 func (statusEvent) isEvent() {}
 
 // proposeEvent asks the leader to replicate a payload. The reply is NOT
-// written here: it is released when the entry commits (or fails fast on
-// leadership loss), see Propose.
+// written here: it is released when the entry has been applied (or fails
+// fast on leadership loss), see Propose.
 type proposeEvent struct {
 	payload []byte
 	reply   chan proposeReply
@@ -208,8 +225,9 @@ type proposeEvent struct {
 func (proposeEvent) isEvent() {}
 
 type proposeReply struct {
-	index uint64
-	err   error
+	index  uint64
+	result any // state machine's outcome for this entry (nil if none)
+	err    error
 }
 
 // Node is a single Raft replica. Create with New, then run exactly one
@@ -224,6 +242,7 @@ type Node struct {
 	heartTO   int // heartbeat period (ticks)
 	rng       *rand.Rand
 	log_      *slog.Logger
+	sm        StateMachine // nil = apply is a no-op (see StateMachine)
 
 	// events is the loop's mailbox. Buffered so ticks sent slightly before
 	// Run starts queue instead of blocking; capacity is generous because
@@ -311,6 +330,7 @@ func New(cfg Config) (*Node, error) {
 		heartTO:   cfg.HeartbeatTicks,
 		rng:       rng,
 		log_:      cfg.Logger,
+		sm:        cfg.StateMachine,
 
 		events:    make(chan event, 128),
 		done:      make(chan struct{}),
@@ -383,37 +403,41 @@ func (n *Node) Status() Status {
 }
 
 // Propose replicates payload through the Raft log and blocks until the entry
-// is COMMITTED — durable on a majority, with the current-term commit rule
-// applied. Returns the entry's log index.
+// is APPLIED — committed on a majority (with the current-term rule) AND
+// executed against the local state machine in log order. Returns the entry's
+// log index and the state machine's result for it (what the client response
+// is built from). The caller's own read-your-writes follows: apply finishes
+// before this returns.
 //
 // Errors: ErrNotLeader (follower/candidate — see Status().LeaderID),
 // ErrLeadershipLost (appended locally but the node lost leadership before
 // commit; the entry may still commit elsewhere), ErrEmptyProposal,
-// ErrStopped, or ctx.Err().
+// ErrStopped, ctx.Err(), or the state machine's domain error for this entry
+// (the entry applied; only its outcome failed).
 //
-// Cancelling ctx does NOT retract an appended entry: it may still commit.
-// Distinguishing "committed" from "never happened" on retry is Phase 9's
-// dedup job — until then, callers must not blindly retry writes.
-func (n *Node) Propose(ctx context.Context, payload []byte) (uint64, error) {
+// Cancelling ctx does NOT retract an appended entry: it may still commit
+// and apply. Distinguishing "applied" from "never happened" on retry is
+// Phase 9's dedup job — until then, callers must not blindly retry writes.
+func (n *Node) Propose(ctx context.Context, payload []byte) (uint64, any, error) {
 	if len(payload) == 0 {
-		return 0, ErrEmptyProposal
+		return 0, nil, ErrEmptyProposal
 	}
 	reply := make(chan proposeReply, 1)
 	ev := proposeEvent{payload: append([]byte(nil), payload...), reply: reply}
 	select {
 	case n.events <- ev:
 	case <-ctx.Done():
-		return 0, ctx.Err()
+		return 0, nil, ctx.Err()
 	case <-n.done:
-		return 0, ErrStopped
+		return 0, nil, ErrStopped
 	}
 	select {
 	case r := <-reply:
-		return r.index, r.err
+		return r.index, r.result, r.err
 	case <-ctx.Done():
-		return 0, ctx.Err()
+		return 0, nil, ctx.Err()
 	case <-n.done:
-		return 0, ErrStopped
+		return 0, nil, ErrStopped
 	}
 }
 

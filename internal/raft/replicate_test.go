@@ -60,15 +60,16 @@ func collectAppCalls(t *testing.T, ch chan appCall, n int) []appCall {
 func asyncPropose(h *hnode, payload string) chan proposeResult {
 	res := make(chan proposeResult, 1)
 	go func() {
-		idx, err := h.n.Propose(context.Background(), []byte(payload))
-		res <- proposeResult{idx: idx, err: err}
+		idx, result, err := h.n.Propose(context.Background(), []byte(payload))
+		res <- proposeResult{idx: idx, result: result, err: err}
 	}()
 	return res
 }
 
 type proposeResult struct {
-	idx uint64
-	err error
+	idx    uint64
+	result any
+	err    error
 }
 
 func awaitPropose(t *testing.T, res chan proposeResult) proposeResult {
@@ -166,11 +167,11 @@ func TestCommitRequiresMajority(t *testing.T) {
 func TestProposeValidation(t *testing.T) {
 	h := startNode(t, "n1", 1, "n1", "n2", "n3")
 
-	if _, err := h.n.Propose(context.Background(), nil); err != raft.ErrEmptyProposal {
+	if _, _, err := h.n.Propose(context.Background(), nil); err != raft.ErrEmptyProposal {
 		t.Fatalf("empty proposal: %v", err)
 	}
 	// Node is a follower (never ticked): not-leader rejection.
-	if _, err := h.n.Propose(context.Background(), []byte("x")); err != raft.ErrNotLeader {
+	if _, _, err := h.n.Propose(context.Background(), []byte("x")); err != raft.ErrNotLeader {
 		t.Fatalf("follower proposal: %v", err)
 	}
 }

@@ -125,6 +125,13 @@ type hnode struct {
 // ElectionTicks=10 → randomized timeout in [10, 19] ticks; HeartbeatTicks=3.
 func startNode(t *testing.T, id transport.NodeID, seed int64, peers ...transport.NodeID) *hnode {
 	t.Helper()
+	return startNodeSM(t, id, seed, nil, peers...)
+}
+
+// startNodeSM is startNode with a state machine attached (Phase 7). A nil
+// sm means apply is a no-op — the Phase 5/6 configuration.
+func startNodeSM(t *testing.T, id transport.NodeID, seed int64, sm raft.StateMachine, peers ...transport.NodeID) *hnode {
+	t.Helper()
 	rlog, _, err := raftlog.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("open raftlog: %v", err)
@@ -138,6 +145,7 @@ func startNode(t *testing.T, id transport.NodeID, seed int64, peers ...transport
 		ElectionTicks:  10,
 		HeartbeatTicks: 3,
 		RNG:            rand.New(rand.NewSource(seed)),
+		StateMachine:   sm,
 	})
 	if err != nil {
 		t.Fatalf("raft.New: %v", err)

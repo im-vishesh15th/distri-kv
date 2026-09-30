@@ -1,8 +1,8 @@
 # DistriKV's Raft core
 
 Custom implementation — no Hashicorp Raft, no etcd/raft. This document covers
-what exists **now (Phases 5–6: leader election + log replication)** and how it
-is built; state-machine apply appends here in Phase 7.
+what exists **now (Phases 5–7: leader election, log replication, and
+state-machine apply)** and how it is built.
 
 ## Concurrency model: one event loop owns all state
 
@@ -151,28 +151,66 @@ restarted leader's `commitIndex` never stalls waiting for a client to write.
 Followers advance `commitIndex` only via `LeaderCommit`; the leader only via
 the rule above. Both are reflected in `Status()`.
 
-## Proposals (Phase 6)
+## Proposals (Phases 6–7)
 
 `Node.Propose(ctx, payload)` is leader-only and blocks until the entry is
-**committed** — durable on a majority under the rule above — returning its
-log index:
+**applied** — committed on a majority under the rule above *and* executed
+against the local state machine in log order — returning its log index and
+the state machine's result for that entry:
 
 - follower/candidate → `ErrNotLeader` immediately (client routing is Phase 8);
 - leadership lost while in flight → `ErrLeadershipLost`, *fast* — the entry's
   fate is unknowable from the old leader (it may still commit under the new
   one), which is exactly why blind client retries wait for Phase 9 dedup;
 - empty payload → `ErrEmptyProposal` (empty is reserved for internal no-ops);
-- cancelling `ctx` does **not** retract an appended entry.
+- cancelling `ctx` does **not** retract an appended entry;
+- a state-machine domain error (e.g. `ErrNotInteger`) is the entry's
+  *outcome*, not a transport failure — the entry applied, `lastApplied`
+  advanced, and the error is what the proposer observes.
 
-Waiters are registered per index in the loop and released when `commitIndex`
-passes them — or failed en masse on step-down. A single-node cluster commits
-inside `Propose` itself (majority of one).
+Waiters are registered per index in the loop and released when that entry
+applies — or failed en masse on step-down. A single-node cluster commits and
+applies inside `Propose` itself (majority of one), so the caller's own
+read-your-writes follows from the call returning.
 
-## What is deliberately not here yet (Phase 7+)
+## Apply: committed log → state machine (Phase 7)
 
-Apply to the state machine (`lastApplied`, serving reads), conflict-term
-backoff hints (deferred to measurement), snapshots/`InstallSnapshot`,
-client request routing, dedup, ReadIndex.
+`lastApplied` trails `commitIndex` by exactly the entries still owed to the
+state machine. `applyCommitted` runs inside the same loop turn that advances
+`commitIndex` — on the leader via the commit rule, on the follower via
+`LeaderCommit` — so no observer of this node can ever see a committed entry
+that has not been applied here:
+
+1. read entry `lastApplied+1` from the persistent log;
+2. **empty payload → skip** (leader no-ops are raft-internal, never state
+   machine input — client empty proposals were already refused);
+3. otherwise call `StateMachine.Apply(payload)` synchronously on the loop
+   goroutine — strict log order, exactly once per entry;
+4. advance `lastApplied`, release any proposer waiting on this index with
+   the result (or domain error);
+5. repeat until `lastApplied == commitIndex`.
+
+Because commit and apply are one loop turn, `Propose` returning *is* the
+apply acknowledgment, and a failed `rlog.Get` of a committed entry halts the
+node (applying a suffix would silently diverge from every other replica).
+
+A `nil` `StateMachine` is legal: entries still replicate and commit, apply
+becomes a no-op, and `lastApplied` still tracks `commitIndex` (the Phase 5/6
+configuration). Recovery needs no special path: a restarted node starts at
+`lastApplied = 0` and, once `commitIndex` advances (its own no-op, or the
+leader's `LeaderCommit`), re-applies the whole recovered log onto an empty
+engine — identical order, identical commands, identical state.
+
+The seam back toward clients: `kv.EncodeCommand` serializes a `kv.Command`
+into the entry payload; `kv.SM` decodes and applies it to the engine and
+returns `kv.Result`, which travels back through `Propose` to the gRPC
+service. The service's mutations go through this path; reads (until
+Phase 11) hit the engine directly.
+
+## What is deliberately not here yet (Phase 8+)
+
+Conflict-term backoff hints (deferred to measurement), snapshots/
+`InstallSnapshot`, client request routing, dedup, ReadIndex.
 
 ## How this phase is tested
 
@@ -195,7 +233,12 @@ client request routing, dedup, ReadIndex.
 | `TestProposeValidation`, `TestPendingProposalFailsOnLeadershipLoss` | not-leader/empty rejections; in-flight proposal fails fast on step-down |
 | `TestThreeNodeElectsLeaderKillReelect`, `TestFiveNodeMinorityCannotElect` (real gRPC) | election under the replication/no-op traffic |
 | `TestReplicationSurvivesLeaderKill` (real gRPC) | sequential proposals commit; a killed follower restarts and converges byte-for-byte; killing the leader yields a newer leader holding every committed payload |
+| `TestProposeDeliversApplyResult` | Propose returns index + state-machine result only after apply; `LastApplied == CommitIndex` on return; the election no-op never reaches the state machine |
+| `TestApplyErrorIsAnOutcomeNotAFailure` | a domain error is delivered to the proposer while `lastApplied` advances and the loop keeps serving |
+| `TestFollowerAppliesOnlyCommitted` | uncommitted entries apply nothing; `LeaderCommit` advances apply exactly once, in order |
+| `TestLastAppliedTracksCommitWithoutSM` | nil state machine: apply cursor still tracks commit |
+| `TestStateMachinesConverge` (real gRPC) | D1: mixed workload (set/incr/CAS) converges byte-identically on all replicas; a crashed node with a fresh empty engine replays the recovered log back to identical state |
 
 Unit tests inject time (`Tick`) and the network (scripted transport)
-directly, so all timeout/ordering claims are deterministic; the two
-integration tests exercise the real gRPC transport under `go test -race`.
+directly, so all timeout/ordering claims are deterministic; the integration
+tests exercise the real gRPC transport under `go test -race`.

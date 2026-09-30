@@ -1,9 +1,10 @@
 // DistriKV public KV API.
 //
-// Phase 2 status: single-node API. Fields client_id/sequence_number are
-// carried on every mutating request from day one so the wire format never
-// breaks when client-session deduplication lands in Phase 9 (the server
-// ignores them until then).
+// Status: client RPCs (Phase 2) + the replicated Command encoding (Phase 7).
+// Fields client_id/sequence_number ride every mutating request from day one
+// so the wire format never breaks when client-session deduplication lands in
+// Phase 9 (the server ignores them until then; the Command message gains
+// them then too).
 //
 // Design notes:
 //   - GET/EXISTS are reads: they never enter the Raft log. Mutating RPCs are
@@ -105,4 +106,43 @@ message IncrRequest {
 message IncrResponse {
   // The new value after the operation.
   int64 value = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Replicated command encoding (Phase 7).
+//
+// Client RPCs above are translated into exactly one Command and proposed to
+// Raft; the encoded Command is what every replica finds in its log entry and
+// decodes. Same bytes + same order => same state on every replica (the
+// determinism invariant of docs/architecture.md).
+// ---------------------------------------------------------------------------
+
+// CommandOp mirrors the kv.Op vocabulary (values are fixed so log entries
+// stay decodable across versions).
+enum CommandOp {
+  COMMAND_OP_UNSPECIFIED = 0;
+  COMMAND_OP_SET = 1;
+  COMMAND_OP_DELETE = 2;
+  COMMAND_OP_CAS = 3;
+  COMMAND_OP_INCR = 4;
+}
+
+// Command is the unit of replication: one deterministic mutation riding in
+// one Raft log entry.
+//
+// client_id/sequence_number join this message in Phase 9 — deduplication
+// must read them from the LOGGED command, since the session table itself is
+// replicated state applied from entries.
+message Command {
+  CommandOp op = 1;
+  string key = 2;
+  // SET value / CAS new value.
+  bytes value = 3;
+  // CAS precondition, presence-explicit like CASRequest above:
+  // expected_exists=false => key must be ABSENT; true => key must equal
+  // expected_value (empty-but-present is a legal precondition).
+  bool expected_exists = 4;
+  bytes expected_value = 5;
+  // INCR signed delta.
+  int64 delta = 6;
 }

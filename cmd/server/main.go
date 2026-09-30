@@ -1,9 +1,10 @@
 // Command server runs a DistriKV node.
 //
-// Phase 5: single node plus the Raft core — leader election over the gRPC
-// transport with persistent term/vote in the Raft log, in-memory engine, gRPC
-// API, static cluster membership via -peers. Log replication arrives in
-// Phase 6.
+// Phase 7: the Raft core replicates commands, and the committed log feeds a
+// KV state machine (kv.NewSM) — mutations proposed by the gRPC service are
+// applied in log order on every replica. Leader election over the gRPC
+// transport, persistent term/vote in the Raft log, in-memory engine, static
+// cluster membership via -peers.
 package main
 
 import (
@@ -117,6 +118,9 @@ func run(id, addr, dataDir, peersSpec string, log *slog.Logger) error {
 		ElectionTicks:  10, // randomized timeout: 100–190 ms at 10 ms/tick
 		HeartbeatTicks: 3,  // 30 ms heartbeats
 		Logger:         log,
+		// The KV engine IS the state machine: committed entries decode to
+		// Commands and apply in log order (Phase 7).
+		StateMachine: kv.NewSM(engine),
 	})
 	if err != nil {
 		return fmt.Errorf("raft core: %w", err)
@@ -131,7 +135,9 @@ func run(id, addr, dataDir, peersSpec string, log *slog.Logger) error {
 	}
 
 	grpcServer := grpc.NewServer()
-	kv1.RegisterKVServiceServer(grpcServer, server.NewService(engine, log))
+	// The service mutates through Raft (rn.Propose); reads hit the engine
+	// directly until Phase 11 makes them linearizable.
+	kv1.RegisterKVServiceServer(grpcServer, server.NewService(engine, rn, log))
 	grpctransport.RegisterRaftService(grpcServer, rt)
 	// Reflection lets grpcurl/gRPC tooling discover the API without stubs.
 	reflection.Register(grpcServer)

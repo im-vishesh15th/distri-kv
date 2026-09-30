@@ -1,9 +1,10 @@
 // DistriKV public KV API.
 //
-// Phase 2 status: single-node API. Fields client_id/sequence_number are
-// carried on every mutating request from day one so the wire format never
-// breaks when client-session deduplication lands in Phase 9 (the server
-// ignores them until then).
+// Status: client RPCs (Phase 2) + the replicated Command encoding (Phase 7).
+// Fields client_id/sequence_number ride every mutating request from day one
+// so the wire format never breaks when client-session deduplication lands in
+// Phase 9 (the server ignores them until then; the Command message gains
+// them then too).
 //
 // Design notes:
 //   - GET/EXISTS are reads: they never enter the Raft log. Mutating RPCs are

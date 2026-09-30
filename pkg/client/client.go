@@ -15,6 +15,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync/atomic"
 
 	kv1 "distrikv/gen/kv/v1"
@@ -51,7 +52,18 @@ type Client struct {
 // Transport is currently plaintext (dev/single-node). TLS lands with the
 // product gateway (Phase P2). opts are appended after the defaults — they
 // exist for tests (e.g. bufconn dialers) and future transport options.
+//
+// A bare host:port is dialed passthrough-style: grpc.NewClient's default
+// DNS resolver performs a service-config TXT lookup before publishing any
+// address, which can stall every RPC on networks that filter DNS (observed
+// live in the Phase 7 smoke: the first call hung to its deadline with zero
+// sockets open). The system resolver at connect time — /etc/hosts, search
+// domains — is what "host:port" implies anyway. Explicit schemes are left
+// untouched.
 func Dial(ctx context.Context, addr string, opts ...grpc.DialOption) (*Client, error) {
+	if !strings.Contains(addr, "://") {
+		addr = "passthrough:///" + addr
+	}
 	conn, err := grpc.NewClient(addr,
 		append([]grpc.DialOption{
 			grpc.WithTransportCredentials(insecure.NewCredentials()),

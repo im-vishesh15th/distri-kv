@@ -1,8 +1,9 @@
 // Package kv defines the key-value engine contract for DistriKV — the
 // replicated state machine's storage layer.
 //
-// Phase 1 status: Engine interface + MemEngine (map behind RWMutex) +
-// Command/Apply single-writer path.
+// Status (Phase 7): Engine interface + MemEngine (map behind RWMutex) +
+// Command/Apply single-writer path + wire codec (codec.go) and the SM
+// adapter (sm.go) that lets Raft's apply path drive Engine.Apply.
 //
 // Design notes (see docs/architecture.md):
 //
@@ -29,8 +30,8 @@ var ErrKeyExists = errors.New("kv: key already exists")
 // Engine is the storage contract of a DistriKV node.
 //
 // Implementations must be safe for concurrent use. Get/Put/Delete/Exists are
-// the Phase 1 surface; Apply/Snapshot/Restore are exercised starting Phase 7
-// and Phase 12 respectively.
+// the Phase 1 surface; Apply has been driven by the Raft apply path since
+// Phase 7; Snapshot/Restore join in Phase 12.
 type Engine interface {
 	// Get returns the value for key, or ErrKeyNotFound.
 	Get(key string) ([]byte, error)

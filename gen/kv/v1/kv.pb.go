@@ -1,9 +1,10 @@
 // DistriKV public KV API.
 //
-// Phase 2 status: single-node API. Fields client_id/sequence_number are
-// carried on every mutating request from day one so the wire format never
-// breaks when client-session deduplication lands in Phase 9 (the server
-// ignores them until then).
+// Status: client RPCs (Phase 2) + the replicated Command encoding (Phase 7).
+// Fields client_id/sequence_number ride every mutating request from day one
+// so the wire format never breaks when client-session deduplication lands in
+// Phase 9 (the server ignores them until then; the Command message gains
+// them then too).
 //
 // Design notes:
 //   - GET/EXISTS are reads: they never enter the Raft log. Mutating RPCs are
@@ -36,6 +37,63 @@ const (
 	// Verify that runtime/protoimpl is sufficiently up-to-date.
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
+
+// CommandOp mirrors the kv.Op vocabulary (values are fixed so log entries
+// stay decodable across versions).
+type CommandOp int32
+
+const (
+	CommandOp_COMMAND_OP_UNSPECIFIED CommandOp = 0
+	CommandOp_COMMAND_OP_SET         CommandOp = 1
+	CommandOp_COMMAND_OP_DELETE      CommandOp = 2
+	CommandOp_COMMAND_OP_CAS         CommandOp = 3
+	CommandOp_COMMAND_OP_INCR        CommandOp = 4
+)
+
+// Enum value maps for CommandOp.
+var (
+	CommandOp_name = map[int32]string{
+		0: "COMMAND_OP_UNSPECIFIED",
+		1: "COMMAND_OP_SET",
+		2: "COMMAND_OP_DELETE",
+		3: "COMMAND_OP_CAS",
+		4: "COMMAND_OP_INCR",
+	}
+	CommandOp_value = map[string]int32{
+		"COMMAND_OP_UNSPECIFIED": 0,
+		"COMMAND_OP_SET":         1,
+		"COMMAND_OP_DELETE":      2,
+		"COMMAND_OP_CAS":         3,
+		"COMMAND_OP_INCR":        4,
+	}
+)
+
+func (x CommandOp) Enum() *CommandOp {
+	p := new(CommandOp)
+	*p = x
+	return p
+}
+
+func (x CommandOp) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CommandOp) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_kv_proto_enumTypes[0].Descriptor()
+}
+
+func (CommandOp) Type() protoreflect.EnumType {
+	return &file_proto_kv_proto_enumTypes[0]
+}
+
+func (x CommandOp) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CommandOp.Descriptor instead.
+func (CommandOp) EnumDescriptor() ([]byte, []int) {
+	return file_proto_kv_proto_rawDescGZIP(), []int{0}
+}
 
 type GetRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -660,6 +718,101 @@ func (x *IncrResponse) GetValue() int64 {
 	return 0
 }
 
+// Command is the unit of replication: one deterministic mutation riding in
+// one Raft log entry.
+//
+// client_id/sequence_number join this message in Phase 9 — deduplication
+// must read them from the LOGGED command, since the session table itself is
+// replicated state applied from entries.
+type Command struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Op    CommandOp              `protobuf:"varint,1,opt,name=op,proto3,enum=distrikv.v1.CommandOp" json:"op,omitempty"`
+	Key   string                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	// SET value / CAS new value.
+	Value []byte `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
+	// CAS precondition, presence-explicit like CASRequest above:
+	// expected_exists=false => key must be ABSENT; true => key must equal
+	// expected_value (empty-but-present is a legal precondition).
+	ExpectedExists bool   `protobuf:"varint,4,opt,name=expected_exists,json=expectedExists,proto3" json:"expected_exists,omitempty"`
+	ExpectedValue  []byte `protobuf:"bytes,5,opt,name=expected_value,json=expectedValue,proto3" json:"expected_value,omitempty"`
+	// INCR signed delta.
+	Delta         int64 `protobuf:"varint,6,opt,name=delta,proto3" json:"delta,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Command) Reset() {
+	*x = Command{}
+	mi := &file_proto_kv_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Command) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Command) ProtoMessage() {}
+
+func (x *Command) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_kv_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Command.ProtoReflect.Descriptor instead.
+func (*Command) Descriptor() ([]byte, []int) {
+	return file_proto_kv_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *Command) GetOp() CommandOp {
+	if x != nil {
+		return x.Op
+	}
+	return CommandOp_COMMAND_OP_UNSPECIFIED
+}
+
+func (x *Command) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *Command) GetValue() []byte {
+	if x != nil {
+		return x.Value
+	}
+	return nil
+}
+
+func (x *Command) GetExpectedExists() bool {
+	if x != nil {
+		return x.ExpectedExists
+	}
+	return false
+}
+
+func (x *Command) GetExpectedValue() []byte {
+	if x != nil {
+		return x.ExpectedValue
+	}
+	return nil
+}
+
+func (x *Command) GetDelta() int64 {
+	if x != nil {
+		return x.Delta
+	}
+	return 0
+}
+
 var File_proto_kv_proto protoreflect.FileDescriptor
 
 const file_proto_kv_proto_rawDesc = "" +
@@ -702,7 +855,20 @@ const file_proto_kv_proto_rawDesc = "" +
 	"\tclient_id\x18\x03 \x01(\tR\bclientId\x12'\n" +
 	"\x0fsequence_number\x18\x04 \x01(\x04R\x0esequenceNumber\"$\n" +
 	"\fIncrResponse\x12\x14\n" +
-	"\x05value\x18\x01 \x01(\x03R\x05value2\xfc\x02\n" +
+	"\x05value\x18\x01 \x01(\x03R\x05value\"\xbf\x01\n" +
+	"\aCommand\x12&\n" +
+	"\x02op\x18\x01 \x01(\x0e2\x16.distrikv.v1.CommandOpR\x02op\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x03 \x01(\fR\x05value\x12'\n" +
+	"\x0fexpected_exists\x18\x04 \x01(\bR\x0eexpectedExists\x12%\n" +
+	"\x0eexpected_value\x18\x05 \x01(\fR\rexpectedValue\x12\x14\n" +
+	"\x05delta\x18\x06 \x01(\x03R\x05delta*{\n" +
+	"\tCommandOp\x12\x1a\n" +
+	"\x16COMMAND_OP_UNSPECIFIED\x10\x00\x12\x12\n" +
+	"\x0eCOMMAND_OP_SET\x10\x01\x12\x15\n" +
+	"\x11COMMAND_OP_DELETE\x10\x02\x12\x12\n" +
+	"\x0eCOMMAND_OP_CAS\x10\x03\x12\x13\n" +
+	"\x0fCOMMAND_OP_INCR\x10\x042\xfc\x02\n" +
 	"\tKVService\x128\n" +
 	"\x03Get\x12\x17.distrikv.v1.GetRequest\x1a\x18.distrikv.v1.GetResponse\x128\n" +
 	"\x03Put\x12\x17.distrikv.v1.PutRequest\x1a\x18.distrikv.v1.PutResponse\x12A\n" +
@@ -723,39 +889,43 @@ func file_proto_kv_proto_rawDescGZIP() []byte {
 	return file_proto_kv_proto_rawDescData
 }
 
-var file_proto_kv_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_proto_kv_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_proto_kv_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_proto_kv_proto_goTypes = []any{
-	(*GetRequest)(nil),     // 0: distrikv.v1.GetRequest
-	(*GetResponse)(nil),    // 1: distrikv.v1.GetResponse
-	(*PutRequest)(nil),     // 2: distrikv.v1.PutRequest
-	(*PutResponse)(nil),    // 3: distrikv.v1.PutResponse
-	(*DeleteRequest)(nil),  // 4: distrikv.v1.DeleteRequest
-	(*DeleteResponse)(nil), // 5: distrikv.v1.DeleteResponse
-	(*ExistsRequest)(nil),  // 6: distrikv.v1.ExistsRequest
-	(*ExistsResponse)(nil), // 7: distrikv.v1.ExistsResponse
-	(*CASRequest)(nil),     // 8: distrikv.v1.CASRequest
-	(*CASResponse)(nil),    // 9: distrikv.v1.CASResponse
-	(*IncrRequest)(nil),    // 10: distrikv.v1.IncrRequest
-	(*IncrResponse)(nil),   // 11: distrikv.v1.IncrResponse
+	(CommandOp)(0),         // 0: distrikv.v1.CommandOp
+	(*GetRequest)(nil),     // 1: distrikv.v1.GetRequest
+	(*GetResponse)(nil),    // 2: distrikv.v1.GetResponse
+	(*PutRequest)(nil),     // 3: distrikv.v1.PutRequest
+	(*PutResponse)(nil),    // 4: distrikv.v1.PutResponse
+	(*DeleteRequest)(nil),  // 5: distrikv.v1.DeleteRequest
+	(*DeleteResponse)(nil), // 6: distrikv.v1.DeleteResponse
+	(*ExistsRequest)(nil),  // 7: distrikv.v1.ExistsRequest
+	(*ExistsResponse)(nil), // 8: distrikv.v1.ExistsResponse
+	(*CASRequest)(nil),     // 9: distrikv.v1.CASRequest
+	(*CASResponse)(nil),    // 10: distrikv.v1.CASResponse
+	(*IncrRequest)(nil),    // 11: distrikv.v1.IncrRequest
+	(*IncrResponse)(nil),   // 12: distrikv.v1.IncrResponse
+	(*Command)(nil),        // 13: distrikv.v1.Command
 }
 var file_proto_kv_proto_depIdxs = []int32{
-	0,  // 0: distrikv.v1.KVService.Get:input_type -> distrikv.v1.GetRequest
-	2,  // 1: distrikv.v1.KVService.Put:input_type -> distrikv.v1.PutRequest
-	4,  // 2: distrikv.v1.KVService.Delete:input_type -> distrikv.v1.DeleteRequest
-	6,  // 3: distrikv.v1.KVService.Exists:input_type -> distrikv.v1.ExistsRequest
-	8,  // 4: distrikv.v1.KVService.CAS:input_type -> distrikv.v1.CASRequest
-	10, // 5: distrikv.v1.KVService.Incr:input_type -> distrikv.v1.IncrRequest
-	1,  // 6: distrikv.v1.KVService.Get:output_type -> distrikv.v1.GetResponse
-	3,  // 7: distrikv.v1.KVService.Put:output_type -> distrikv.v1.PutResponse
-	5,  // 8: distrikv.v1.KVService.Delete:output_type -> distrikv.v1.DeleteResponse
-	7,  // 9: distrikv.v1.KVService.Exists:output_type -> distrikv.v1.ExistsResponse
-	9,  // 10: distrikv.v1.KVService.CAS:output_type -> distrikv.v1.CASResponse
-	11, // 11: distrikv.v1.KVService.Incr:output_type -> distrikv.v1.IncrResponse
-	6,  // [6:12] is the sub-list for method output_type
-	0,  // [0:6] is the sub-list for method input_type
-	0,  // [0:0] is the sub-list for extension type_name
-	0,  // [0:0] is the sub-list for extension extendee
-	0,  // [0:0] is the sub-list for field type_name
+	0,  // 0: distrikv.v1.Command.op:type_name -> distrikv.v1.CommandOp
+	1,  // 1: distrikv.v1.KVService.Get:input_type -> distrikv.v1.GetRequest
+	3,  // 2: distrikv.v1.KVService.Put:input_type -> distrikv.v1.PutRequest
+	5,  // 3: distrikv.v1.KVService.Delete:input_type -> distrikv.v1.DeleteRequest
+	7,  // 4: distrikv.v1.KVService.Exists:input_type -> distrikv.v1.ExistsRequest
+	9,  // 5: distrikv.v1.KVService.CAS:input_type -> distrikv.v1.CASRequest
+	11, // 6: distrikv.v1.KVService.Incr:input_type -> distrikv.v1.IncrRequest
+	2,  // 7: distrikv.v1.KVService.Get:output_type -> distrikv.v1.GetResponse
+	4,  // 8: distrikv.v1.KVService.Put:output_type -> distrikv.v1.PutResponse
+	6,  // 9: distrikv.v1.KVService.Delete:output_type -> distrikv.v1.DeleteResponse
+	8,  // 10: distrikv.v1.KVService.Exists:output_type -> distrikv.v1.ExistsResponse
+	10, // 11: distrikv.v1.KVService.CAS:output_type -> distrikv.v1.CASResponse
+	12, // 12: distrikv.v1.KVService.Incr:output_type -> distrikv.v1.IncrResponse
+	7,  // [7:13] is the sub-list for method output_type
+	1,  // [1:7] is the sub-list for method input_type
+	1,  // [1:1] is the sub-list for extension type_name
+	1,  // [1:1] is the sub-list for extension extendee
+	0,  // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_proto_kv_proto_init() }
@@ -768,13 +938,14 @@ func file_proto_kv_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_kv_proto_rawDesc), len(file_proto_kv_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   12,
+			NumEnums:      1,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_proto_kv_proto_goTypes,
 		DependencyIndexes: file_proto_kv_proto_depIdxs,
+		EnumInfos:         file_proto_kv_proto_enumTypes,
 		MessageInfos:      file_proto_kv_proto_msgTypes,
 	}.Build()
 	File_proto_kv_proto = out.File

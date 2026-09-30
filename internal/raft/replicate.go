@@ -225,21 +225,46 @@ func (n *Node) maybeAdvanceCommit() error {
 	}
 	n.commitIndex = nIdx
 	n.logf("commit_advanced", "commit_index", nIdx)
-	n.releaseWaiters(nIdx)
-	return nil
+	// Commit and apply are one loop turn: no observer can see a committed
+	// entry that hasn't been applied on this node, and Propose waiters are
+	// released with the state machine's result.
+	return n.applyCommitted()
 }
 
-// releaseWaiters completes every Propose whose index has committed.
-func (n *Node) releaseWaiters(committed uint64) {
-	for idx, chans := range n.waiters {
-		if idx > committed {
-			continue
+// applyCommitted executes every committed-but-unapplied entry in log order
+// (Raft §5.3 / section 12 of the spec): lastApplied trails commitIndex by
+// exactly the entries still owed to the state machine. Waiters on each
+// index receive that entry's result — or its domain error, which is an
+// outcome of the entry, not a failure of the node.
+func (n *Node) applyCommitted() error {
+	for n.lastApplied < n.commitIndex {
+		idx := n.lastApplied + 1
+		e, err := n.rlog.Get(idx)
+		if err != nil {
+			// A committed entry we cannot read: structural failure, and
+			// continuing would apply a suffix — a different state machine
+			// than every other replica. Halt.
+			return fmt.Errorf("apply entry %d: %w", idx, err)
 		}
-		for _, ch := range chans {
-			ch <- proposeReply{index: idx}
+		var (
+			result any
+			aerr   error
+		)
+		// Empty payload = leader no-op (or pre-command log): internal
+		// raft traffic, not state-machine input.
+		if len(e.Payload) > 0 && n.sm != nil {
+			result, aerr = n.sm.Apply(e.Payload)
+			if aerr != nil {
+				n.logf("apply_error", "index", idx, "term", e.Term, "err", aerr.Error())
+			}
+		}
+		n.lastApplied = idx
+		for _, ch := range n.waiters[idx] {
+			ch <- proposeReply{index: idx, result: result, err: aerr}
 		}
 		delete(n.waiters, idx)
 	}
+	return nil
 }
 
 // failWaiters fails every pending Propose (leadership loss). Reply channels

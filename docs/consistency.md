@@ -34,7 +34,7 @@
 | R1 | Reads are linearizable | ReadIndex: confirm leadership in current term → wait for `lastApplied ≥ readIndex` → serve | stale-follower & leader-change read tests | 11 (planned) |
 | S1 | A retried mutation applies at most once | replicated session table `(client_id, seq) → cached response` | lost-response retry tests | 9 (planned) |
 | S2 | Session/dedup state survives restart and snapshots | session table is part of state-machine snapshot | restart & snapshot tests | 9/12 (planned) |
-| D1 | All replicas converge to identical state | deterministic in-order apply | state-hash comparison tests | 7 (planned) |
+| D1 | All replicas converge to identical state | deterministic in-order apply | `TestStateMachinesConverge` (byte-identical state + restart replay), `TestFollowerAppliesOnlyCommitted` | 7 |
 | P1 | Committed state survives the defined crash model | persistent log recovery (torn tail truncated, corruption loud) | byte-level truncation fuzz | 3 (planned) |
 
 **On "exactly once":** DistriKV provides *effectively-once application of

@@ -8,9 +8,9 @@ import (
 // Op identifies a state-machine command.
 //
 // Commands are the unit of replication: they are serialized into persistent
-// Raft log entries (Phase 7) and applied by every replica via Engine.Apply.
-// The op set is deliberately small — GET and EXISTS are reads and never enter
-// the log; writes and atomic mutations do.
+// Raft log entries (since Phase 7) and applied by every replica via
+// Engine.Apply. The op set is deliberately small — GET and EXISTS are reads
+// and never enter the log; writes and atomic mutations do.
 type Op uint8
 
 const (
@@ -26,8 +26,9 @@ const (
 
 // Command is a deterministic mutation to be applied to the KV state machine.
 //
-// Wire encoding of Command (into Raft log entries and gRPC messages) is fixed
-// in Phase 7 with Protocol Buffers; the struct below is the in-process form.
+// Wire encoding of Command into Raft log entries is Protocol Buffers, fixed
+// in Phase 7 and implemented in codec.go (EncodeCommand/DecodeCommand); the
+// struct below is the in-process form.
 type Command struct {
 	Op    Op
 	Key   string

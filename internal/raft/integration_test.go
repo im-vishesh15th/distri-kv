@@ -6,6 +6,7 @@ package raft_test
 // never elects from the remaining minority.
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"distrikv/internal/kv"
 	"distrikv/internal/raft"
 	"distrikv/internal/raftlog"
 	"distrikv/internal/transport"
@@ -41,6 +43,7 @@ type liveNode struct {
 	tpt    *grpctransport.RealTransport
 	rlog   *raftlog.Log
 	rnode  *raft.Node
+	engine kv.Engine // this replica's state machine storage (Phase 7)
 	cancel context.CancelFunc
 	runErr chan error
 	dead   bool
@@ -76,6 +79,10 @@ func bootNode(t *testing.T, id transport.NodeID, addr, dir string, peers []trans
 		t.Fatalf("%s: transport: %v", id, err)
 	}
 
+	// This replica's KV state machine: committed log entries decode to
+	// Commands and apply here, in log order (Phase 7).
+	engine := kv.NewMemEngine()
+
 	rnode, err := raft.New(raft.Config{
 		ID:             id,
 		Peers:          ids,
@@ -85,8 +92,9 @@ func bootNode(t *testing.T, id transport.NodeID, addr, dir string, peers []trans
 		HeartbeatTicks: heartbeatTicks,
 		// Distinct seed per boot: identical seeds across nodes would make
 		// their randomized timeouts collide every round (livelock).
-		RNG:    rand.New(rand.NewSource(time.Now().UnixNano() + int64(len(dir)))),
-		Logger: debugLogger(dir, id),
+		RNG:          rand.New(rand.NewSource(time.Now().UnixNano() + int64(len(dir)))),
+		Logger:       debugLogger(dir, id),
+		StateMachine: kv.NewSM(engine),
 	})
 	if err != nil {
 		t.Fatalf("%s: raft.New: %v", id, err)
@@ -120,7 +128,7 @@ func bootNode(t *testing.T, id transport.NodeID, addr, dir string, peers []trans
 	return &liveNode{
 		id: id, addr: lis.Addr().String(), dir: dir, peers: peers,
 		lis: lis, srv: srv, tpt: tpt, rlog: rlog, rnode: rnode,
-		cancel: cancel, runErr: runErr,
+		engine: engine, cancel: cancel, runErr: runErr,
 	}
 }
 
@@ -278,11 +286,14 @@ func TestReplicationSurvivesLeaderKill(t *testing.T) {
 		}
 	}
 
-	// Eight sequential proposals: no-op occupies index 1, payloads v0..v7
-	// land at 2..9. One follower dies after the first five — a majority of
-	// 3 still holds with the remaining one.
+	// Eight sequential proposals: no-op occupies index 1, the encoded Set
+	// commands k0..k7 land at 2..9. One follower dies after the first five
+	// — a majority of 3 still holds with the remaining one.
+	cmd := func(i int) kv.Command {
+		return kv.Set(fmt.Sprintf("k%d", i), []byte(fmt.Sprintf("v%d", i)))
+	}
 	for i := 0; i < 5; i++ {
-		idx, err := leader.rnode.Propose(ctx, []byte(fmt.Sprintf("v%d", i)))
+		idx, _, err := leader.rnode.Propose(ctx, mustEncode(t, cmd(i)))
 		if err != nil {
 			t.Fatalf("propose %d: %v", i, err)
 		}
@@ -294,7 +305,7 @@ func TestReplicationSurvivesLeaderKill(t *testing.T) {
 	down := followers[0]
 	down.kill()
 	for i := 5; i < 8; i++ {
-		if _, err := leader.rnode.Propose(ctx, []byte(fmt.Sprintf("v%d", i))); err != nil {
+		if _, _, err := leader.rnode.Propose(ctx, mustEncode(t, cmd(i))); err != nil {
 			t.Fatalf("propose %d with follower down: %v", i, err)
 		}
 	}
@@ -340,13 +351,14 @@ func TestReplicationSurvivesLeaderKill(t *testing.T) {
 		return true
 	})
 
-	// All eight committed payloads survive the leader change.
+	// All eight committed commands survive the leader change, byte-identical.
 	for i := 0; i < 8; i++ {
 		e, err := newLeader.rlog.Get(uint64(i + 2))
 		if err != nil {
 			t.Fatalf("committed entry %d missing on new leader: %v", i+2, err)
 		}
-		if want := fmt.Sprintf("v%d", i); string(e.Payload) != want {
+		want := mustEncode(t, cmd(i))
+		if !bytes.Equal(e.Payload, want) {
 			t.Fatalf("entry %d payload %q, want %q", i+2, e.Payload, want)
 		}
 	}
@@ -398,4 +410,125 @@ func TestFiveNodeMinorityCannotElect(t *testing.T) {
 	// Restore one node → 3 of 5 alive → majority election succeeds.
 	restartNode(t, victims[1])
 	waitForLeadership(t, 10*time.Second, "election after majority restored", nodes)
+}
+
+// mustEncode serializes cmd into its log-entry bytes.
+func mustEncode(t *testing.T, cmd kv.Command) []byte {
+	t.Helper()
+	b, err := kv.EncodeCommand(cmd)
+	if err != nil {
+		t.Fatalf("encode %+v: %v", cmd, err)
+	}
+	return b
+}
+
+// TestStateMachinesConverge is D1 (identical replica state) proven over the
+// real gRPC transport: the same commands applied in the same log order
+// produce byte-identical state on every replica — including a node that
+// crashes with an empty engine and re-applies the whole recovered log on
+// restart (the recovery path: replay committed commands into the state
+// machine).
+func TestStateMachinesConverge(t *testing.T) {
+	nodes := startCluster(t, 3)
+	ctx := context.Background()
+	leader := waitForLeadership(t, 10*time.Second, "initial leader", nodes)
+
+	var followers []*liveNode
+	for _, n := range nodes {
+		if n != leader {
+			followers = append(followers, n)
+		}
+	}
+
+	// A mixed, order-sensitive workload: the CAS precondition depends on an
+	// earlier entry and the incrs accumulate — any reordering or skipped
+	// apply changes the final state.
+	commands := []kv.Command{
+		kv.Set("a", []byte("1")),
+		kv.Set("b", []byte("two")),
+		kv.IncrBy("cnt", 5),
+		kv.CAS("a", []byte("1"), []byte("2")),
+		kv.IncrBy("cnt", -2),
+	}
+	var casResult any
+	for i, cmd := range commands {
+		idx, result, err := leader.rnode.Propose(ctx, mustEncode(t, cmd))
+		if err != nil {
+			t.Fatalf("propose %d (%+v): %v", i, cmd, err)
+		}
+		if want := uint64(i + 2); idx != want {
+			t.Fatalf("propose %d index = %d, want %d (no-op holds 1)", i, idx, want)
+		}
+		if i == 3 {
+			casResult = result
+		}
+	}
+	// Propose returns after apply, so the CAS outcome it carries was decided
+	// against replicated state: a=="1" at log position 4.
+	if res, ok := casResult.(kv.Result); !ok || !res.Applied {
+		t.Fatalf("CAS result = %#v, want kv.Result{Applied:true}", casResult)
+	}
+
+	// assertConverged waits until every replica has applied at least as far
+	// as the leader's high-water at call time, then requires identical
+	// state everywhere. (Entries beyond that mark are only no-ops from the
+	// post-restart re-election churn — a restarted node's cold gRPC conns
+	// take ~200ms against a 100–190ms election timeout, so re-elections are
+	// legitimate and each winner appends a no-op. No-ops carry no payload,
+	// so they cannot change state.)
+	assertConverged := func(stage string, wantState map[string]string) {
+		t.Helper()
+		wantApplied := leader.rnode.Status().LastApplied
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			allAt := true
+			for _, n := range nodes {
+				if n.rnode.Status().LastApplied < wantApplied {
+					allAt = false
+				}
+			}
+			if allAt {
+				break
+			}
+			if time.Now().After(deadline) {
+				for _, n := range nodes {
+					s := n.rnode.Status()
+					t.Logf("node %s: role=%v term=%d leader=%s commit=%d applied=%d last=%d dead=%v",
+						s.ID, s.Role, s.Term, s.LeaderID, s.CommitIndex, s.LastApplied, s.LastLogIndex, n.dead)
+				}
+				t.Fatalf("%s: replicas did not converge (want applied=%d)", stage, wantApplied)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		for _, n := range nodes {
+			for k, want := range wantState {
+				got, err := n.engine.Get(k)
+				if err != nil || string(got) != want {
+					t.Fatalf("%s %s after %s: (%q, %v), want %q (applied=%d)",
+						n.id, k, stage, got, err, want, n.rnode.Status().LastApplied)
+				}
+			}
+		}
+	}
+
+	assertConverged("initial workload", map[string]string{
+		"a": "2", "b": "two", "cnt": "3",
+	})
+
+	// Crash a follower, keep writing with the remaining majority, then
+	// restart: the fresh engine starts empty (bootNode builds a new one)
+	// and lastApplied resets to 0 — only a full replay of the recovered log
+	// can converge it again.
+	down := followers[0]
+	down.kill()
+
+	if _, _, err := leader.rnode.Propose(ctx,
+		mustEncode(t, kv.Set("after", []byte("restart")))); err != nil {
+		t.Fatalf("propose with follower down: %v", err)
+	}
+
+	restartNode(t, down)
+	assertConverged("restart replay", map[string]string{
+		"a": "2", "b": "two", "cnt": "3", "after": "restart",
+	})
 }

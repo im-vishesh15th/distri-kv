@@ -23,7 +23,7 @@ import (
 // The response is composed only after the checks above have had their say,
 // and any persistence they require completes inside this call — the RPC
 // response therefore never outruns the disk (persist-before-respond).
-func (n *Node) onVoteRequest(req *raftpb.RequestVoteRequest) (*raftpb.RequestVoteResponse, error) {
+func (n *Group) onVoteRequest(req *raftpb.RequestVoteRequest) (*raftpb.RequestVoteResponse, error) {
 	resp := &raftpb.RequestVoteResponse{Term: n.term, VoteGranted: false}
 
 	if req.Term < n.term {
@@ -66,7 +66,7 @@ func (n *Node) onVoteRequest(req *raftpb.RequestVoteRequest) (*raftpb.RequestVot
 // logUpToDate implements the Raft §5.4.1 election restriction: the candidate
 // must have an entry at least as recent as ours — higher last term wins; on
 // a tie, at least as many entries.
-func (n *Node) logUpToDate(candIndex, candTerm uint64) bool {
+func (n *Group) logUpToDate(candIndex, candTerm uint64) bool {
 	myIndex, myTerm := n.rlog.LastIndex(), n.rlog.LastTerm()
 	return candTerm > myTerm || (candTerm == myTerm && candIndex >= myIndex)
 }
@@ -86,7 +86,7 @@ func (n *Node) logUpToDate(candIndex, candTerm uint64) bool {
 //     the rest, fsync — durable before we acknowledge.
 //  5. Commit propagation: commitIndex = max(current, min(leaderCommit,
 //     last index we now know exists)).
-func (n *Node) onAppendEntries(req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error) {
+func (n *Group) onAppendEntries(req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error) {
 	resp := &raftpb.AppendEntriesResponse{Term: n.term, Success: false}
 
 	if req.Term < n.term {
@@ -184,7 +184,7 @@ func (n *Node) onAppendEntries(req *raftpb.AppendEntriesRequest) (*raftpb.Append
 // answers success so its match advances. A crash before the retry restarts
 // us from the OLD durable state (old log, old sidecar), which is
 // self-consistent: the adopted position was memory-only.
-func (n *Node) onInstallSnapshot(req *raftpb.InstallSnapshotRequest) (*raftpb.InstallSnapshotResponse, error) {
+func (n *Group) onInstallSnapshot(req *raftpb.InstallSnapshotRequest) (*raftpb.InstallSnapshotResponse, error) {
 	resp := &raftpb.InstallSnapshotResponse{Term: n.term, Success: false}
 
 	if req.Term < n.term {
@@ -287,7 +287,7 @@ func (n *Node) onInstallSnapshot(req *raftpb.InstallSnapshotRequest) (*raftpb.In
 // shorter than the snapshot, or a divergent term at the boundary — means
 // nothing we hold is trusted: discard every entry and adopt the metadata
 // (Reset). Errors are structural (disk) and halt the node.
-func (n *Node) adoptLogPosition(meta raftlog.SnapshotMeta) error {
+func (n *Group) adoptLogPosition(meta raftlog.SnapshotMeta) error {
 	idx := meta.LastIncludedIndex
 	if idx <= n.rlog.LastIndex() {
 		t, err := n.rlog.Term(idx)
@@ -307,7 +307,7 @@ func (n *Node) adoptLogPosition(meta raftlog.SnapshotMeta) error {
 // applyEntries merges the request's entries into our log: matching prefixes
 // are skipped, the first divergent index truncates our tail, and everything
 // from there on is appended and fsynced. Loop goroutine only.
-func (n *Node) applyEntries(req *raftpb.AppendEntriesRequest) error {
+func (n *Group) applyEntries(req *raftpb.AppendEntriesRequest) error {
 	followerLast := n.rlog.LastIndex()
 	for i, e := range req.Entries {
 		idx := req.PrevLogIndex + 1 + uint64(i)
@@ -336,7 +336,7 @@ func (n *Node) applyEntries(req *raftpb.AppendEntriesRequest) error {
 
 // appendTail writes entries to disk and syncs before the caller
 // acknowledges them (fsync-before-ack).
-func (n *Node) appendTail(wire []*raftpb.LogEntry) error {
+func (n *Group) appendTail(wire []*raftpb.LogEntry) error {
 	batch := make([]raftlog.Entry, 0, len(wire))
 	for _, e := range wire {
 		batch = append(batch, raftlog.Entry{Index: e.Index, Term: e.Term, Payload: e.Payload})
@@ -356,7 +356,7 @@ func (n *Node) appendTail(wire []*raftpb.LogEntry) error {
 // compaction boundary itself (index == firstIndex-1) is answerable since
 // Phase 12 — Term serves firstTerm (lastIncludedTerm); only BELOW it does
 // the check fail, which is Phase 13's InstallSnapshot territory.
-func (n *Node) prevLogMatches(index, term uint64) bool {
+func (n *Group) prevLogMatches(index, term uint64) bool {
 	if index > n.rlog.LastIndex() {
 		return false // we don't have that far yet
 	}

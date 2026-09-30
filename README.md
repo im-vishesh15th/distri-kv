@@ -44,7 +44,7 @@ make proto                           # regenerate gen/ from proto/kv.proto
 | **M3 Hardening** | 8–11 | Leader routing, dedup, atomics, linearizable reads | ✅ done |
 | **M4 Lifecycle** | 12–13 | Snapshots, log compaction, InstallSnapshot | ✅ done |
 | **M5 Proof** | 14–16 | Simulated network, fault tests, linearizability checking | ✅ done — **Tier 1 complete** |
-| **M6 Scale** | 17–21 | Multi-Raft, fixed-slot sharding, cluster router | ⬜ |
+| **M6 Scale** | 17–21 | Multi-Raft, fixed-slot sharding, cluster router | ✅ Phase 17 done (Phase 18 next) |
 | **M7 Measure** | 22–24 | Consistency spec, benchmarks, pprof | ⬜ |
 | **M8 Product** | P1–P5 | API keys, tenancy, quotas, gateway, onboarding, deploy | ⬜ |
 | **M9 Launch** | 25–30 | Docker, observability, CI, full test suite, docs | ⬜ |
@@ -63,6 +63,7 @@ half-finished extra.
 - [Simulation](docs/simulation.md) — deterministic in-process network: seeded faults, clock modes, reproducibility boundary
 - [Faults](docs/faults.md) — spec §19 scenarios, seeded chaos, disk failure, and the no-pre-vote limitation
 - [Linearizability](docs/linearizability.md) — operation histories, the checker, and the end-to-end proof
+- [Multi-Raft](docs/multiraft.md) — per-group Raft, group-multiplexed transport, group vs node failure model
 
 ## Non-goals
 

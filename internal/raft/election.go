@@ -11,7 +11,7 @@ import (
 // onTick advances logical time. Leaders run on heartbeat time; followers and
 // candidates run on election time (randomized to [E, 2E) ticks per term so
 // split votes are improbable).
-func (n *Node) onTick() error {
+func (n *Group) onTick() error {
 	switch n.role {
 	case RoleLeader:
 		n.heartbeatElapsed++
@@ -31,7 +31,7 @@ func (n *Node) onTick() error {
 }
 
 // resetElectionTimer restarts the randomized election deadline.
-func (n *Node) resetElectionTimer() {
+func (n *Group) resetElectionTimer() {
 	n.electionElapsed = 0
 	// Randomized in [E, 2E): with a shared deadline split votes would loop
 	// forever; randomized deadlines make one candidate win the next round.
@@ -40,7 +40,7 @@ func (n *Node) resetElectionTimer() {
 
 // startCampaign transitions follower/candidate → candidate: bump term, vote
 // for self (persisted BEFORE any vote request leaves), and solicit votes.
-func (n *Node) startCampaign() error {
+func (n *Group) startCampaign() error {
 	prevRole, prevTerm := n.role, n.term
 
 	n.role = RoleCandidate
@@ -71,6 +71,7 @@ func (n *Node) startCampaign() error {
 			CandidateId:  string(n.id),
 			LastLogIndex: n.rlog.LastIndex(),
 			LastLogTerm:  n.rlog.LastTerm(),
+			GroupId:      uint64(n.groupID), // Phase 17: demux on the receiving host
 		}
 		go n.sendRequestVote(p, req)
 	}
@@ -80,7 +81,7 @@ func (n *Node) startCampaign() error {
 // sendRequestVote runs on its own goroutine: one outbound RPC, one response
 // event back into the loop. The RPC lifetime is bounded by rpcCtx (cancelled
 // when Run exits) — no response can outlive the node.
-func (n *Node) sendRequestVote(to transport.NodeID, req *raftpb.RequestVoteRequest) {
+func (n *Group) sendRequestVote(to transport.NodeID, req *raftpb.RequestVoteRequest) {
 	resp, err := n.transport.RequestVote(n.rpcCtx, to, req)
 	select {
 	case n.events <- voteRespEvent{from: to, resp: resp, err: err}:
@@ -90,7 +91,7 @@ func (n *Node) sendRequestVote(to transport.NodeID, req *raftpb.RequestVoteReque
 }
 
 // onVoteResponse handles one vote reply while campaigning.
-func (n *Node) onVoteResponse(e voteRespEvent) error {
+func (n *Group) onVoteResponse(e voteRespEvent) error {
 	if e.err != nil {
 		// Unreachable peer: not counted. Majority math makes this safe.
 		n.logf("vote_rpc_failed", "peer", e.from, "err", e.err.Error())
@@ -125,7 +126,7 @@ func (n *Node) onVoteResponse(e voteRespEvent) error {
 // current-term entry so entries carried over from previous terms can commit
 // indirectly (Figure 8). Without it, a new leader's commitIndex would stall
 // until some client happened to write.
-func (n *Node) becomeLeader() error {
+func (n *Group) becomeLeader() error {
 	n.role = RoleLeader
 	n.leaderID = n.id
 	n.votes = nil
@@ -162,7 +163,7 @@ func (n *Node) becomeLeader() error {
 // leaveLeadership transitions any role → follower, failing proposals this
 // node can no longer commit on its own authority, and reads whose
 // leadership proof died with the role. Callers log the transition.
-func (n *Node) leaveLeadership() {
+func (n *Group) leaveLeadership() {
 	if n.role == RoleLeader {
 		n.failWaiters(ErrLeadershipLost)
 	}
@@ -175,7 +176,7 @@ func (n *Node) leaveLeadership() {
 
 // stepDown abandons candidacy/leadership because a higher term was observed.
 // The new term and cleared vote are persisted BEFORE anything else happens.
-func (n *Node) stepDown(newTerm uint64, reason string) error {
+func (n *Group) stepDown(newTerm uint64, reason string) error {
 	prev := n.term
 	if newTerm > n.term {
 		n.term = newTerm
@@ -196,7 +197,7 @@ func (n *Node) stepDown(newTerm uint64, reason string) error {
 // persistHardState fsyncs term+votedFor. MUST complete before the response
 // or outbound request that assumes it — the loop runs it synchronously, so
 // every ordering falls out of single-threading (no locks to get wrong).
-func (n *Node) persistHardState() error {
+func (n *Group) persistHardState() error {
 	if err := n.rlog.SetHardState(raftlog.HardState{
 		Term:     n.term,
 		VotedFor: string(n.votedFor),
@@ -208,7 +209,7 @@ func (n *Node) persistHardState() error {
 
 // logf emits a structured transition log with term/role context (debug:
 // campaigns and step-downs can be frequent during instability).
-func (n *Node) logf(msg string, kv ...any) {
+func (n *Group) logf(msg string, kv ...any) {
 	if n.log_ == nil {
 		return
 	}
@@ -218,7 +219,7 @@ func (n *Node) logf(msg string, kv ...any) {
 
 // logfInfo is logf at INFO: acquiring leadership is the operational event
 // operators watch for (it happens at most once per term, so it never spams).
-func (n *Node) logfInfo(msg string, kv ...any) {
+func (n *Group) logfInfo(msg string, kv ...any) {
 	if n.log_ == nil {
 		return
 	}

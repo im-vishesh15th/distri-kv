@@ -109,6 +109,11 @@ type Config struct {
 
 type call struct {
 	from, to transport.NodeID
+	// group/hasGroup scope the call to one Raft group (Phase 17). When
+	// hasGroup is false the call is node-level (Ping, engine tests):
+	// only node-level block rules apply.
+	group    uint64
+	hasGroup bool
 	// at is the virtual send time: sampled delays are measured from when
 	// the call entered the network, not from when the driver got to it,
 	// so a call that waits in the queue for a slow driver still arrives
@@ -178,6 +183,15 @@ type Network struct {
 	// Topology controls (all cleared by Heal).
 	isolated map[transport.NodeID]bool
 	blocked  map[[2]transport.NodeID]bool
+	// Phase 17: group-scoped topology. groupBlocked[pair][g] blocks only
+	// group g between the pair; groupIsolated[node][g] blocks only group
+	// g to/from the node. Node-level rules (isolated/blocked) apply to
+	// every group; group-level rules apply only to the named group.
+	groupBlocked  map[[2]transport.NodeID]map[uint64]bool
+	groupIsolated map[transport.NodeID]map[uint64]bool
+	// Phase 17: per-group fault overrides (drop/delay/duplication). A
+	// group with an entry uses those faults instead of the global ones.
+	groupFaults map[uint64]Faults
 	// Slow nodes: extra delay on any call whose endpoint matches.
 	slow map[transport.NodeID]time.Duration
 
@@ -191,15 +205,18 @@ type Network struct {
 func New(cfg Config) *Network {
 	cfg.Faults.validate()
 	n := &Network{
-		cfg:      cfg,
-		rng:      rand.New(rand.NewSource(cfg.Seed)),
-		handlers: make(map[transport.NodeID]transport.Handler),
-		isolated: make(map[transport.NodeID]bool),
-		blocked:  make(map[[2]transport.NodeID]bool),
-		slow:     make(map[transport.NodeID]time.Duration),
-		start:    time.Now(),
-		stop:     make(chan struct{}),
-		wake:     make(chan struct{}, 1),
+		cfg:           cfg,
+		rng:           rand.New(rand.NewSource(cfg.Seed)),
+		handlers:      make(map[transport.NodeID]transport.Handler),
+		isolated:      make(map[transport.NodeID]bool),
+		blocked:       make(map[[2]transport.NodeID]bool),
+		groupBlocked:  make(map[[2]transport.NodeID]map[uint64]bool),
+		groupIsolated: make(map[transport.NodeID]map[uint64]bool),
+		groupFaults:   make(map[uint64]Faults),
+		slow:          make(map[transport.NodeID]time.Duration),
+		start:         time.Now(),
+		stop:          make(chan struct{}),
+		wake:          make(chan struct{}, 1),
 	}
 	if cfg.Auto {
 		go n.drive()
@@ -221,12 +238,87 @@ func (n *Network) SetHandler(id transport.NodeID, h transport.Handler) {
 	n.mu.Unlock()
 }
 
+// BlockGroup forbids traffic for one group between a and b (both
+// directions) — the group-level cut. Other groups between the same pair
+// are unaffected.
+func (n *Network) BlockGroup(a, b transport.NodeID, group uint64) {
+	if a == b {
+		panic("sim: BlockGroup of a node with itself")
+	}
+	n.mu.Lock()
+	k := pairKey(a, b)
+	if n.groupBlocked[k] == nil {
+		n.groupBlocked[k] = make(map[uint64]bool)
+	}
+	n.groupBlocked[k][group] = true
+	n.mu.Unlock()
+}
+
+// IsolateGroup cuts one group off from a node (both directions): the
+// node's traffic for OTHER groups is unaffected.
+func (n *Network) IsolateGroup(id transport.NodeID, group uint64) {
+	n.mu.Lock()
+	if n.groupIsolated[id] == nil {
+		n.groupIsolated[id] = make(map[uint64]bool)
+	}
+	n.groupIsolated[id][group] = true
+	n.mu.Unlock()
+}
+
+// PartitionGroup splits the cluster into groups for ONE Raft group
+// (Phase 17): every cross-group path is blocked for that group, every
+// within-group path stays open. Other Raft groups are unaffected.
+func (n *Network) PartitionGroup(group uint64, groups ...[]transport.NodeID) {
+	n.mu.Lock()
+	for i := range groups {
+		for j := i + 1; j < len(groups); j++ {
+			for _, a := range groups[i] {
+				for _, b := range groups[j] {
+					k := pairKey(a, b)
+					if n.groupBlocked[k] == nil {
+						n.groupBlocked[k] = make(map[uint64]bool)
+					}
+					n.groupBlocked[k][group] = true
+				}
+			}
+		}
+	}
+	n.mu.Unlock()
+}
+
+// HealGroup clears every group-level block for one group (topology
+// only — fault overrides are deliberately NOT cleared).
+func (n *Network) HealGroup(group uint64) {
+	n.mu.Lock()
+	for _, m := range n.groupBlocked {
+		delete(m, group)
+	}
+	for _, m := range n.groupIsolated {
+		delete(m, group)
+	}
+	n.mu.Unlock()
+}
+
 // SetFaults replaces the per-call fault configuration (mid-test
 // injection). Invalid values panic — a test typo should fail loudly.
 func (n *Network) SetFaults(f Faults) {
 	f.validate()
 	n.mu.Lock()
 	n.cfg.Faults = f
+	n.mu.Unlock()
+}
+
+// SetGroupFaults sets a per-group fault override (Phase 17): the group's
+// traffic uses these drop/delay/duplication faults instead of the global
+// ones. An empty Faults clears the override.
+func (n *Network) SetGroupFaults(group uint64, f Faults) {
+	f.validate()
+	n.mu.Lock()
+	if f == (Faults{}) {
+		delete(n.groupFaults, group)
+	} else {
+		n.groupFaults[group] = f
+	}
 	n.mu.Unlock()
 }
 
@@ -300,11 +392,21 @@ func pairKey(a, b transport.NodeID) [2]transport.NodeID {
 	return [2]transport.NodeID{a, b}
 }
 
-// Call runs one RPC over the simulated network: enqueue, let the driver
-// sample faults and deliver, block until the responder answers (or the
-// call is dropped/blocked/undeliverable/ctx-cancelled).
+// Call runs one node-level RPC over the simulated network (Ping, engine
+// tests): only node-level block rules apply.
 func (n *Network) Call(ctx context.Context, from, to transport.NodeID, invoke func(transport.Handler) (any, error)) (any, error) {
-	c := &call{from: from, to: to, invoke: invoke, resp: make(chan result, 1)}
+	return n.call(ctx, from, to, 0, false, invoke)
+}
+
+// CallGroup runs one group-scoped RPC (Phase 17): the group's traffic is
+// subject to both node-level and group-level block rules, and to the
+// group's fault override if one is set.
+func (n *Network) CallGroup(ctx context.Context, from, to transport.NodeID, group uint64, invoke func(transport.Handler) (any, error)) (any, error) {
+	return n.call(ctx, from, to, group, true, invoke)
+}
+
+func (n *Network) call(ctx context.Context, from, to transport.NodeID, group uint64, hasGroup bool, invoke func(transport.Handler) (any, error)) (any, error) {
+	c := &call{from: from, to: to, group: group, hasGroup: hasGroup, invoke: invoke, resp: make(chan result, 1)}
 	n.mu.Lock()
 	if n.stopped {
 		n.mu.Unlock()
@@ -422,11 +524,23 @@ func (n *Network) schedule(c *call) {
 		c.respond(result{err: ErrBlocked})
 		return
 	}
+	if c.hasGroup {
+		k := pairKey(c.from, c.to)
+		if n.groupBlocked[k][c.group] || n.groupIsolated[c.from][c.group] || n.groupIsolated[c.to][c.group] {
+			c.respond(result{err: ErrBlocked})
+			return
+		}
+	}
 	if n.handler(c.to) == nil {
 		c.respond(result{err: ErrNoRoute})
 		return
 	}
 	f := n.cfg.Faults
+	if c.hasGroup {
+		if gf, ok := n.groupFaults[c.group]; ok {
+			f = gf
+		}
+	}
 	if f.DropRate > 0 && n.rng.Float64() < f.DropRate {
 		c.respond(result{err: ErrDropped})
 		return

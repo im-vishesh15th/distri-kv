@@ -45,7 +45,7 @@ type liveNode struct {
 	srv       *grpc.Server
 	tpt       *grpctransport.RealTransport
 	rlog      *raftlog.Log
-	rnode     *raft.Node
+	rnode     *raft.Group
 	engine    kv.Engine // this replica's state machine storage (Phase 7)
 	sm        *kv.SM    // the SM adapter: Snapshot/Restore for Phase 12 tests
 	snapEvery uint64    // Config.SnapshotEvery this node booted with

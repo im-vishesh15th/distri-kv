@@ -32,7 +32,7 @@ import "distrikv/internal/raftlog"
 // apply, so info would spam — -debug surfaces it), never silently dropped,
 // and never halts the node: a halt would take down a healthy replica over a
 // snapshot-directory write error while its log still serves commits.
-func (n *Node) maybeSnapshot() {
+func (n *Group) maybeSnapshot() {
 	if n.snapEvery == 0 || n.snapshottable == nil {
 		return
 	}

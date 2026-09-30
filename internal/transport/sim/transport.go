@@ -44,7 +44,7 @@ func (t *Transport) Ping(ctx context.Context, to transport.NodeID) error {
 }
 
 func (t *Transport) RequestVote(ctx context.Context, to transport.NodeID, req *raftpb.RequestVoteRequest) (*raftpb.RequestVoteResponse, error) {
-	v, err := t.net.Call(ctx, t.id, to, func(h transport.Handler) (any, error) {
+	v, err := t.net.CallGroup(ctx, t.id, to, req.GroupId, func(h transport.Handler) (any, error) {
 		return h.HandleRequestVote(ctx, req)
 	})
 	if err != nil {
@@ -54,7 +54,7 @@ func (t *Transport) RequestVote(ctx context.Context, to transport.NodeID, req *r
 }
 
 func (t *Transport) AppendEntries(ctx context.Context, to transport.NodeID, req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error) {
-	v, err := t.net.Call(ctx, t.id, to, func(h transport.Handler) (any, error) {
+	v, err := t.net.CallGroup(ctx, t.id, to, req.GroupId, func(h transport.Handler) (any, error) {
 		return h.HandleAppendEntries(ctx, req)
 	})
 	if err != nil {
@@ -64,7 +64,7 @@ func (t *Transport) AppendEntries(ctx context.Context, to transport.NodeID, req 
 }
 
 func (t *Transport) InstallSnapshot(ctx context.Context, to transport.NodeID, req *raftpb.InstallSnapshotRequest) (*raftpb.InstallSnapshotResponse, error) {
-	v, err := t.net.Call(ctx, t.id, to, func(h transport.Handler) (any, error) {
+	v, err := t.net.CallGroup(ctx, t.id, to, req.GroupId, func(h transport.Handler) (any, error) {
 		return h.HandleInstallSnapshot(ctx, req)
 	})
 	if err != nil {

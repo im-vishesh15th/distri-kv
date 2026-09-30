@@ -185,11 +185,17 @@ func (x *LogEntry) GetPayload() []byte {
 }
 
 type RequestVoteRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
-	CandidateId   string                 `protobuf:"bytes,2,opt,name=candidate_id,json=candidateId,proto3" json:"candidate_id,omitempty"`
-	LastLogIndex  uint64                 `protobuf:"varint,3,opt,name=last_log_index,json=lastLogIndex,proto3" json:"last_log_index,omitempty"`
-	LastLogTerm   uint64                 `protobuf:"varint,4,opt,name=last_log_term,json=lastLogTerm,proto3" json:"last_log_term,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Term         uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	CandidateId  string                 `protobuf:"bytes,2,opt,name=candidate_id,json=candidateId,proto3" json:"candidate_id,omitempty"`
+	LastLogIndex uint64                 `protobuf:"varint,3,opt,name=last_log_index,json=lastLogIndex,proto3" json:"last_log_index,omitempty"`
+	LastLogTerm  uint64                 `protobuf:"varint,4,opt,name=last_log_term,json=lastLogTerm,proto3" json:"last_log_term,omitempty"`
+	// Phase 17 (Multi-Raft): which Raft group this vote is for. The
+	// transport multiplexes groups over one connection per peer pair and
+	// the receiving node demuxes on this field. A missing field reads as
+	// 0, so group 0 is the default and pre-existing single-group messages
+	// are unchanged.
+	GroupId       uint64 `protobuf:"varint,5,opt,name=group_id,json=groupId,proto3" json:"group_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -252,6 +258,13 @@ func (x *RequestVoteRequest) GetLastLogTerm() uint64 {
 	return 0
 }
 
+func (x *RequestVoteRequest) GetGroupId() uint64 {
+	if x != nil {
+		return x.GroupId
+	}
+	return 0
+}
+
 type RequestVoteResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
@@ -305,13 +318,16 @@ func (x *RequestVoteResponse) GetVoteGranted() bool {
 }
 
 type AppendEntriesRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
-	LeaderId      string                 `protobuf:"bytes,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
-	PrevLogIndex  uint64                 `protobuf:"varint,3,opt,name=prev_log_index,json=prevLogIndex,proto3" json:"prev_log_index,omitempty"`
-	PrevLogTerm   uint64                 `protobuf:"varint,4,opt,name=prev_log_term,json=prevLogTerm,proto3" json:"prev_log_term,omitempty"`
-	Entries       []*LogEntry            `protobuf:"bytes,5,rep,name=entries,proto3" json:"entries,omitempty"`
-	LeaderCommit  uint64                 `protobuf:"varint,6,opt,name=leader_commit,json=leaderCommit,proto3" json:"leader_commit,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Term         uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	LeaderId     string                 `protobuf:"bytes,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
+	PrevLogIndex uint64                 `protobuf:"varint,3,opt,name=prev_log_index,json=prevLogIndex,proto3" json:"prev_log_index,omitempty"`
+	PrevLogTerm  uint64                 `protobuf:"varint,4,opt,name=prev_log_term,json=prevLogTerm,proto3" json:"prev_log_term,omitempty"`
+	Entries      []*LogEntry            `protobuf:"bytes,5,rep,name=entries,proto3" json:"entries,omitempty"`
+	LeaderCommit uint64                 `protobuf:"varint,6,opt,name=leader_commit,json=leaderCommit,proto3" json:"leader_commit,omitempty"`
+	// Phase 17 (Multi-Raft): which Raft group this append is for (see
+	// RequestVoteRequest.group_id).
+	GroupId       uint64 `protobuf:"varint,7,opt,name=group_id,json=groupId,proto3" json:"group_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -388,6 +404,13 @@ func (x *AppendEntriesRequest) GetLeaderCommit() uint64 {
 	return 0
 }
 
+func (x *AppendEntriesRequest) GetGroupId() uint64 {
+	if x != nil {
+		return x.GroupId
+	}
+	return 0
+}
+
 type AppendEntriesResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
@@ -451,7 +474,10 @@ type InstallSnapshotRequest struct {
 	LastIncludedTerm  uint64 `protobuf:"varint,4,opt,name=last_included_term,json=lastIncludedTerm,proto3" json:"last_included_term,omitempty"`
 	// The state machine's serialized state: opaque to raft (only the same
 	// state machine reads it back).
-	Data          []byte `protobuf:"bytes,5,opt,name=data,proto3" json:"data,omitempty"`
+	Data []byte `protobuf:"bytes,5,opt,name=data,proto3" json:"data,omitempty"`
+	// Phase 17 (Multi-Raft): which Raft group this snapshot is for (see
+	// RequestVoteRequest.group_id).
+	GroupId       uint64 `protobuf:"varint,6,opt,name=group_id,json=groupId,proto3" json:"group_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -521,6 +547,13 @@ func (x *InstallSnapshotRequest) GetData() []byte {
 	return nil
 }
 
+func (x *InstallSnapshotRequest) GetGroupId() uint64 {
+	if x != nil {
+		return x.GroupId
+	}
+	return 0
+}
+
 type InstallSnapshotResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
@@ -586,31 +619,34 @@ const file_proto_raft_proto_rawDesc = "" +
 	"\bLogEntry\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x04R\x05index\x12\x12\n" +
 	"\x04term\x18\x02 \x01(\x04R\x04term\x12\x18\n" +
-	"\apayload\x18\x03 \x01(\fR\apayload\"\x95\x01\n" +
+	"\apayload\x18\x03 \x01(\fR\apayload\"\xb0\x01\n" +
 	"\x12RequestVoteRequest\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12!\n" +
 	"\fcandidate_id\x18\x02 \x01(\tR\vcandidateId\x12$\n" +
 	"\x0elast_log_index\x18\x03 \x01(\x04R\flastLogIndex\x12\"\n" +
-	"\rlast_log_term\x18\x04 \x01(\x04R\vlastLogTerm\"L\n" +
+	"\rlast_log_term\x18\x04 \x01(\x04R\vlastLogTerm\x12\x19\n" +
+	"\bgroup_id\x18\x05 \x01(\x04R\agroupId\"L\n" +
 	"\x13RequestVoteResponse\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12!\n" +
-	"\fvote_granted\x18\x02 \x01(\bR\vvoteGranted\"\xec\x01\n" +
+	"\fvote_granted\x18\x02 \x01(\bR\vvoteGranted\"\x87\x02\n" +
 	"\x14AppendEntriesRequest\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x1b\n" +
 	"\tleader_id\x18\x02 \x01(\tR\bleaderId\x12$\n" +
 	"\x0eprev_log_index\x18\x03 \x01(\x04R\fprevLogIndex\x12\"\n" +
 	"\rprev_log_term\x18\x04 \x01(\x04R\vprevLogTerm\x124\n" +
 	"\aentries\x18\x05 \x03(\v2\x1a.distrikv.raft.v1.LogEntryR\aentries\x12#\n" +
-	"\rleader_commit\x18\x06 \x01(\x04R\fleaderCommit\"E\n" +
+	"\rleader_commit\x18\x06 \x01(\x04R\fleaderCommit\x12\x19\n" +
+	"\bgroup_id\x18\a \x01(\x04R\agroupId\"E\n" +
 	"\x15AppendEntriesResponse\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x18\n" +
-	"\asuccess\x18\x02 \x01(\bR\asuccess\"\xbb\x01\n" +
+	"\asuccess\x18\x02 \x01(\bR\asuccess\"\xd6\x01\n" +
 	"\x16InstallSnapshotRequest\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x1b\n" +
 	"\tleader_id\x18\x02 \x01(\tR\bleaderId\x12.\n" +
 	"\x13last_included_index\x18\x03 \x01(\x04R\x11lastIncludedIndex\x12,\n" +
 	"\x12last_included_term\x18\x04 \x01(\x04R\x10lastIncludedTerm\x12\x12\n" +
-	"\x04data\x18\x05 \x01(\fR\x04data\"G\n" +
+	"\x04data\x18\x05 \x01(\fR\x04data\x12\x19\n" +
+	"\bgroup_id\x18\x06 \x01(\x04R\agroupId\"G\n" +
 	"\x17InstallSnapshotResponse\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x18\n" +
 	"\asuccess\x18\x02 \x01(\bR\asuccess2\xfa\x02\n" +

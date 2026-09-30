@@ -149,7 +149,7 @@ func (f *fakeTransport) Close() error { return nil }
 // --- harness ---
 
 type hnode struct {
-	n      *raft.Node
+	n      *raft.Group
 	tr     *fakeTransport
 	rlog   *raftlog.Log
 	runErr chan error
@@ -269,7 +269,7 @@ func collectVoteCalls(t *testing.T, ch chan voteCall, n int) map[transport.NodeI
 	return got
 }
 
-func isLeader(n *raft.Node) bool { return n.Status().Role == raft.RoleLeader }
+func isLeader(n *raft.Group) bool { return n.Status().Role == raft.RoleLeader }
 
 // --- tests ---
 

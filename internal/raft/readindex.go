@@ -77,7 +77,7 @@ type readWait struct {
 // leadership while the read waited — redirect and retry; reads have no
 // side effects), ErrStopped (Run exited), ctx.Err() (the caller gave up;
 // the loop may still complete the read later and discard the reply).
-func (n *Node) ReadIndex(ctx context.Context) (uint64, error) {
+func (n *Group) ReadIndex(ctx context.Context) (uint64, error) {
 	reply := make(chan readIndexReply, 1)
 	select {
 	case n.events <- readIndexEvent{reply: reply}:
@@ -99,7 +99,7 @@ func (n *Node) ReadIndex(ctx context.Context) (uint64, error) {
 // onReadIndex registers a read; activation/release happen in checkReads,
 // which runs at the end of every loop turn — including this one, so a
 // read that is already past all gates answers without another event.
-func (n *Node) onReadIndex(e readIndexEvent) error {
+func (n *Group) onReadIndex(e readIndexEvent) error {
 	if n.role != RoleLeader {
 		e.reply <- readIndexReply{err: ErrNotLeader}
 		return nil
@@ -112,7 +112,7 @@ func (n *Node) onReadIndex(e readIndexEvent) error {
 // the term's no-op has committed, releases those whose fresh quorum is
 // counted AND whose apply cursor has reached the read point. Loop
 // goroutine only; called once after each handled event.
-func (n *Node) checkReads() {
+func (n *Group) checkReads() {
 	if len(n.readWaiters) == 0 {
 		return
 	}
@@ -146,7 +146,7 @@ func (n *Node) checkReads() {
 // NOW (gate 2 passed), the quorum proof restarts from this moment, and
 // a send is forced to every peer so a fresh acknowledgment exists to
 // wait for.
-func (n *Node) activateRead(w *readWait) {
+func (n *Group) activateRead(w *readWait) {
 	w.ready = true
 	w.ridx = n.commitIndex
 	w.term = n.term
@@ -175,7 +175,7 @@ func (n *Node) activateRead(w *readWait) {
 // countReadAck folds one fresh, successful AppendEntries acknowledgment
 // into the pending reads it post-dates. Called from onAppendResponse
 // with the response's send generation (gate 1 freshness).
-func (n *Node) countReadAck(from transport.NodeID, term, gen uint64) {
+func (n *Group) countReadAck(from transport.NodeID, term, gen uint64) {
 	for _, w := range n.readWaiters {
 		if !w.ready || w.term != term {
 			continue
@@ -188,7 +188,7 @@ func (n *Node) countReadAck(from transport.NodeID, term, gen uint64) {
 
 // failReads fails every pending read (leadership loss / step-down). The
 // reply channels are buffered, so this never blocks the loop.
-func (n *Node) failReads(err error) {
+func (n *Group) failReads(err error) {
 	for _, w := range n.readWaiters {
 		w.reply <- readIndexReply{err: err}
 	}

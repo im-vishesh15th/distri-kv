@@ -81,6 +81,11 @@ Client SDK -> Cluster Router -> hash -> Shard Map (16384 slots)
 A metadata Raft group for the shard map is Tier 3 and optional; the static
 config-driven map comes first.
 
+Phase 17 delivered the Multi-Raft substrate: a node hosts N independent
+`raft.Group`s, the transport multiplexes them by `group_id`, and each group
+persists under `data/g<id>/<node>/` (see docs/multiraft.md). Phase 18 adds
+the fixed-slot key→group mapping.
+
 ## 6. Product architecture (after Tier 1)
 
 ```

@@ -48,12 +48,12 @@ import (
 )
 
 // StatusFunc reports this node's Raft status (identity, role, leader) for
-// leader routing. *raft.Node.Status satisfies it.
+// leader routing. *raft.Group.Status satisfies it.
 type StatusFunc func() raft.Status
 
 // Proposer replicates one encoded Command through Raft and waits for it to
 // be applied, returning the state machine's result for that entry; it also
-// exposes ReadIndex, the linearizable-read barrier (Phase 11). *raft.Node
+// exposes ReadIndex, the linearizable-read barrier (Phase 11). *raft.Group
 // implements it; the seam exists so the service can be tested against any
 // implementation without importing raft's internals.
 type Proposer interface {

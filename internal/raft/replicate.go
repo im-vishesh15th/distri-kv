@@ -34,7 +34,7 @@ type peerProgress struct {
 // count toward commit), registers the caller as a commit waiter, and
 // replicates. The reply is written later — on commit advance, or by
 // failWaiters if leadership is lost.
-func (n *Node) onPropose(e proposeEvent) error {
+func (n *Group) onPropose(e proposeEvent) error {
 	if n.role != RoleLeader {
 		e.reply <- proposeReply{err: ErrNotLeader}
 		return nil
@@ -61,7 +61,7 @@ func (n *Node) onPropose(e proposeEvent) error {
 
 // broadcastAppend triggers a send to every peer; busy peers are marked
 // pending and resend when their in-flight RPC returns.
-func (n *Node) broadcastAppend() {
+func (n *Group) broadcastAppend() {
 	for _, p := range n.peers {
 		if p == n.id {
 			continue
@@ -73,7 +73,7 @@ func (n *Node) broadcastAppend() {
 // sendAppendTo ships entries starting at progress.next (empty = heartbeat
 // when caught up). prevLog is the consistency anchor; leaderCommit
 // piggybacks the commit watermark for followers.
-func (n *Node) sendAppendTo(to transport.NodeID) {
+func (n *Group) sendAppendTo(to transport.NodeID) {
 	prog, ok := n.progress[to]
 	if !ok {
 		return // stale trigger from a previous term
@@ -136,6 +136,7 @@ func (n *Node) sendAppendTo(to transport.NodeID) {
 		PrevLogTerm:  prevTerm,
 		Entries:      entries,
 		LeaderCommit: n.commitIndex,
+		GroupId:      uint64(n.groupID), // Phase 17: demux on the receiving host
 	}
 	go func() {
 		resp, err := n.transport.AppendEntries(n.rpcCtx, to, req)
@@ -153,7 +154,7 @@ func (n *Node) sendAppendTo(to transport.NodeID) {
 // machine payload, then catches up on the tail from match+1. It shares the
 // per-peer in-flight slot with sendAppendTo (which has already checked it
 // when calling, so this guard is belt-and-suspenders for future callers).
-func (n *Node) sendInstallSnapshotTo(to transport.NodeID) {
+func (n *Group) sendInstallSnapshotTo(to transport.NodeID) {
 	prog, ok := n.progress[to]
 	if !ok {
 		return // stale trigger from a previous term
@@ -184,6 +185,7 @@ func (n *Node) sendInstallSnapshotTo(to transport.NodeID) {
 		LastIncludedIndex: meta.LastIncludedIndex,
 		LastIncludedTerm:  meta.LastIncludedTerm,
 		Data:              payload,
+		GroupId:           uint64(n.groupID), // Phase 17: demux on the receiving host
 	}
 	go func() {
 		resp, err := n.transport.InstallSnapshot(n.rpcCtx, to, req)
@@ -199,7 +201,7 @@ func (n *Node) sendInstallSnapshotTo(to transport.NodeID) {
 // replication state (Phase 13). Success advances match to the snapshot's
 // lastIncludedIndex (monotonic: a redundant snapshot must not regress it)
 // so the follower then catches up on the tail through normal appends.
-func (n *Node) onInstallSnapshotResponse(e snapRespEvent) error {
+func (n *Group) onInstallSnapshotResponse(e snapRespEvent) error {
 	if e.err != nil {
 		// Errors carry no term, so gate on ours: only the CURRENT
 		// leadership epoch may touch progress (same reasoning as
@@ -256,7 +258,7 @@ func (n *Node) onInstallSnapshotResponse(e snapRespEvent) error {
 }
 
 // onAppendResponse folds one AppendEntries reply into replication state.
-func (n *Node) onAppendResponse(e appRespEvent) error {
+func (n *Group) onAppendResponse(e appRespEvent) error {
 	if e.err != nil {
 		// Errors carry no term, so gate on ours: only the CURRENT
 		// leadership epoch may touch progress. A stale error from a
@@ -330,7 +332,7 @@ func (n *Node) onAppendResponse(e appRespEvent) error {
 // leader from committing entries from previous terms merely by counting
 // replicas — those commit indirectly, once a current-term entry above them
 // commits (new leaders append a no-op for exactly this reason).
-func (n *Node) maybeAdvanceCommit() error {
+func (n *Group) maybeAdvanceCommit() error {
 	matches := make([]uint64, 0, len(n.peers))
 	for _, p := range n.peers {
 		if p == n.id {
@@ -369,7 +371,7 @@ func (n *Node) maybeAdvanceCommit() error {
 // exactly the entries still owed to the state machine. Waiters on each
 // index receive that entry's result — or its domain error, which is an
 // outcome of the entry, not a failure of the node.
-func (n *Node) applyCommitted() error {
+func (n *Group) applyCommitted() error {
 	for n.lastApplied < n.commitIndex {
 		idx := n.lastApplied + 1
 		e, err := n.rlog.Get(idx)
@@ -405,7 +407,7 @@ func (n *Node) applyCommitted() error {
 
 // failWaiters fails every pending Propose (leadership loss). Reply channels
 // are buffered, so this never blocks the loop.
-func (n *Node) failWaiters(err error) {
+func (n *Group) failWaiters(err error) {
 	for idx, chans := range n.waiters {
 		for _, ch := range chans {
 			ch <- proposeReply{err: err}

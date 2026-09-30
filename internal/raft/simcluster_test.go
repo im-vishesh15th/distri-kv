@@ -29,7 +29,7 @@ type simNode struct {
 	// lock across a blocking call like Status()).
 	mu     sync.RWMutex
 	id     transport.NodeID
-	rnode  *raft.Node
+	rnode  *raft.Group
 	rlog   *raftlog.Log
 	engine kv.Engine
 	dir    string             // durable directory: survives kill/restart
@@ -40,7 +40,7 @@ type simNode struct {
 }
 
 // view returns a snapshot of the mutable harness fields.
-func (sn *simNode) view() (dead bool, rnode *raft.Node, rlog *raftlog.Log, engine kv.Engine, cancel context.CancelFunc, runErr chan error) {
+func (sn *simNode) view() (dead bool, rnode *raft.Group, rlog *raftlog.Log, engine kv.Engine, cancel context.CancelFunc, runErr chan error) {
 	sn.mu.RLock()
 	defer sn.mu.RUnlock()
 	return sn.dead, sn.rnode, sn.rlog, sn.engine, sn.cancel, sn.runErr
@@ -56,7 +56,7 @@ func (sn *simNode) markDead() {
 // bootComponents builds the durable + raft pieces for one node: open the
 // log, build the engine + Raft core, register with the network, start the
 // loop and ticker. Shared by bootSimNode and restartSimNode.
-func bootComponents(t *testing.T, network *sim.Network, id transport.NodeID, dir string, ids []transport.NodeID) (*raft.Node, *raftlog.Log, kv.Engine, context.CancelFunc, chan error) {
+func bootComponents(t *testing.T, network *sim.Network, id transport.NodeID, dir string, ids []transport.NodeID) (*raft.Group, *raftlog.Log, kv.Engine, context.CancelFunc, chan error) {
 	t.Helper()
 
 	rlog, _, err := raftlog.Open(dir)

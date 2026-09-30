@@ -15,7 +15,7 @@ import (
 
 // asLeader puts a node into leadership for commit-rule tests without
 // broadcasting (state is loop-owned; the test goroutine is the loop here).
-func asLeader(t *testing.T, n *Node, term uint64, peers ...transport.NodeID) {
+func asLeader(t *testing.T, n *Group, term uint64, peers ...transport.NodeID) {
 	t.Helper()
 	n.role = RoleLeader
 	n.leaderID = n.id

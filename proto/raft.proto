@@ -57,6 +57,12 @@ message RequestVoteRequest {
   string candidate_id = 2;
   uint64 last_log_index = 3;
   uint64 last_log_term = 4;
+  // Phase 17 (Multi-Raft): which Raft group this vote is for. The
+  // transport multiplexes groups over one connection per peer pair and
+  // the receiving node demuxes on this field. A missing field reads as
+  // 0, so group 0 is the default and pre-existing single-group messages
+  // are unchanged.
+  uint64 group_id = 5;
 }
 
 message RequestVoteResponse {
@@ -71,6 +77,9 @@ message AppendEntriesRequest {
   uint64 prev_log_term = 4;
   repeated LogEntry entries = 5;
   uint64 leader_commit = 6;
+  // Phase 17 (Multi-Raft): which Raft group this append is for (see
+  // RequestVoteRequest.group_id).
+  uint64 group_id = 7;
 }
 
 message AppendEntriesResponse {
@@ -89,6 +98,9 @@ message InstallSnapshotRequest {
   // The state machine's serialized state: opaque to raft (only the same
   // state machine reads it back).
   bytes data = 5;
+  // Phase 17 (Multi-Raft): which Raft group this snapshot is for (see
+  // RequestVoteRequest.group_id).
+  uint64 group_id = 6;
 }
 
 message InstallSnapshotResponse {

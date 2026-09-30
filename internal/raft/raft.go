@@ -4,7 +4,7 @@
 // # Concurrency model: single event loop
 //
 // All Raft state (term, votedFor, role, timers, votes) is owned by ONE
-// goroutine running Node.Run. Everything that could touch that state —
+// goroutine running Group.Run. Everything that could touch that state —
 // clock ticks, inbound RPCs, outbound RPC responses, status queries — is an
 // event on a channel. There are no locks around Raft state because there is
 // only one writer, ever. This makes every state transition sequential and
@@ -12,7 +12,7 @@
 //
 // # Time: tick-driven, injectable
 //
-// The node never reads a clock. An external driver calls Node.Tick() at a
+// The node never reads a clock. An external driver calls Group.Tick() at a
 // fixed period (StartTicker in production; manually in tests), and all
 // timeouts are counted in ticks (ElectionTicks, randomized to [E, 2E) per
 // term; HeartbeatTicks). Deterministic tests therefore control time exactly.
@@ -39,7 +39,12 @@ import (
 	"distrikv/internal/transport"
 )
 
-// Role is a node's Raft role.
+// GroupID identifies one Raft group (Phase 17). A node hosts N groups;
+// the transport multiplexes them over one connection per peer pair and
+// the receiving node demuxes on the RPC's group_id.
+type GroupID uint64
+
+// Role is a group's Raft role.
 type Role string
 
 const (
@@ -70,10 +75,11 @@ var (
 	ErrEmptyProposal = errors.New("raft: empty proposal")
 )
 
-// Status is a snapshot of node state for observability and tests.
+// Status is a snapshot of a group's state for observability and tests.
 // It is safe to call from any goroutine.
 type Status struct {
 	ID       transport.NodeID
+	GroupID  GroupID // Phase 17: which Raft group this status is for
 	Role     Role
 	Term     uint64
 	LeaderID transport.NodeID // "" = unknown
@@ -88,10 +94,16 @@ type Status struct {
 	Peers []transport.NodeID
 }
 
-// Config constructs a Node.
+// Config constructs a Group.
 type Config struct {
 	// ID is this node's identity.
 	ID transport.NodeID
+
+	// GroupID is which Raft group this replica serves (Phase 17). The
+	// transport multiplexes groups over one connection per peer pair and
+	// the receiving node demuxes on the RPC's group_id. 0 is the default
+	// group; pre-existing single-group configs are unchanged.
+	GroupID GroupID
 
 	// Peers is the static cluster membership INCLUDING self.
 	// nil means [ID] (standalone node — elects itself immediately).
@@ -295,10 +307,13 @@ type proposeReply struct {
 	err    error
 }
 
-// Node is a single Raft replica. Create with New, then run exactly one
+// Group is a single Raft replica for ONE Raft group (Phase 17: a node
+// hosts N groups, each an independent consensus group with its own
+// leader/term/log/state machine). Create with New, then run exactly one
 // goroutine via Run; drive time with Tick (or StartTicker).
-type Node struct {
+type Group struct {
 	id        transport.NodeID
+	groupID   GroupID // Phase 17: which Raft group this replica serves
 	peers     []transport.NodeID
 	majorityN int
 	transport transport.Transport
@@ -368,7 +383,7 @@ type Node struct {
 
 // New validates cfg and loads persisted hard state from the log.
 // It does not start anything: call Run.
-func New(cfg Config) (*Node, error) {
+func New(cfg Config) (*Group, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -400,8 +415,9 @@ func New(cfg Config) (*Node, error) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	n := &Node{
+	n := &Group{
 		id:        cfg.ID,
+		groupID:   cfg.GroupID,
 		peers:     peersCopy,
 		majorityN: len(peersCopy)/2 + 1,
 		transport: cfg.Transport,
@@ -471,7 +487,7 @@ func New(cfg Config) (*Node, error) {
 // A snapshot whose state machine cannot restore (or whose payload sits
 // beyond the log's retained start — entries lost) is a hard error: running
 // anyway would fabricate a state machine that diverges from the cluster.
-func (n *Node) restoreSnapshot() error {
+func (n *Group) restoreSnapshot() error {
 	meta, payload, err := n.rlog.LoadSnapshot()
 	if err != nil {
 		return fmt.Errorf("raft: load snapshot: %w", err)
@@ -524,7 +540,7 @@ func (n *Node) restoreSnapshot() error {
 // once, from its own goroutine; it returns nil on clean shutdown or the
 // persistence error that halted the node (a disk failure stops Raft — the
 // node cannot uphold safety without its durable state).
-func (n *Node) Run(ctx context.Context) error {
+func (n *Group) Run(ctx context.Context) error {
 	if !n.running.CompareAndSwap(false, true) {
 		return errors.New("raft: Run called twice")
 	}
@@ -543,9 +559,15 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 }
 
+// ID is this group's node identity (Phase 17).
+func (n *Group) ID() transport.NodeID { return n.id }
+
+// GroupID is this group's identity (Phase 17).
+func (n *Group) GroupID() GroupID { return n.groupID }
+
 // Tick advances logical time by one unit. Drive it from exactly one driver
 // goroutine (StartTicker does this in production).
-func (n *Node) Tick() {
+func (n *Group) Tick() {
 	select {
 	case n.events <- tickEvent{}:
 	case <-n.done:
@@ -553,7 +575,7 @@ func (n *Node) Tick() {
 }
 
 // Status returns a snapshot of the node's state (any goroutine).
-func (n *Node) Status() Status {
+func (n *Group) Status() Status {
 	reply := make(chan Status, 1)
 	select {
 	case n.events <- statusEvent{reply: reply}:
@@ -584,7 +606,7 @@ func (n *Node) Status() Status {
 // Cancelling ctx does NOT retract an appended entry: it may still commit
 // and apply. Distinguishing "applied" from "never happened" on retry is
 // Phase 9's dedup job — until then, callers must not blindly retry writes.
-func (n *Node) Propose(ctx context.Context, payload []byte) (uint64, any, error) {
+func (n *Group) Propose(ctx context.Context, payload []byte) (uint64, any, error) {
 	if len(payload) == 0 {
 		return 0, nil, ErrEmptyProposal
 	}
@@ -610,7 +632,7 @@ func (n *Node) Propose(ctx context.Context, payload []byte) (uint64, any, error)
 // HandleRequestVote implements transport.Handler — called on the inbound
 // RPC's goroutine; the actual decision happens inside the event loop so the
 // response is ordered after any term/vote persistence.
-func (n *Node) HandleRequestVote(ctx context.Context, req *raftpb.RequestVoteRequest) (*raftpb.RequestVoteResponse, error) {
+func (n *Group) HandleRequestVote(ctx context.Context, req *raftpb.RequestVoteRequest) (*raftpb.RequestVoteResponse, error) {
 	reply := make(chan voteReply, 1)
 	select {
 	case n.events <- voteReqEvent{req: req, reply: reply}:
@@ -630,7 +652,7 @@ func (n *Node) HandleRequestVote(ctx context.Context, req *raftpb.RequestVoteReq
 }
 
 // HandleAppendEntries implements transport.Handler (see HandleRequestVote).
-func (n *Node) HandleAppendEntries(ctx context.Context, req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error) {
+func (n *Group) HandleAppendEntries(ctx context.Context, req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error) {
 	reply := make(chan appReply, 1)
 	select {
 	case n.events <- appReqEvent{req: req, reply: reply}:
@@ -650,7 +672,7 @@ func (n *Node) HandleAppendEntries(ctx context.Context, req *raftpb.AppendEntrie
 }
 
 // HandleInstallSnapshot implements transport.Handler (see HandleRequestVote).
-func (n *Node) HandleInstallSnapshot(ctx context.Context, req *raftpb.InstallSnapshotRequest) (*raftpb.InstallSnapshotResponse, error) {
+func (n *Group) HandleInstallSnapshot(ctx context.Context, req *raftpb.InstallSnapshotRequest) (*raftpb.InstallSnapshotResponse, error) {
 	reply := make(chan snapReply, 1)
 	select {
 	case n.events <- snapReqEvent{req: req, reply: reply}:
@@ -671,7 +693,7 @@ func (n *Node) HandleInstallSnapshot(ctx context.Context, req *raftpb.InstallSna
 
 // StartTicker drives n.Tick at period until ctx is cancelled. This is the
 // production time source; tests call Tick manually instead.
-func StartTicker(ctx context.Context, n *Node, period time.Duration) {
+func StartTicker(ctx context.Context, n *Group, period time.Duration) {
 	go func() {
 		t := time.NewTicker(period)
 		defer t.Stop()
@@ -690,7 +712,7 @@ func StartTicker(ctx context.Context, n *Node, period time.Duration) {
 // advance, apply advance, and fresh quorum acks all arrive as ordinary
 // events, so one post-event point is exactly where pending reads
 // activate and release. A returned error halts the node.
-func (n *Node) handle(ev event) error {
+func (n *Group) handle(ev event) error {
 	if err := n.dispatch(ev); err != nil {
 		return err
 	}
@@ -699,7 +721,7 @@ func (n *Node) handle(ev event) error {
 }
 
 // dispatch runs the event itself (see handle for the ReadIndex hook).
-func (n *Node) dispatch(ev event) error {
+func (n *Group) dispatch(ev event) error {
 	switch e := ev.(type) {
 	case tickEvent:
 		return n.onTick()
@@ -744,9 +766,10 @@ func (n *Node) dispatch(ev event) error {
 }
 
 // snapshot builds Status (loop goroutine only).
-func (n *Node) snapshot() Status {
+func (n *Group) snapshot() Status {
 	return Status{
 		ID:           n.id,
+		GroupID:      n.groupID,
 		Role:         n.role,
 		Term:         n.term,
 		LeaderID:     n.leaderID,

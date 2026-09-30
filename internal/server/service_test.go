@@ -30,7 +30,7 @@ import (
 // Raft log, transport, event loop, ticker — and waits for self-election.
 // The engine is only ever mutated by this node's apply path, exactly as in
 // a cluster: mutations go Service -> Propose -> log -> apply -> engine.
-func startSingleNode(t *testing.T) (kv.Engine, *raft.Node) {
+func startSingleNode(t *testing.T) (kv.Engine, *raft.Group) {
 	t.Helper()
 
 	engine := kv.NewMemEngine()

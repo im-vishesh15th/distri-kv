@@ -43,7 +43,7 @@ func (t *nopTransport) Close() error { return nil }
 
 // newTestNode builds a node whose loop is running but idle: tests mutate
 // state only through handle(...) on their own goroutine.
-func newTestNode(t *testing.T, peers ...transport.NodeID) *Node {
+func newTestNode(t *testing.T, peers ...transport.NodeID) *Group {
 	t.Helper()
 	rlog, _, err := raftlog.Open(t.TempDir())
 	if err != nil {
@@ -82,7 +82,7 @@ func newTestNode(t *testing.T, peers ...transport.NodeID) *Node {
 // ticks (state is loop-owned; the test goroutine IS the loop here). It
 // persists term+vote exactly like startCampaign does — the durable-before-
 // vote-RPC contract holds for this hand-built state too.
-func asCandidate(t *testing.T, n *Node, term uint64) {
+func asCandidate(t *testing.T, n *Group, term uint64) {
 	t.Helper()
 	n.role = RoleCandidate
 	n.term = term

@@ -20,8 +20,11 @@ import (
 	"distrikv/internal/kv"
 	"distrikv/internal/raft"
 	"distrikv/internal/raftlog"
+	"distrikv/internal/server"
 	"distrikv/internal/transport"
 	grpctransport "distrikv/internal/transport/grpc"
+
+	kv1 "distrikv/gen/kv/v1"
 
 	"google.golang.org/grpc"
 )
@@ -110,6 +113,14 @@ func bootNode(t *testing.T, id transport.NodeID, addr, dir string, peers []trans
 
 	srv := grpc.NewServer()
 	grpctransport.RegisterRaftService(srv, tpt)
+	// Phase 8: the KV service rides the same server, wired to this node's
+	// Raft status and the static peer addresses, so SDK-level routing
+	// tests can dial ANY node and follow leader redirects.
+	leaderAddrs := make(map[transport.NodeID]string, len(peers))
+	for _, p := range peers {
+		leaderAddrs[p.ID] = p.Addr
+	}
+	kv1.RegisterKVServiceServer(srv, server.NewService(engine, rnode, rnode.Status, leaderAddrs, nil))
 	go func() { _ = srv.Serve(lis) }()
 
 	ctx, cancel := context.WithCancel(context.Background())

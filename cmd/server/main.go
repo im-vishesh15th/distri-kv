@@ -1,10 +1,11 @@
 // Command server runs a DistriKV node.
 //
-// Phase 7: the Raft core replicates commands, and the committed log feeds a
-// KV state machine (kv.NewSM) — mutations proposed by the gRPC service are
-// applied in log order on every replica. Leader election over the gRPC
-// transport, persistent term/vote in the Raft log, in-memory engine, static
-// cluster membership via -peers.
+// Phase 8: the Raft core replicates commands, the committed log feeds a
+// KV state machine (kv.NewSM), mutations proposed by the gRPC service are
+// applied in log order on every replica, and GetStatus serves leader
+// routing (this node's status + the -peers addresses as the hint map).
+// Leader election over the gRPC transport, persistent term/vote in the
+// Raft log, in-memory engine, static cluster membership via -peers.
 package main
 
 import (
@@ -94,8 +95,13 @@ func run(id, addr, dataDir, peersSpec string, log *slog.Logger) error {
 		}
 	}()
 	peerIDs := make([]string, 0, len(peers))
+	// Leader-routing addresses for GetStatus (Phase 8): ID -> dialable
+	// addr as given by -peers, which must be client-reachable for hints
+	// to work. Empty for standalone (leader_id == node_id routes instead).
+	leaderAddrs := make(map[transport.NodeID]string, len(peers))
 	for _, p := range peers {
 		peerIDs = append(peerIDs, string(p.ID))
+		leaderAddrs[p.ID] = p.Addr
 	}
 	log.Info("cluster_configured",
 		slog.String("node_id", id),
@@ -136,8 +142,9 @@ func run(id, addr, dataDir, peersSpec string, log *slog.Logger) error {
 
 	grpcServer := grpc.NewServer()
 	// The service mutates through Raft (rn.Propose); reads hit the engine
-	// directly until Phase 11 makes them linearizable.
-	kv1.RegisterKVServiceServer(grpcServer, server.NewService(engine, rn, log))
+	// directly until Phase 11 makes them linearizable. rn.Status + the
+	// -peers addresses power GetStatus leader routing.
+	kv1.RegisterKVServiceServer(grpcServer, server.NewService(engine, rn, rn.Status, leaderAddrs, log))
 	grpctransport.RegisterRaftService(grpcServer, rt)
 	// Reflection lets grpcurl/gRPC tooling discover the API without stubs.
 	reflection.Register(grpcServer)

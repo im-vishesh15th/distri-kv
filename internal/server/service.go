@@ -13,9 +13,12 @@
 //	kv.ErrOverflow             -> codes.OutOfRange       -> ErrOverflow
 //	kv.ErrUnknownOp            -> codes.Internal         -> passes through
 //	empty key                  -> codes.InvalidArgument
-//	raft.ErrNotLeader /
+//	raft.ErrNotLeader          -> codes.Aborted          -> ErrNotLeader
+//	  (provably rejected before append: safe for the SDK to redirect and retry)
 //	raft.ErrLeadershipLost /
-//	raft.ErrStopped            -> codes.Unavailable      -> retryable class
+//	raft.ErrStopped            -> codes.Unavailable      -> ambiguous
+//	  (entry may still commit elsewhere: the SDK must NOT auto-retry
+//	   mutations until Phase 9's dedup makes retries safe)
 //	context cancellation       -> passes through untouched
 //
 // CAS precondition failure is NOT an error: it returns applied=false.
@@ -29,7 +32,13 @@ import (
 
 	kv1 "distrikv/gen/kv/v1"
 	"distrikv/internal/kv"
+	"distrikv/internal/raft"
+	"distrikv/internal/transport"
 )
+
+// StatusFunc reports this node's Raft status (identity, role, leader) for
+// leader routing. *raft.Node.Status satisfies it.
+type StatusFunc func() raft.Status
 
 // Proposer replicates one encoded Command through Raft and waits for it to
 // be applied, returning the state machine's result for that entry.
@@ -45,13 +54,40 @@ type Service struct {
 
 	engine   kv.Engine // reads (Phase 11 revisits); apply-path writes
 	proposer Proposer
+	status   StatusFunc                  // routing: who am I / who leads
+	addrs    map[transport.NodeID]string // routing: leader ID -> dialable addr (-peers)
 	log      *slog.Logger
 }
 
 // NewService returns a KVService reading from engine and replicating
-// mutations through proposer. log may be nil (logging then disabled).
-func NewService(engine kv.Engine, proposer Proposer, log *slog.Logger) *Service {
-	return &Service{engine: engine, proposer: proposer, log: log}
+// mutations through proposer. status/addrs drive leader routing (Phase 8):
+// status may be nil (GetStatus then reports Internal), addrs may be nil
+// (leader_addr stays empty — standalone deployments route by leader_id ==
+// node_id instead). log may be nil (logging then disabled).
+func NewService(engine kv.Engine, proposer Proposer, status StatusFunc,
+	addrs map[transport.NodeID]string, log *slog.Logger) *Service {
+	return &Service{
+		engine: engine, proposer: proposer, status: status, addrs: addrs, log: log,
+	}
+}
+
+// GetStatus answers "who am I, who leads, where is the leader" for client
+// routing (Phase 8). It never fails for role reasons: a follower, a
+// candidate, and a leader all answer truthfully about their own view.
+func (s *Service) GetStatus(ctx context.Context, _ *kv1.GetStatusRequest) (*kv1.GetStatusResponse, error) {
+	if s.status == nil {
+		return nil, statusErrorInternal(fmt.Errorf("service has no status source (wire a StatusFunc)"))
+	}
+	st := s.status()
+	resp := &kv1.GetStatusResponse{
+		NodeId:   string(st.ID),
+		Role:     string(st.Role),
+		LeaderId: string(st.LeaderID),
+	}
+	if st.LeaderID != "" {
+		resp.LeaderAddr = s.addrs[st.LeaderID] // "" when unknown — clients compare leader_id instead
+	}
+	return resp, nil
 }
 
 // Get returns the value for key or codes.NotFound.

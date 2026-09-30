@@ -13,6 +13,7 @@
 //	cas <key> <expected|-> <new>   compare-and-swap ("-" = key must be absent)
 //	incr <key> [delta]       add delta (default 1) to int64 value
 //	decr <key>               subtract 1 from int64 value
+//	status                   print this node's routing view (role/leader)
 package main
 
 import (
@@ -136,6 +137,20 @@ func dispatch(ctx context.Context, c *client.Client, args []string) error {
 		}
 		fmt.Println(v)
 
+	case "status":
+		if err := need(0); err != nil {
+			return err
+		}
+		st, err := c.Status(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("node=%s role=%s leader=%s", st.NodeID, st.Role, orDash(st.LeaderID))
+		if st.LeaderAddr != "" {
+			fmt.Printf(" leader_addr=%s", st.LeaderAddr)
+		}
+		fmt.Println()
+
 	default:
 		usage()
 		return fmt.Errorf("unknown command %q", cmd)
@@ -153,8 +168,17 @@ commands:
   exists <key>
   cas <key> <expected|-> <new>    ("-" = key must be absent)
   incr <key> [delta]
-  decr <key>`)
+  decr <key>
+  status`)
 	flag.PrintDefaults()
+}
+
+// orDash renders an empty ID readably.
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 func fatal(err error) {

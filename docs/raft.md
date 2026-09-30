@@ -158,7 +158,8 @@ the rule above. Both are reflected in `Status()`.
 against the local state machine in log order — returning its log index and
 the state machine's result for that entry:
 
-- follower/candidate → `ErrNotLeader` immediately (client routing is Phase 8);
+- follower/candidate → `ErrNotLeader` immediately (codes.Aborted — the SDK
+  redirects via GetStatus and retries, safe because nothing was appended);
 - leadership lost while in flight → `ErrLeadershipLost`, *fast* — the entry's
   fate is unknowable from the old leader (it may still commit under the new
   one), which is exactly why blind client retries wait for Phase 9 dedup;
@@ -207,10 +208,10 @@ returns `kv.Result`, which travels back through `Propose` to the gRPC
 service. The service's mutations go through this path; reads (until
 Phase 11) hit the engine directly.
 
-## What is deliberately not here yet (Phase 8+)
+## What is deliberately not here yet (Phase 9+)
 
 Conflict-term backoff hints (deferred to measurement), snapshots/
-`InstallSnapshot`, client request routing, dedup, ReadIndex.
+`InstallSnapshot`, dedup, ReadIndex.
 
 ## How this phase is tested
 

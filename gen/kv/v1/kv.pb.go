@@ -813,6 +813,119 @@ func (x *Command) GetDelta() int64 {
 	return 0
 }
 
+// GetStatus is the leader-routing discovery call (Phase 8).
+type GetStatusRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetStatusRequest) Reset() {
+	*x = GetStatusRequest{}
+	mi := &file_proto_kv_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetStatusRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetStatusRequest) ProtoMessage() {}
+
+func (x *GetStatusRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_kv_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetStatusRequest.ProtoReflect.Descriptor instead.
+func (*GetStatusRequest) Descriptor() ([]byte, []int) {
+	return file_proto_kv_proto_rawDescGZIP(), []int{13}
+}
+
+type GetStatusResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The node that answered.
+	NodeId string `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	// Raft role: follower | candidate | leader.
+	Role string `protobuf:"bytes,2,opt,name=role,proto3" json:"role,omitempty"`
+	// Who this node believes leads the cluster; "" = no leader known yet
+	// (election in progress).
+	LeaderId string `protobuf:"bytes,3,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
+	// The leader's dialable address per the server's static -peers
+	// membership — must be client-reachable for routing hints to work.
+	// "" when unknown to this node (including standalone deployments, where
+	// leader_id == node_id means "you are already on the leader").
+	LeaderAddr    string `protobuf:"bytes,4,opt,name=leader_addr,json=leaderAddr,proto3" json:"leader_addr,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetStatusResponse) Reset() {
+	*x = GetStatusResponse{}
+	mi := &file_proto_kv_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetStatusResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetStatusResponse) ProtoMessage() {}
+
+func (x *GetStatusResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_kv_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetStatusResponse.ProtoReflect.Descriptor instead.
+func (*GetStatusResponse) Descriptor() ([]byte, []int) {
+	return file_proto_kv_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *GetStatusResponse) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *GetStatusResponse) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *GetStatusResponse) GetLeaderId() string {
+	if x != nil {
+		return x.LeaderId
+	}
+	return ""
+}
+
+func (x *GetStatusResponse) GetLeaderAddr() string {
+	if x != nil {
+		return x.LeaderAddr
+	}
+	return ""
+}
+
 var File_proto_kv_proto protoreflect.FileDescriptor
 
 const file_proto_kv_proto_rawDesc = "" +
@@ -862,20 +975,28 @@ const file_proto_kv_proto_rawDesc = "" +
 	"\x05value\x18\x03 \x01(\fR\x05value\x12'\n" +
 	"\x0fexpected_exists\x18\x04 \x01(\bR\x0eexpectedExists\x12%\n" +
 	"\x0eexpected_value\x18\x05 \x01(\fR\rexpectedValue\x12\x14\n" +
-	"\x05delta\x18\x06 \x01(\x03R\x05delta*{\n" +
+	"\x05delta\x18\x06 \x01(\x03R\x05delta\"\x12\n" +
+	"\x10GetStatusRequest\"~\n" +
+	"\x11GetStatusResponse\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x12\n" +
+	"\x04role\x18\x02 \x01(\tR\x04role\x12\x1b\n" +
+	"\tleader_id\x18\x03 \x01(\tR\bleaderId\x12\x1f\n" +
+	"\vleader_addr\x18\x04 \x01(\tR\n" +
+	"leaderAddr*{\n" +
 	"\tCommandOp\x12\x1a\n" +
 	"\x16COMMAND_OP_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eCOMMAND_OP_SET\x10\x01\x12\x15\n" +
 	"\x11COMMAND_OP_DELETE\x10\x02\x12\x12\n" +
 	"\x0eCOMMAND_OP_CAS\x10\x03\x12\x13\n" +
-	"\x0fCOMMAND_OP_INCR\x10\x042\xfc\x02\n" +
+	"\x0fCOMMAND_OP_INCR\x10\x042\xc8\x03\n" +
 	"\tKVService\x128\n" +
 	"\x03Get\x12\x17.distrikv.v1.GetRequest\x1a\x18.distrikv.v1.GetResponse\x128\n" +
 	"\x03Put\x12\x17.distrikv.v1.PutRequest\x1a\x18.distrikv.v1.PutResponse\x12A\n" +
 	"\x06Delete\x12\x1a.distrikv.v1.DeleteRequest\x1a\x1b.distrikv.v1.DeleteResponse\x12A\n" +
 	"\x06Exists\x12\x1a.distrikv.v1.ExistsRequest\x1a\x1b.distrikv.v1.ExistsResponse\x128\n" +
 	"\x03CAS\x12\x17.distrikv.v1.CASRequest\x1a\x18.distrikv.v1.CASResponse\x12;\n" +
-	"\x04Incr\x12\x18.distrikv.v1.IncrRequest\x1a\x19.distrikv.v1.IncrResponseB\x18Z\x16distrikv/gen/kv/v1;kv1b\x06proto3"
+	"\x04Incr\x12\x18.distrikv.v1.IncrRequest\x1a\x19.distrikv.v1.IncrResponse\x12J\n" +
+	"\tGetStatus\x12\x1d.distrikv.v1.GetStatusRequest\x1a\x1e.distrikv.v1.GetStatusResponseB\x18Z\x16distrikv/gen/kv/v1;kv1b\x06proto3"
 
 var (
 	file_proto_kv_proto_rawDescOnce sync.Once
@@ -890,22 +1011,24 @@ func file_proto_kv_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_kv_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_kv_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_proto_kv_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_proto_kv_proto_goTypes = []any{
-	(CommandOp)(0),         // 0: distrikv.v1.CommandOp
-	(*GetRequest)(nil),     // 1: distrikv.v1.GetRequest
-	(*GetResponse)(nil),    // 2: distrikv.v1.GetResponse
-	(*PutRequest)(nil),     // 3: distrikv.v1.PutRequest
-	(*PutResponse)(nil),    // 4: distrikv.v1.PutResponse
-	(*DeleteRequest)(nil),  // 5: distrikv.v1.DeleteRequest
-	(*DeleteResponse)(nil), // 6: distrikv.v1.DeleteResponse
-	(*ExistsRequest)(nil),  // 7: distrikv.v1.ExistsRequest
-	(*ExistsResponse)(nil), // 8: distrikv.v1.ExistsResponse
-	(*CASRequest)(nil),     // 9: distrikv.v1.CASRequest
-	(*CASResponse)(nil),    // 10: distrikv.v1.CASResponse
-	(*IncrRequest)(nil),    // 11: distrikv.v1.IncrRequest
-	(*IncrResponse)(nil),   // 12: distrikv.v1.IncrResponse
-	(*Command)(nil),        // 13: distrikv.v1.Command
+	(CommandOp)(0),            // 0: distrikv.v1.CommandOp
+	(*GetRequest)(nil),        // 1: distrikv.v1.GetRequest
+	(*GetResponse)(nil),       // 2: distrikv.v1.GetResponse
+	(*PutRequest)(nil),        // 3: distrikv.v1.PutRequest
+	(*PutResponse)(nil),       // 4: distrikv.v1.PutResponse
+	(*DeleteRequest)(nil),     // 5: distrikv.v1.DeleteRequest
+	(*DeleteResponse)(nil),    // 6: distrikv.v1.DeleteResponse
+	(*ExistsRequest)(nil),     // 7: distrikv.v1.ExistsRequest
+	(*ExistsResponse)(nil),    // 8: distrikv.v1.ExistsResponse
+	(*CASRequest)(nil),        // 9: distrikv.v1.CASRequest
+	(*CASResponse)(nil),       // 10: distrikv.v1.CASResponse
+	(*IncrRequest)(nil),       // 11: distrikv.v1.IncrRequest
+	(*IncrResponse)(nil),      // 12: distrikv.v1.IncrResponse
+	(*Command)(nil),           // 13: distrikv.v1.Command
+	(*GetStatusRequest)(nil),  // 14: distrikv.v1.GetStatusRequest
+	(*GetStatusResponse)(nil), // 15: distrikv.v1.GetStatusResponse
 }
 var file_proto_kv_proto_depIdxs = []int32{
 	0,  // 0: distrikv.v1.Command.op:type_name -> distrikv.v1.CommandOp
@@ -915,14 +1038,16 @@ var file_proto_kv_proto_depIdxs = []int32{
 	7,  // 4: distrikv.v1.KVService.Exists:input_type -> distrikv.v1.ExistsRequest
 	9,  // 5: distrikv.v1.KVService.CAS:input_type -> distrikv.v1.CASRequest
 	11, // 6: distrikv.v1.KVService.Incr:input_type -> distrikv.v1.IncrRequest
-	2,  // 7: distrikv.v1.KVService.Get:output_type -> distrikv.v1.GetResponse
-	4,  // 8: distrikv.v1.KVService.Put:output_type -> distrikv.v1.PutResponse
-	6,  // 9: distrikv.v1.KVService.Delete:output_type -> distrikv.v1.DeleteResponse
-	8,  // 10: distrikv.v1.KVService.Exists:output_type -> distrikv.v1.ExistsResponse
-	10, // 11: distrikv.v1.KVService.CAS:output_type -> distrikv.v1.CASResponse
-	12, // 12: distrikv.v1.KVService.Incr:output_type -> distrikv.v1.IncrResponse
-	7,  // [7:13] is the sub-list for method output_type
-	1,  // [1:7] is the sub-list for method input_type
+	14, // 7: distrikv.v1.KVService.GetStatus:input_type -> distrikv.v1.GetStatusRequest
+	2,  // 8: distrikv.v1.KVService.Get:output_type -> distrikv.v1.GetResponse
+	4,  // 9: distrikv.v1.KVService.Put:output_type -> distrikv.v1.PutResponse
+	6,  // 10: distrikv.v1.KVService.Delete:output_type -> distrikv.v1.DeleteResponse
+	8,  // 11: distrikv.v1.KVService.Exists:output_type -> distrikv.v1.ExistsResponse
+	10, // 12: distrikv.v1.KVService.CAS:output_type -> distrikv.v1.CASResponse
+	12, // 13: distrikv.v1.KVService.Incr:output_type -> distrikv.v1.IncrResponse
+	15, // 14: distrikv.v1.KVService.GetStatus:output_type -> distrikv.v1.GetStatusResponse
+	8,  // [8:15] is the sub-list for method output_type
+	1,  // [1:8] is the sub-list for method input_type
 	1,  // [1:1] is the sub-list for extension type_name
 	1,  // [1:1] is the sub-list for extension extendee
 	0,  // [0:1] is the sub-list for field type_name
@@ -939,7 +1064,7 @@ func file_proto_kv_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_kv_proto_rawDesc), len(file_proto_kv_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   13,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

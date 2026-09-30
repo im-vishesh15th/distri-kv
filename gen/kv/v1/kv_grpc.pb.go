@@ -36,12 +36,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	KVService_Get_FullMethodName    = "/distrikv.v1.KVService/Get"
-	KVService_Put_FullMethodName    = "/distrikv.v1.KVService/Put"
-	KVService_Delete_FullMethodName = "/distrikv.v1.KVService/Delete"
-	KVService_Exists_FullMethodName = "/distrikv.v1.KVService/Exists"
-	KVService_CAS_FullMethodName    = "/distrikv.v1.KVService/CAS"
-	KVService_Incr_FullMethodName   = "/distrikv.v1.KVService/Incr"
+	KVService_Get_FullMethodName       = "/distrikv.v1.KVService/Get"
+	KVService_Put_FullMethodName       = "/distrikv.v1.KVService/Put"
+	KVService_Delete_FullMethodName    = "/distrikv.v1.KVService/Delete"
+	KVService_Exists_FullMethodName    = "/distrikv.v1.KVService/Exists"
+	KVService_CAS_FullMethodName       = "/distrikv.v1.KVService/CAS"
+	KVService_Incr_FullMethodName      = "/distrikv.v1.KVService/Incr"
+	KVService_GetStatus_FullMethodName = "/distrikv.v1.KVService/GetStatus"
 )
 
 // KVServiceClient is the client API for KVService service.
@@ -64,6 +65,10 @@ type KVServiceClient interface {
 	// Incr atomically adds delta to the int64 stored at key
 	// (negative delta = decrement; absent key treated as 0).
 	Incr(ctx context.Context, in *IncrRequest, opts ...grpc.CallOption) (*IncrResponse, error)
+	// GetStatus reports this node's identity and Raft role plus the address of
+	// the current leader, so clients can route mutations (Phase 8). It is a
+	// read: any node answers, whatever its role.
+	GetStatus(ctx context.Context, in *GetStatusRequest, opts ...grpc.CallOption) (*GetStatusResponse, error)
 }
 
 type kVServiceClient struct {
@@ -134,6 +139,16 @@ func (c *kVServiceClient) Incr(ctx context.Context, in *IncrRequest, opts ...grp
 	return out, nil
 }
 
+func (c *kVServiceClient) GetStatus(ctx context.Context, in *GetStatusRequest, opts ...grpc.CallOption) (*GetStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetStatusResponse)
+	err := c.cc.Invoke(ctx, KVService_GetStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // KVServiceServer is the server API for KVService service.
 // All implementations must embed UnimplementedKVServiceServer
 // for forward compatibility.
@@ -154,6 +169,10 @@ type KVServiceServer interface {
 	// Incr atomically adds delta to the int64 stored at key
 	// (negative delta = decrement; absent key treated as 0).
 	Incr(context.Context, *IncrRequest) (*IncrResponse, error)
+	// GetStatus reports this node's identity and Raft role plus the address of
+	// the current leader, so clients can route mutations (Phase 8). It is a
+	// read: any node answers, whatever its role.
+	GetStatus(context.Context, *GetStatusRequest) (*GetStatusResponse, error)
 	mustEmbedUnimplementedKVServiceServer()
 }
 
@@ -181,6 +200,9 @@ func (UnimplementedKVServiceServer) CAS(context.Context, *CASRequest) (*CASRespo
 }
 func (UnimplementedKVServiceServer) Incr(context.Context, *IncrRequest) (*IncrResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Incr not implemented")
+}
+func (UnimplementedKVServiceServer) GetStatus(context.Context, *GetStatusRequest) (*GetStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetStatus not implemented")
 }
 func (UnimplementedKVServiceServer) mustEmbedUnimplementedKVServiceServer() {}
 func (UnimplementedKVServiceServer) testEmbeddedByValue()                   {}
@@ -311,6 +333,24 @@ func _KVService_Incr_Handler(srv interface{}, ctx context.Context, dec func(inte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _KVService_GetStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KVServiceServer).GetStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: KVService_GetStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KVServiceServer).GetStatus(ctx, req.(*GetStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // KVService_ServiceDesc is the grpc.ServiceDesc for KVService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -341,6 +381,10 @@ var KVService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Incr",
 			Handler:    _KVService_Incr_Handler,
+		},
+		{
+			MethodName: "GetStatus",
+			Handler:    _KVService_GetStatus_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

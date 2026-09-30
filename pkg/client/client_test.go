@@ -11,13 +11,20 @@ import (
 	"testing"
 )
 
+// currentTarget reports the gRPC target of the endpoint the client prefers.
+func currentTarget(c *Client) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conns[c.current].Target()
+}
+
 func TestDialBareTargetUsesPassthrough(t *testing.T) {
 	c, err := Dial(context.Background(), "127.0.0.1:1")
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer func() { _ = c.Close() }()
-	if got, want := c.conn.Target(), "passthrough:///127.0.0.1:1"; got != want {
+	if got, want := currentTarget(c), "passthrough:///127.0.0.1:1"; got != want {
 		t.Fatalf("target = %q, want %q", got, want)
 	}
 }
@@ -28,7 +35,7 @@ func TestDialKeepsExplicitScheme(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer func() { _ = c.Close() }()
-	if got, want := c.conn.Target(), "passthrough:///bufnet"; got != want {
+	if got, want := currentTarget(c), "passthrough:///bufnet"; got != want {
 		t.Fatalf("target = %q, want %q", got, want)
 	}
 }

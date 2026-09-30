@@ -50,21 +50,25 @@ func statusErrorInternal(err error) error {
 	return status.Error(codes.Internal, err.Error())
 }
 
-// mapRaftError maps replication outcomes (the Propose seam, Phase 7) before
-// falling through to the kv domain mapping.
+// mapRaftError maps replication outcomes (the Propose seam) before falling
+// through to the kv domain mapping. The split is load-bearing for Phase 8:
 //
-// Unavailable is the honest class for all three: no leader here, leadership
-// moved mid-proposal, or the node is stopping — all "try again elsewhere or
-// later". Whether retrying is SAFE is Phase 9's question: until dedup
-// exists, a lost-response retry can duplicate a committed write, so the SDK
-// does not auto-retry mutations.
+//	ErrNotLeader -> codes.Aborted: the proposal was rejected BEFORE append,
+//	        so nothing happened — the SDK may redirect to the discovered
+//	        leader and retry the same write safely.
+//	ErrLeadershipLost / ErrStopped -> codes.Unavailable: ambiguous — the
+//	        entry may still commit under the new leader. Whether retrying is
+//	        SAFE is Phase 9's question: until dedup exists, a lost-response
+//	        retry can duplicate a committed write, so the SDK never
+//	        auto-retries mutations in this class.
 func mapRaftError(err error) error {
 	if err == nil {
 		return nil
 	}
 	switch {
-	case errors.Is(err, raft.ErrNotLeader),
-		errors.Is(err, raft.ErrLeadershipLost),
+	case errors.Is(err, raft.ErrNotLeader):
+		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, raft.ErrLeadershipLost),
 		errors.Is(err, raft.ErrStopped):
 		return status.Error(codes.Unavailable, err.Error())
 	default:

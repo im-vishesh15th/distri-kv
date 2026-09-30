@@ -42,6 +42,11 @@ service KVService {
   // Incr atomically adds delta to the int64 stored at key
   // (negative delta = decrement; absent key treated as 0).
   rpc Incr(IncrRequest) returns (IncrResponse);
+
+  // GetStatus reports this node's identity and Raft role plus the address of
+  // the current leader, so clients can route mutations (Phase 8). It is a
+  // read: any node answers, whatever its role.
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
 }
 
 message GetRequest {
@@ -145,4 +150,22 @@ message Command {
   bytes expected_value = 5;
   // INCR signed delta.
   int64 delta = 6;
+}
+
+// GetStatus is the leader-routing discovery call (Phase 8).
+message GetStatusRequest {}
+
+message GetStatusResponse {
+  // The node that answered.
+  string node_id = 1;
+  // Raft role: follower | candidate | leader.
+  string role = 2;
+  // Who this node believes leads the cluster; "" = no leader known yet
+  // (election in progress).
+  string leader_id = 3;
+  // The leader's dialable address per the server's static -peers
+  // membership — must be client-reachable for routing hints to work.
+  // "" when unknown to this node (including standalone deployments, where
+  // leader_id == node_id means "you are already on the leader").
+  string leader_addr = 4;
 }

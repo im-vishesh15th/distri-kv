@@ -90,7 +90,7 @@ func newTestClient(t *testing.T) *client.Client {
 
 	lis := bufconn.Listen(1 << 20)
 	grpcServer := grpc.NewServer()
-	kv1.RegisterKVServiceServer(grpcServer, server.NewService(engine, node, nil))
+	kv1.RegisterKVServiceServer(grpcServer, server.NewService(engine, node, node.Status, nil, nil))
 
 	go func() {
 		_ = grpcServer.Serve(lis)
@@ -266,7 +266,7 @@ func TestSessionFieldsOnWire(t *testing.T) {
 
 	grpcServer := grpc.NewServer(grpc.ChainUnaryInterceptor(capture))
 	engine, node := startSingleNode(t)
-	kv1.RegisterKVServiceServer(grpcServer, server.NewService(engine, node, nil))
+	kv1.RegisterKVServiceServer(grpcServer, server.NewService(engine, node, node.Status, nil, nil))
 	go func() { _ = grpcServer.Serve(lis) }()
 	t.Cleanup(grpcServer.Stop)
 
@@ -345,5 +345,23 @@ func TestConcurrentIncrThroughWire(t *testing.T) {
 	}
 	if string(v) != strconv.Itoa(goroutines*perG) {
 		t.Fatalf("counter = %s, want %d (lost updates)", v, goroutines*perG)
+	}
+}
+
+// TestStatusSingleLeaderSelf pins the standalone routing view (Phase 8):
+// a lone node reports itself as the leader, and with no -peers membership
+// there is no address hint — the SDK's rule is leader_id == node_id means
+// "you are already on the leader".
+func TestStatusSingleLeaderSelf(t *testing.T) {
+	c := newTestClient(t)
+	st, err := c.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.NodeID != "n1" || st.Role != "leader" || st.LeaderID != "n1" {
+		t.Fatalf("status = %+v, want node=n1 role=leader leader=n1", st)
+	}
+	if st.LeaderAddr != "" {
+		t.Fatalf("leader_addr = %q, want empty (standalone has no peer map)", st.LeaderAddr)
 	}
 }

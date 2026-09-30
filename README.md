@@ -44,7 +44,7 @@ make proto                           # regenerate gen/ from proto/kv.proto
 | **M3 Hardening** | 8–11 | Leader routing, dedup, atomics, linearizable reads | ✅ done |
 | **M4 Lifecycle** | 12–13 | Snapshots, log compaction, InstallSnapshot | ✅ done |
 | **M5 Proof** | 14–16 | Simulated network, fault tests, linearizability checking | ✅ done — **Tier 1 complete** |
-| **M6 Scale** | 17–21 | Multi-Raft, fixed-slot sharding, cluster router | ✅ Phases 17–18 done (Phase 19 next) |
+| **M6 Scale** | 17–21 | Multi-Raft, fixed-slot sharding, cluster router | ✅ Phases 17–19 done (Phase 20 next) |
 | **M7 Measure** | 22–24 | Consistency spec, benchmarks, pprof | ⬜ |
 | **M8 Product** | P1–P5 | API keys, tenancy, quotas, gateway, onboarding, deploy | ⬜ |
 | **M9 Launch** | 25–30 | Docker, observability, CI, full test suite, docs | ⬜ |

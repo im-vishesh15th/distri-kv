@@ -125,3 +125,11 @@ arrive out of order (group A applies seq 5, group B sees seq 3 from the same
 client and rejects it as stale, even though it's a legitimate new request for
 group B). This is a client-side concern for Phase 19, not a Phase 17 one —
 noted here so it isn't forgotten.
+
+**Resolved in Phase 19.** The client SDK now keeps one monotonic counter per
+(client, group): `Client.SetShardMap` loads the versioned shard map
+(`shard.Config`, see docs/shard.md) so the client can route each key to the
+right group, and `Client.mutate` allocates the session sequence from that
+group's counter (never a shared global one). Without a shard map the client
+falls back to the group-0 counter, preserving single-group behavior. See
+`pkg/client/sequence_test.go` for the per-group monotonicity tests.

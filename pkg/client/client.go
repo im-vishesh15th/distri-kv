@@ -1,20 +1,30 @@
 // Package client is the DistriKV Go SDK.
 //
-// Status (Phase 11): leader-aware routing + client sessions + linearizable
-// reads. The client dials any node it is given, follows leader redirects
-// for mutations and data reads, retries transient failures (mutations
-// under the session's sequence number), and fails transport over between
-// endpoints it has seen.
+// Status (Phase 19): leader-aware routing + client sessions + linearizable
+// reads, with per-(client, group) session sequences. The client dials any
+// node it is given, follows leader redirects for mutations and data reads,
+// retries transient failures (mutations under the session's sequence number),
+// and fails transport over between endpoints it has seen.
 //
 // Session model: one Client == one session. A stable random client_id and
 // one sequence number per LOGICAL operation — retries of that operation
 // reuse it (allocated inside mutate's critical section, so issue order
-// always equals sequence order), the counter starts at 1, and mutations
-// are serialized per Client. That ordering is what lets the server-side
+// always equals sequence order), counters start at 1, and mutations are
+// serialized per Client. That ordering is what lets the server-side
 // session table adjudicate duplicates precisely (S1: a retried mutation
 // applies at most once and its original response is replayed; see
 // docs/consistency.md for the exact bounds — this is deliberately NOT
 // called "exactly once").
+//
+// Per-group sequences (Phase 19): each Raft group keeps its own session
+// table and rejects a sequence number lower than the last one it applied
+// for a client (ErrStaleSequence). A client that writes to several groups
+// therefore keeps one monotonic counter PER (client, group), not one global
+// counter — a shared counter can hand out sequence numbers that are stale
+// within a group when requests to different groups interleave. Set the
+// client's shard map with SetShardMap (loaded via shard.LoadConfig) so the
+// client can route each key to the right counter; without it every key uses
+// the group-0 counter (correct for single-group clusters).
 //
 // Routing and retry policy:
 //
@@ -48,11 +58,12 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	kv1 "distrikv/gen/kv/v1"
 	"distrikv/internal/kv"
+	"distrikv/internal/raft"
+	"distrikv/internal/shard"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -115,7 +126,16 @@ type Client struct {
 	mutateMu sync.Mutex // serializes mutations AND sequence allocation
 
 	clientID string
-	seq      atomic.Uint64
+
+	// Phase 19: per-(client, group) sequence counters. Each Raft group has
+	// its own session table, and the SM rejects a sequence below the last
+	// applied one for that client (ErrStaleSequence) — so a client that
+	// writes to multiple groups must keep a separate monotonic counter per
+	// group, not one global counter. shardMap (set via SetShardMap) tells
+	// the client which group a key routes to; seqs holds the counters.
+	shardMap *shard.Config // guarded by mu
+	seqMu    sync.Mutex
+	seqs     map[raft.GroupID]uint64
 }
 
 // Dial connects to a DistriKV node at addr (host:port) — any node: leader
@@ -138,6 +158,7 @@ func Dial(ctx context.Context, addr string, opts ...grpc.DialOption) (*Client, e
 		opts:    opts,
 		orig:    addr,
 		current: addr,
+		seqs:    make(map[raft.GroupID]uint64),
 	}
 	if _, err := c.connLocked(addr); err != nil {
 		return nil, err
@@ -148,7 +169,6 @@ func Dial(ctx context.Context, addr string, opts ...grpc.DialOption) (*Client, e
 		return nil, err
 	}
 	c.clientID = id
-	c.seq.Store(0) // first nextSeq() returns 1 (session sequences start at 1)
 	return c, nil
 }
 
@@ -200,7 +220,7 @@ func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 
 // Put stores value at key (upsert), routed to the leader.
 func (c *Client) Put(ctx context.Context, key string, value []byte) error {
-	return unwrap(c.mutate(ctx, func(stub kv1.KVServiceClient, seq uint64) error {
+	return unwrap(c.mutate(ctx, key, func(stub kv1.KVServiceClient, seq uint64) error {
 		_, err := stub.Put(ctx, &kv1.PutRequest{
 			Key:            key,
 			Value:          value,
@@ -213,7 +233,7 @@ func (c *Client) Put(ctx context.Context, key string, value []byte) error {
 
 // Delete removes key (idempotent), routed to the leader.
 func (c *Client) Delete(ctx context.Context, key string) error {
-	return unwrap(c.mutate(ctx, func(stub kv1.KVServiceClient, seq uint64) error {
+	return unwrap(c.mutate(ctx, key, func(stub kv1.KVServiceClient, seq uint64) error {
 		_, err := stub.Delete(ctx, &kv1.DeleteRequest{
 			Key:            key,
 			ClientId:       c.clientID,
@@ -247,7 +267,7 @@ func (c *Client) Exists(ctx context.Context, key string) (bool, error) {
 // means "key must equal expected".
 func (c *Client) CAS(ctx context.Context, key string, expected, newValue []byte) (bool, error) {
 	var applied bool
-	err := c.mutate(ctx, func(stub kv1.KVServiceClient, seq uint64) error {
+	err := c.mutate(ctx, key, func(stub kv1.KVServiceClient, seq uint64) error {
 		resp, err := stub.CAS(ctx, &kv1.CASRequest{
 			Key:            key,
 			ExpectedExists: expected != nil,
@@ -272,7 +292,7 @@ func (c *Client) CAS(ctx context.Context, key string, expected, newValue []byte)
 // and returns the new value. An absent key is treated as 0.
 func (c *Client) Incr(ctx context.Context, key string, delta int64) (int64, error) {
 	var out int64
-	err := c.mutate(ctx, func(stub kv1.KVServiceClient, seq uint64) error {
+	err := c.mutate(ctx, key, func(stub kv1.KVServiceClient, seq uint64) error {
 		resp, err := stub.Incr(ctx, &kv1.IncrRequest{
 			Key:            key,
 			Delta:          delta,
@@ -323,11 +343,11 @@ type writeOp func(stub kv1.KVServiceClient, seq uint64) error // mutations: sess
 //     attempt reuses this call's sequence number, so the server's session
 //     table guarantees at-most-once application (S1).
 //   - anything else (domain outcomes, context errors): returned untouched.
-func (c *Client) mutate(ctx context.Context, op writeOp) error {
+func (c *Client) mutate(ctx context.Context, key string, op writeOp) error {
 	c.mutateMu.Lock()
 	defer c.mutateMu.Unlock()
 
-	seq := c.nextSeq() // under the lock: sequence order == issue order
+	seq := c.nextSeq(c.groupFor(key)) // per-group counter, under the lock
 	var err error
 	redirects, retries := 0, 0
 	backoff := initialRetryBackoff
@@ -544,8 +564,41 @@ func (c *Client) connLocked(addr string) (*grpc.ClientConn, error) {
 	return conn, nil
 }
 
-// nextSeq returns the next session sequence number for this client.
-func (c *Client) nextSeq() uint64 { return c.seq.Add(1) }
+// SetShardMap sets the shard map the client uses to compute which Raft
+// group a key routes to — required for the per-(client, group) sequence
+// counters. Without it, all mutations fall back to group 0 (the single-group
+// behavior). The map is versioned; a client and the cluster must agree on
+// the version or sequence counters can mismatch.
+func (c *Client) SetShardMap(m *shard.Config) {
+	c.mu.Lock()
+	c.shardMap = m
+	c.mu.Unlock()
+}
+
+// groupFor returns the Raft group that owns key, per the loaded shard map
+// (group 0 when no map is set).
+func (c *Client) groupFor(key string) raft.GroupID {
+	c.mu.Lock()
+	m := c.shardMap
+	c.mu.Unlock()
+	if m == nil {
+		return 0
+	}
+	return m.Group(key)
+}
+
+// nextSeq returns the next session sequence number for one Raft group. Each
+// group has its own counter (Phase 19): a group's session table only sees the
+// mutations routed to it, so its sequence numbers must be monotonic within
+// the group — a single global counter shared across groups can produce false
+// stale-sequence rejections when requests to different groups arrive out of
+// order.
+func (c *Client) nextSeq(gid raft.GroupID) uint64 {
+	c.seqMu.Lock()
+	defer c.seqMu.Unlock()
+	c.seqs[gid]++
+	return c.seqs[gid]
+}
 
 // newClientID generates a random 128-bit client identity.
 func newClientID() (string, error) {

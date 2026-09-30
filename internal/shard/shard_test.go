@@ -2,6 +2,7 @@ package shard
 
 import (
 	"fmt"
+	"os"
 	"testing"
 
 	"distrikv/internal/raft"
@@ -108,4 +109,101 @@ func TestNewMapPanicsOnZero(t *testing.T) {
 		}
 	}()
 	NewMap(0)
+}
+
+func writeConfig(t *testing.T, body string) string {
+	t.Helper()
+	path := t.TempDir() + "/shard.json"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return path
+}
+
+func TestLoadConfigValid(t *testing.T) {
+	path := writeConfig(t, `{"version": 1, "groups": 3}`)
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if c.Version != 1 || c.Groups != 3 {
+		t.Fatalf("got version=%d groups=%d, want 1/3", c.Version, c.Groups)
+	}
+	// Default contiguous split (slot·groups/NumSlots): group 0 owns
+	// [0, 5461], group 1 [5462, 10922], group 2 [10923, 16383].
+	if g := c.GroupSlot(0); g != 0 {
+		t.Fatalf("GroupSlot(0) = %d, want 0", g)
+	}
+	if g := c.GroupSlot(5461); g != 0 {
+		t.Fatalf("GroupSlot(5461) = %d, want 0", g)
+	}
+	if g := c.GroupSlot(5462); g != 1 {
+		t.Fatalf("GroupSlot(5462) = %d, want 1", g)
+	}
+}
+
+func TestLoadConfigExplicitRanges(t *testing.T) {
+	body := `{"version": 2, "groups": 2, "ranges": [
+		{"start": 0, "end": 100, "group": 1},
+		{"start": 100, "end": 16384, "group": 0}
+	]}`
+	c, err := LoadConfig(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if g := c.GroupSlot(50); g != 1 {
+		t.Fatalf("GroupSlot(50) = %d, want 1 (explicit range)", g)
+	}
+	if g := c.GroupSlot(100); g != 0 {
+		t.Fatalf("GroupSlot(100) = %d, want 0 (explicit range)", g)
+	}
+}
+
+func TestLoadConfigInvalid(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"zero groups", `{"version": 1, "groups": 0}`},
+		{"overlapping ranges", `{"groups": 2, "ranges": [
+			{"start": 0, "end": 100, "group": 0},
+			{"start": 50, "end": 200, "group": 1}
+		]}`},
+		{"uncovered slot", `{"groups": 2, "ranges": [
+			{"start": 0, "end": 100, "group": 0}
+		]}`},
+		{"group out of range", `{"groups": 2, "ranges": [
+			{"start": 0, "end": 16384, "group": 5}
+		]}`},
+		{"range out of bounds", `{"groups": 2, "ranges": [
+			{"start": 0, "end": 20000, "group": 0}
+		]}`},
+		{"bad json", `{"version": 1,`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := LoadConfig(writeConfig(t, tc.body)); err == nil {
+				t.Fatalf("LoadConfig(%s) should fail", tc.name)
+			}
+		})
+	}
+	if _, err := LoadConfig(t.TempDir() + "/missing.json"); err == nil {
+		t.Fatal("LoadConfig of a missing file should fail")
+	}
+}
+
+func TestNewMapDefaultContiguous(t *testing.T) {
+	m := NewMap(4)
+	for s := uint64(0); s < NumSlots; s++ {
+		if m.GroupSlot(s) != m.GroupSlot(s) {
+			t.Fatal("not deterministic")
+		}
+	}
+	// Contiguous: group 0 owns [0, 4096), group 1 [4096, 8192), etc.
+	for g := uint64(0); g < 4; g++ {
+		lo := g * NumSlots / 4
+		if got := m.GroupSlot(lo); uint64(got) != g {
+			t.Fatalf("GroupSlot(%d) = %d, want %d", lo, got, g)
+		}
+	}
 }

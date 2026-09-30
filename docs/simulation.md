@@ -119,10 +119,12 @@ elects, replicates, keeps committing with a follower partitioned away,
 and after heal the isolated replica catches up with byte-identical logs
 — zero gRPC anywhere.
 
-## What Phase 15 builds on this
+## What Phase 15 built on this
 
-The fault-scenario suite (spec §19): kill/restart leaders under seeded
-fault schedules, majority/minority commit rules, heal-and-converge —
-driven through `Partition`/`Isolate`/`SetFaults` instead of containers.
-Phase 16 then records operation histories over the same Network for
-linearizability checking.
+The fault-scenario suite (spec §19) lives in
+`internal/raft/faults_test.go` and is documented in
+[docs/faults.md](faults.md): the three §19 scenarios (kill/restart,
+partition, minority-cannot-commit), a seeded chaos schedule exercising
+§17's message failures end-to-end, and a simulated disk failure. Phase 16
+records operation histories over the same Network for linearizability
+checking.

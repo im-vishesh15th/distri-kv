@@ -26,9 +26,88 @@ type simNode struct {
 	rnode  *raft.Node
 	rlog   *raftlog.Log
 	engine kv.Engine
+	dir    string             // durable directory: survives kill/restart
+	ids    []transport.NodeID // cluster membership, for reboot
 	cancel context.CancelFunc
 	runErr chan error
 	dead   bool
+}
+
+// bootSimNode builds one node — log, engine, sim transport, Raft core —
+// registers it with the shared network, and starts its loop + ticker.
+// Shared by startSimCluster and restartSimNode (a reboot is "new process,
+// same directory").
+func bootSimNode(t *testing.T, network *sim.Network, id transport.NodeID, dir string, ids []transport.NodeID) *simNode {
+	t.Helper()
+
+	rlog, _, err := raftlog.Open(dir)
+	if err != nil {
+		t.Fatalf("%s: open raftlog: %v", id, err)
+	}
+	engine := kv.NewMemEngine()
+	tpt := sim.NewTransport(network, id)
+	rnode, err := raft.New(raft.Config{
+		ID:             id,
+		Peers:          ids,
+		Transport:      tpt,
+		Log:            rlog,
+		ElectionTicks:  electionTicks,
+		HeartbeatTicks: heartbeatTicks,
+		// Distinct seed per boot: identical seeds would make the
+		// randomized election timeouts collide every round. The directory
+		// length differentiates reboot seeds from the originals'.
+		RNG:          rand.New(rand.NewSource(time.Now().UnixNano() + int64(len(dir)))),
+		StateMachine: kv.NewSM(engine),
+	})
+	if err != nil {
+		t.Fatalf("%s: raft.New: %v", id, err)
+	}
+	network.SetHandler(id, rnode) // inbound RPCs now reach the core
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() {
+		err := rnode.Run(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "SIM_RAFT_HALTED %s: %v\n", id, err)
+		}
+		runErr <- err
+	}()
+	raft.StartTicker(ctx, rnode, tickPeriod)
+
+	return &simNode{
+		id: id, rnode: rnode, rlog: rlog, engine: engine,
+		dir: dir, ids: ids, cancel: cancel, runErr: runErr,
+	}
+}
+
+// killSim crashes the node like a process death: inbound RPCs fail the
+// way a refused connection does (handler detached), the loop stops, the
+// log closes. Idempotent.
+func (sn *simNode) killSim(t *testing.T, network *sim.Network) {
+	if sn.dead {
+		return
+	}
+	sn.dead = true
+	network.SetHandler(sn.id, nil)
+	sn.cancel()
+	select {
+	case <-sn.runErr:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("%s: sim raft Run did not exit after kill", sn.id)
+	}
+	if err := sn.rlog.Close(); err != nil {
+		t.Fatalf("%s: close log: %v", sn.id, err)
+	}
+}
+
+// restartSimNode reboots the same directory as a fresh process would: a
+// brand-new empty engine (recovery = replay of the recovered log), a new
+// Raft core, the same sim identity re-registered.
+func restartSimNode(t *testing.T, network *sim.Network, sn *simNode) {
+	t.Helper()
+	fresh := bootSimNode(t, network, sn.id, sn.dir, sn.ids)
+	*sn = *fresh
 }
 
 // startSimCluster boots n nodes whose RPCs all cross one shared
@@ -36,8 +115,15 @@ type simNode struct {
 // tests inject faults and partitions explicitly, so every disturbance in
 // a test body is deliberate.
 func startSimCluster(t *testing.T, n int, seed int64) ([]*simNode, *sim.Network) {
+	return startSimClusterFaults(t, n, seed, sim.Faults{})
+}
+
+// startSimClusterFaults is startSimCluster with probabilistic faults
+// active from birth — the Phase 15 chaos tests prove elections and
+// commits survive seeded delay/loss/duplication end to end.
+func startSimClusterFaults(t *testing.T, n int, seed int64, faults sim.Faults) ([]*simNode, *sim.Network) {
 	t.Helper()
-	network := sim.New(sim.Config{Seed: seed, Auto: true})
+	network := sim.New(sim.Config{Seed: seed, Faults: faults, Auto: true})
 
 	ids := make([]transport.NodeID, n)
 	for i := range ids {
@@ -46,45 +132,7 @@ func startSimCluster(t *testing.T, n int, seed int64) ([]*simNode, *sim.Network)
 
 	nodes := make([]*simNode, n)
 	for i := 0; i < n; i++ {
-		dir := t.TempDir()
-		rlog, _, err := raftlog.Open(dir)
-		if err != nil {
-			t.Fatalf("%s: open raftlog: %v", ids[i], err)
-		}
-		engine := kv.NewMemEngine()
-		tpt := sim.NewTransport(network, ids[i])
-		rnode, err := raft.New(raft.Config{
-			ID:             ids[i],
-			Peers:          ids,
-			Transport:      tpt,
-			Log:            rlog,
-			ElectionTicks:  electionTicks,
-			HeartbeatTicks: heartbeatTicks,
-			// Distinct seed per node: identical seeds would make the
-			// randomized election timeouts collide every round.
-			RNG:          rand.New(rand.NewSource(time.Now().UnixNano() + int64(i))),
-			StateMachine: kv.NewSM(engine),
-		})
-		if err != nil {
-			t.Fatalf("%s: raft.New: %v", ids[i], err)
-		}
-		network.SetHandler(ids[i], rnode) // inbound RPCs now reach the core
-
-		ctx, cancel := context.WithCancel(context.Background())
-		runErr := make(chan error, 1)
-		go func() {
-			err := rnode.Run(ctx)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "SIM_RAFT_HALTED %s: %v\n", ids[i], err)
-			}
-			runErr <- err
-		}()
-		raft.StartTicker(ctx, rnode, tickPeriod)
-
-		nodes[i] = &simNode{
-			id: ids[i], rnode: rnode, rlog: rlog, engine: engine,
-			cancel: cancel, runErr: runErr,
-		}
+		nodes[i] = bootSimNode(t, network, ids[i], t.TempDir(), ids)
 	}
 	t.Cleanup(func() {
 		for _, sn := range nodes {

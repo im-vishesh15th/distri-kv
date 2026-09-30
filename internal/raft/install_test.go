@@ -329,10 +329,22 @@ func TestInstallSnapshotCatchesFarBehindFollower(t *testing.T) {
 			break
 		}
 	}
+	// Pre-kill writes: retry on leadership loss the way a client would —
+	// under package-wide load (e.g. the Phase 15 chaos tests) a heartbeat
+	// gap can churn leadership between the two proposes, and the test's
+	// intent is "two committed writes", not "leadership never moves".
 	for i := 0; i < 2; i++ {
-		if _, _, err := leader.rnode.Propose(ctx, mustEncode(t,
-			kv.Set(fmt.Sprintf("w%d", i), []byte("pre")))); err != nil {
-			t.Fatalf("pre-kill propose %d: %v", i, err)
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			_, _, err := leader.rnode.Propose(ctx, mustEncode(t,
+				kv.Set(fmt.Sprintf("w%d", i), []byte("pre"))))
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, raft.ErrLeadershipLost) || time.Now().After(deadline) {
+				t.Fatalf("pre-kill propose %d: %v", i, err)
+			}
+			time.Sleep(50 * time.Millisecond)
 		}
 	}
 	waitFor(t, 5*time.Second, "follower synced before it dies", func() bool {

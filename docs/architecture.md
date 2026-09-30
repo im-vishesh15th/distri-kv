@@ -124,8 +124,9 @@ network partition (majority/minority), delay, packet loss, reordering,
 duplication, slow node, and persistence failure (partial/corrupt record) —
 all injected deterministically through the simulated transport
 (`internal/transport/sim`, mechanism delivered in Phase 14, see
-docs/simulation.md) with reproducible seeds (scenario suite: Phase 15),
-then verified for linearizability (Phase 16).
+docs/simulation.md) with reproducible seeds (scenario suite delivered in
+Phase 15, see docs/faults.md), then verified for linearizability
+(Phase 16).
 
 ## 9. Consistency guarantees (normative definitions in docs/consistency.md)
 

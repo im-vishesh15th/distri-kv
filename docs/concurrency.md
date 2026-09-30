@@ -62,11 +62,14 @@
   the sidecar, then network) runs on a short-lived goroutine, posting its
   reply back as an event — same shape as appends/votes.
 
-## Level 3 — Multi-Raft / fixed-slot sharding (Phases 17–21, planned)
+## Level 3 — Multi-Raft / fixed-slot sharding (Phases 17–21)
 
 Independent groups progress concurrently; a key's slot pins it to one
-group, so cross-shard ordering is not a concern inside a single
-operation. Not implemented yet — DistriKV is one group until Phase 17.
+group, so cross-shard ordering is not a concern inside a single operation.
+Phase 17 delivered the per-group `raft.Group` substrate (a node hosts N
+groups, transport multiplexes by `group_id`); Phase 18 delivered the
+fixed-slot key→group mapping (`shard.Slot` + `shard.Map`). The cluster
+router (Phase 20) ties the full path together.
 
 ## Ownership table
 

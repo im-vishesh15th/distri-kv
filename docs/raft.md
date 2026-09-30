@@ -217,7 +217,9 @@ re-applying, a superseded sequence (`< last`) is refused
 (`ErrStaleSequence`), anything newer applies. Because the decision comes
 from the entry bytes themselves, in log order, every replica makes it
 identically — dedup is ordinary deterministic SM state, rebuilt by log
-replay on restart and owed a place in future snapshots (Phase 12).
+replay on restart and serialized into snapshots since Phase 12 (the table
+rides `SM.Snapshot`, so a restored node keeps answering retries exactly
+as before).
 
 ## Linearizable reads: ReadIndex (Phase 11)
 
@@ -249,10 +251,56 @@ retrying is trivially safe). `GetStatus` deliberately skips the barrier:
 it is a routing hint, not data. Reads cost one heartbeat round trip —
 concurrent reads batch naturally onto the same forced send.
 
-## What is deliberately not here yet (Phase 12+)
+## Snapshots + log compaction (Phase 12)
 
-Conflict-term backoff hints (deferred to measurement), snapshots/
-`InstallSnapshot` (which must serialize the session table too).
+The Raft log cannot grow forever (spec §15). Every `SnapshotEvery` applied
+entries the node captures the state machine at `lastApplied` and compacts
+the log prefix the capture covers (`internal/raft/snapshot.go`):
+
+1. **Capture** — `Snapshotter.Snapshot()` on the loop goroutine, between
+   apply batches, so `lastApplied` is the exact log position of the bytes
+   (`kv.SM` serializes engine key space + session table + eviction counter
+   into one protobuf payload).
+2. **Persist** — `raftlog.SaveSnapshot({lastIncludedIndex,
+   lastIncludedTerm}, payload)`: temp file → fsync → rename → fsync dir
+   (the hard-state discipline), a single `snapshot` sidecar next to the
+   log.
+3. **Compact** — only after the snapshot is durable: `TruncatePrefix`
+   discards entries `≤ lastIncludedIndex`, keeping `firstTerm` as the
+   boundary's `prevLogTerm`. A crash between (2) and (3) leaves
+   redundant-but-safe entries; startup reconciles by truncating them.
+   The reverse order — compact before persist — could leave a log with
+   nothing to restore from, which is why the order is structural, not
+   advisory.
+
+**Recovery** (`raft.New` → `restoreSnapshot`): load the sidecar, refuse
+to start if the state machine cannot restore it or if the log's retained
+start leaves a gap past `lastIncludedIndex` (entries lost = divergence
+waiting to happen), compact any leftover covered entries, `Restore` the
+payload, then adopt `commitIndex = lastApplied = lastIncludedIndex` (a
+snapshot only ever comes from applied state, and applied implies
+committed). Apply then resumes at the retained tail — recovery is
+*snapshot + remaining log*, not full replay.
+
+**Boundary term:** `Term(firstIndex-1)` answers from `firstTerm`
+(`lastIncludedTerm`), so a follower acknowledged exactly at the
+compaction point keeps receiving entries; deeper behind, replication
+reports `append_blocked` until Phase 13's `InstallSnapshot`.
+
+**Policy:** per-node, not consensus — each replica snapshots its own pace;
+safety invariants (never past `lastApplied`, never discard committed
+entries uncaptured) hold locally. Failures to capture/persist are logged
+(debug) and retried next window: snapshotting is capacity, not safety, and
+never halts the node. `cmd/server` sets `-snapshot-every 1024` (0
+disables). The known interim limit until Phase 13: a peer that misses more
+than one snapshot window of entries while disconnected cannot catch up
+from entries alone (its anchor is compacted away) — InstallSnapshot closes
+that.
+
+## What is deliberately not here yet (Phase 13+)
+
+Conflict-term backoff hints (deferred to measurement), `InstallSnapshot`
+transfer for peers behind the compaction point.
 
 ## How this phase is tested
 
@@ -283,6 +331,11 @@ Conflict-term backoff hints (deferred to measurement), snapshots/
 | `TestFollowerRefusesDataReads` (real gRPC) | R1's safety condition: a follower holding the value still answers `Aborted` (never a value) to raw `Get`/`Exists`; an SDK dialed at the follower reads by redirect |
 | `TestReadAfterFailoverSeesAcknowledgedWrite` (real gRPC) | acknowledged write → leader killed → immediate read on the new leader sees it (no-op commit + applied-wait close the window) |
 | `TestReadIndexContract` (real gRPC) | `ReadIndex` returns only with `lastApplied ≥ index` (and `commitIndex ≥ index`); a follower's call fails `ErrNotLeader` |
+| `TestSnapshotCompactsLog` (real gRPC, 3-node) | every replica snapshots and truncates its prefix; `Term(firstIndex-1)` serves the boundary; writes after compaction replicate and converge |
+| `TestRestartFromSnapshot` (real gRPC, standalone) | state restored from snapshot with covered entries gone; retained tail replays (`snapshot + remaining log`); session table + dedup survive the restore (retry replays, next seq applies) |
+| `TestSnapshotCrashBeforeCompaction` (real gRPC) | the SaveSnapshot→TruncatePrefix crash window: startup truncates covered entries, adopts the snapshot position, keeps serving |
+| `TestNewRefusesBrokenSnapshotStates` | snapshot without a restorable state machine ⇒ refuse; snapshot beyond the log's retained start (lost tail) ⇒ refuse |
+| `TestSnapshotSaveLoadRoundTrip`, `TestOpenRefusedOnCorruptSnapshot`, `TestLoadSnapshotRefusedOnCorruptSnapshot`, `TestSnapshotRejectsZeroIndex`, `TestSnapshotClosedLog`, `TestTruncatePrefix` (raftlog) | sidecar round trip + replace; CRC/length damage is loud on both Open and load; zero index refused; closed log refused; compaction point survives restart **with** a snapshot (no-snapshot fallback pinned) |
 
 Unit tests inject time (`Tick`) and the network (scripted transport)
 directly, so all timeout/ordering claims are deterministic; the integration

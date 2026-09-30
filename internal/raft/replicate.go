@@ -271,6 +271,9 @@ func (n *Node) applyCommitted() error {
 		}
 		delete(n.waiters, idx)
 	}
+	// Snapshot window check (Phase 12): runs after the batch, on the loop
+	// goroutine, so lastApplied is the exact position captured.
+	n.maybeSnapshot()
 	return nil
 }
 

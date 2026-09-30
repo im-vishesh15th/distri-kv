@@ -1,6 +1,6 @@
 # Consistency — DistriKV
 
-> Status: through Phase 11 (linearizable reads).
+> Status: through Phase 12 (snapshots + log compaction).
 > Implementations and their proofs are added phase by phase; every claim below
 > must eventually name the test that demonstrates it. Vague phrases like
 > "strong consistency" are forbidden in this project unless immediately
@@ -36,8 +36,8 @@
 | W3 | No acknowledged write is lost across leader change | Raft safety + persisted hard state | `TestReplicationSurvivesLeaderKill` | 6 |
 | R1 | Reads are linearizable | ReadIndex: fresh heartbeat quorum confirms leadership in the current term (send-generation fenced against delayed responses) → current-term no-op committed so `commitIndex` covers prior-term commits → wait for `lastApplied ≥ readIndex` → serve; non-leaders refuse (`Aborted`), SDK redirects | `TestFollowerRefusesDataReads`, `TestReadAfterFailoverSeesAcknowledgedWrite`, `TestReadIndexContract` (Raft layer: returned index already applied) | 11 |
 | A1 | Atomic operations apply indivisibly: among concurrent attempts exactly one CAS wins, and INCREMENT/DECREMENT never lose an update | each command is one indivisible step in the event loop's in-order apply (linearization point = position in the committed log); the engine holds one lock per operation | `TestMemEngineConcurrentCASExactlyOneWinner`, `TestMemEngineConcurrentApplyAtomicity` (engine); `TestMultiSessionConcurrentIncr`, `TestCASOptimisticLoopConvergence`, `TestDecrementIfPositiveExactlyOneWinner`, `TestConcurrentReadsDuringWrites` (full stack, cross-session); `TestConcurrentSessionsThroughCluster` (3-node); `TestConcurrentIncrThroughWire` (one session) | 10 |
-| S1 | A retried mutation applies at most once, and its original response is replayed | replicated session table in the SM: `(client_id → last seq, response)` decided from the logged command at apply time | `TestDedupReplaysCachedResult`, `TestDedupRejectsSupersededSequence`, `TestDedupReplaysCachedError`, `TestDedupReplaysCachedCASFailure`; `TestDuplicateRetryAppliesOnce` (full stack); failover INCR in `TestClientRoutesWritesToLeader` | 9 |
-| S2 | Session/dedup state survives replication and restart | session table is deterministic SM state: replicated via the log, rebuilt by replay (`TestSessionStateSurvivesReplay`); snapshot serialization still owed | `TestSessionStateSurvivesReplay`; snapshot tests 12 (planned) | 9/12 (planned) |
+| S1 | A retried mutation applies at most once, and its original response is replayed | replicated session table in the SM: `(client_id → last seq, response)` decided from the logged command at apply time; table bounded at `sessionCap` with deterministic (birth-order) eviction | `TestDedupReplaysCachedResult`, `TestDedupRejectsSupersededSequence`, `TestDedupReplaysCachedError`, `TestDedupReplaysCachedCASFailure`; `TestDuplicateRetryAppliesOnce` (full stack); failover INCR in `TestClientRoutesWritesToLeader`; eviction horizon in `TestSessionCapEvictsOldest` | 9 |
+| S2 | Session/dedup state survives replication and restart | session table is deterministic SM state: replicated via the log, rebuilt by replay (`TestSessionStateSurvivesReplay`); serialized into snapshots together with the engine key space and restored before tail-log replay (Phase 12) | `TestSessionStateSurvivesReplay`; `TestSMSnapshotRestoreRoundTrip` (session table + cached error identity across restore), `TestRestartFromSnapshot` (dedup works after snapshot restart) | 9/12 |
 | D1 | All replicas converge to identical state | deterministic in-order apply | `TestStateMachinesConverge` (byte-identical state + restart replay), `TestFollowerAppliesOnlyCommitted` | 7 |
 | P1 | Committed state survives the defined crash model | persistent log recovery (torn tail truncated, corruption loud) | byte-level truncation fuzz | 3 (planned) |
 
@@ -62,9 +62,15 @@ precise contract (S1):
 - **Bounds:** dedup is scoped to `client_id` — a client that loses its
   identity starts a fresh session, and retries across that boundary are
   not recognized. A request the client gives up on without retrying is
-  lost; dedup cannot resurrect it. Session entries are kept per client
-  seen (growth ∝ distinct clients) until snapshot GC bounds them in
-  Phase 12.
+  lost; dedup cannot resurrect it. The session table itself is bounded:
+  at `sessionCap` (65536) live sessions, a new `client_id` evicts the
+  earliest-created session (deterministic birth order — replicated state,
+  so every replica evicts the same one). The at-most-once window for an
+  evicted session ends at eviction: a retry whose original applied before
+  eviction applies again. This never fires for a live retry in practice —
+  SDK retries finish within seconds, while eviction requires 65536 other
+  sessions to appear first — but it is the precise edge, stated here
+  rather than hidden (`TestSessionCapEvictsOldest`).
 - **Why the SDK may auto-retry `Unavailable` mutations (Phase 9):** the
   retry carries the same sequence, so a committed original and its retry
   can never both apply — but an *unretried* lost request is simply lost,

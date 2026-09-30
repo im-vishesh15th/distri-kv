@@ -1,7 +1,8 @@
 // DistriKV public KV API.
 //
 // Status: client RPCs (Phase 2), replicated Command encoding (Phase 7),
-// leader routing (Phase 8), client sessions (Phase 9). Every mutating
+// leader routing (Phase 8), client sessions (Phase 9), state-machine
+// snapshots (Phase 12). Every mutating
 // request carries client_id/sequence_number; since Phase 9 the server
 // REQUIRES them (InvalidArgument otherwise) and replicates them inside the
 // Command so the state machine can suppress duplicate application of a
@@ -177,4 +178,44 @@ message GetStatusResponse {
   // "" when unknown to this node (including standalone deployments, where
   // leader_id == node_id means "you are already on the leader").
   string leader_addr = 4;
+}
+
+// ---------------------------------------------------------------------------
+// State-machine snapshot (Phase 12).
+//
+// SM.Snapshot serializes the COMPLETE kv.SM state — engine key space plus
+// the client-session table — into one payload the Raft layer persists
+// alongside its log and reloads at startup before replaying the log tail
+// (spec §15). The payload is opaque to Raft; only kv.SM reads it back.
+//
+// Determinism: sessions are emitted sorted by client_id, so the same state
+// always produces identical bytes (snapshot tests compare them directly).
+// ---------------------------------------------------------------------------
+
+// StateMachineSnapshot is kv.SM's full state at one log position.
+message StateMachineSnapshot {
+  // The engine's own encoding (opaque here — only Engine.Restore reads it).
+  bytes engine_state = 1;
+  // One entry per live session, sorted by client_id.
+  repeated SessionState sessions = 2;
+  // The SM's next session-birth counter. Restoring it exactly keeps
+  // deterministic session eviction (sessionCap in sm.go) aligned across
+  // replicas after a restore.
+  uint64 next_session_birth = 3;
+}
+
+// SessionState is one dedup session as it appears in a snapshot.
+message SessionState {
+  string client_id = 1;
+  // The last sequence applied for this session (dedup high-water mark).
+  uint64 last_sequence = 2;
+  // Cached response of that application.
+  bool applied = 3;
+  bytes result_value = 4;
+  // Error() of the cached domain error; "" = none. Known sentinels
+  // (ErrNotInteger/ErrOverflow/...) map back to their error values on
+  // restore so a replayed retry still answers errors.Is correctly.
+  string result_error = 5;
+  // Session creation order (deterministic eviction tie-breaker).
+  uint64 birth = 6;
 }

@@ -126,6 +126,17 @@ type Config struct {
 	// Nil is legal: entries still replicate and commit, apply is a no-op
 	// (the raft layer alone, as in the election/replication tests).
 	StateMachine StateMachine
+
+	// SnapshotEvery is how many APPLIED entries trigger a snapshot +
+	// log compaction (Phase 12). 0 (default) disables snapshots: the log
+	// then grows forever, which is fine for tests and wrong for a running
+	// server (cmd/server sets a real value).
+	//
+	// The state machine must implement Snapshotter for this to take
+	// effect; machines that don't simply never compact. Snapshots are a
+	// capacity concern, not a safety one: a failure to snapshot is logged
+	// and retried on the next window, never a node halt.
+	SnapshotEvery uint64
 }
 
 // StateMachine is the apply hook the Raft layer drives: payload in, result
@@ -138,6 +149,27 @@ type Config struct {
 // Empty payloads (leader no-op entries) never reach Apply.
 type StateMachine interface {
 	Apply(payload []byte) (any, error)
+}
+
+// Snapshotter is an OPTIONAL capability of a StateMachine (Phase 12): the
+// ability to serialize its full state and reload it. When a machine
+// implements it and Config.SnapshotEvery > 0, the node periodically
+// captures the state at lastApplied, persists it via the log's snapshot
+// sidecar, and compacts the log entries the snapshot covers — then restores
+// from the snapshot at startup before replaying the remaining log tail.
+//
+// A machine that does not implement it keeps working: snapshots are simply
+// never taken (the log grows). Raft itself never interprets the payload —
+// only the same state machine reads it back.
+type Snapshotter interface {
+	// Snapshot returns the machine's complete state at the moment of the
+	// call (made on the event-loop goroutine, between applies, so it sees
+	// a consistent prefix of the log).
+	Snapshot() ([]byte, error)
+	// Restore replaces the machine's state wholesale with a payload
+	// Snapshot produced. Called from New (before Run), exactly once per
+	// node startup that finds a persisted snapshot.
+	Restore(data []byte) error
 }
 
 func (c Config) validate() error {
@@ -272,6 +304,16 @@ type Node struct {
 	commitIndex uint64
 	lastApplied uint64
 
+	// Snapshot/compaction state (Phase 12): snapshottable is the
+	// type-asserted Snapshotter (nil = snapshots disabled for this
+	// machine); snapEvery mirrors Config.SnapshotEvery; lastSnapIndex is
+	// the lastIncludedIndex of the newest snapshot this node has taken OR
+	// restored (0 = none). Compaction discards entries <= lastSnapIndex,
+	// so lastApplied >= lastSnapIndex always holds.
+	snapshottable Snapshotter
+	snapEvery     uint64
+	lastSnapIndex uint64
+
 	// votes dedupes grants for the current candidacy; len() is the
 	// distinct-vote count.
 	votes map[transport.NodeID]bool
@@ -358,7 +400,82 @@ func New(cfg Config) (*Node, error) {
 	n.votedFor = transport.NodeID(hs.VotedFor)
 	n.resetElectionTimer()
 
+	// Snapshot recovery (Phase 12): restore the captured state machine,
+	// then fast-forward commitIndex/lastApplied to the snapshot's log
+	// position so apply resumes at the tail instead of replaying entries
+	// the snapshot already subsumes. Both are legal at exactly this value:
+	// a snapshot is only ever taken from APPLIED state, and applied
+	// implies committed.
+	if n.sm != nil {
+		if s, ok := n.sm.(Snapshotter); ok {
+			n.snapshottable = s
+		}
+	}
+	n.snapEvery = cfg.SnapshotEvery
+	if err := n.restoreSnapshot(); err != nil {
+		cancel()
+		return nil, err
+	}
+
 	return n, nil
+}
+
+// restoreSnapshot loads the persisted snapshot (if any) into the state
+// machine and aligns the node's apply position with it. Called from New,
+// before Run: nothing mutates state concurrently yet.
+//
+// The three durable states it reconciles:
+//
+//  1. No snapshot: fresh or never-compacted node — nothing to do.
+//  2. Snapshot + fully compacted log: firstIndex already re-established
+//     from snapshot metadata by raftlog.Open — restore payload, adopt
+//     position.
+//  3. Snapshot saved but compaction not finished (crash between
+//     SaveSnapshot and TruncatePrefix): the log still holds covered
+//     entries — truncate them now (idempotent), then adopt the position.
+//
+// A snapshot whose state machine cannot restore (or whose payload sits
+// beyond the log's retained start — entries lost) is a hard error: running
+// anyway would fabricate a state machine that diverges from the cluster.
+func (n *Node) restoreSnapshot() error {
+	meta, payload, err := n.rlog.LoadSnapshot()
+	if err != nil {
+		return fmt.Errorf("raft: load snapshot: %w", err)
+	}
+	if meta.Zero() {
+		return nil
+	}
+	if n.snapshottable == nil {
+		return fmt.Errorf("raft: snapshot at index %d exists but state machine cannot restore snapshots", meta.LastIncludedIndex)
+	}
+	// The log must retain everything after the snapshot position; a gap
+	// means the tail entries the snapshot does not cover are gone.
+	first := n.rlog.FirstIndex()
+	if meta.LastIncludedIndex+1 < first {
+		return fmt.Errorf("raft: snapshot at index %d but log starts at %d: entries %d..%d lost",
+			meta.LastIncludedIndex, first, meta.LastIncludedIndex+1, first-1)
+	}
+	// Crash-window catch-up: discard entries the snapshot already covers
+	// (TruncatePrefix is a no-op when already compacted past them).
+	if meta.LastIncludedIndex > first-1 {
+		if err := n.rlog.TruncatePrefix(meta.LastIncludedIndex); err != nil {
+			return fmt.Errorf("raft: compact to snapshot index %d: %w", meta.LastIncludedIndex, err)
+		}
+	}
+
+	if err := n.snapshottable.Restore(payload); err != nil {
+		return fmt.Errorf("raft: restore snapshot payload at index %d: %w", meta.LastIncludedIndex, err)
+	}
+	n.lastApplied = meta.LastIncludedIndex
+	n.commitIndex = meta.LastIncludedIndex
+	n.lastSnapIndex = meta.LastIncludedIndex
+	n.logfInfo("snapshot_restored",
+		"last_included_index", meta.LastIncludedIndex,
+		"last_included_term", meta.LastIncludedTerm,
+		"payload_bytes", len(payload),
+		"log_first_index", n.rlog.FirstIndex(),
+	)
+	return nil
 }
 
 // Run processes events until ctx is cancelled, then stops all event sources

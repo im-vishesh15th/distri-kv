@@ -2,6 +2,9 @@ package kv
 
 import (
 	"bytes"
+	"encoding/binary"
+	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -159,4 +162,92 @@ func clone(b []byte) []byte {
 	c := make([]byte, len(b))
 	copy(c, b)
 	return c
+}
+
+// --- Snapshot / Restore (Phase 12) ---
+
+// MemEngine snapshot encoding (little-endian, engine-internal):
+//
+//	[u64 count][u32 klen][key][u32 vlen][value] × count
+//
+// Keys are written in sorted order so the encoding is deterministic: the
+// same map state always produces the same bytes (snapshot tests compare
+// encodings directly). The encoding is self-contained: everything is copied
+// out under the read lock, so callers may snapshot while writes proceed.
+const memSnapMaxEntries = 1 << 28 // sanity bound: count can't exceed 256M
+
+// Snapshot serializes the full key space. See Engine.Snapshot.
+func (e *MemEngine) Snapshot() ([]byte, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	keys := make([]string, 0, len(e.data))
+	for k := range e.data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, uint64(len(e.data)))
+	for _, k := range keys {
+		if uint64(len(k)) > uint64(^uint32(0)) || uint64(len(e.data[k])) > uint64(^uint32(0)) {
+			return nil, fmt.Errorf("kv: snapshot entry exceeds 4 GiB")
+		}
+		var lenbuf [4]byte
+		binary.LittleEndian.PutUint32(lenbuf[:], uint32(len(k)))
+		buf = append(buf, lenbuf[:]...)
+		buf = append(buf, k...)
+		binary.LittleEndian.PutUint32(lenbuf[:], uint32(len(e.data[k])))
+		buf = append(buf, lenbuf[:]...)
+		buf = append(buf, e.data[k]...)
+	}
+	return buf, nil
+}
+
+// Restore replaces all engine state with data (a Snapshot encoding). A
+// malformed encoding fails before any state is touched: a partially
+// restored engine must never reach the apply path. See Engine.Restore.
+func (e *MemEngine) Restore(data []byte) error {
+	if len(data) < 8 {
+		return fmt.Errorf("kv: restore engine: truncated header (%d bytes)", len(data))
+	}
+	count := binary.LittleEndian.Uint64(data)
+	if count > memSnapMaxEntries {
+		return fmt.Errorf("kv: restore engine: implausible entry count %d", count)
+	}
+
+	next := make(map[string][]byte, count)
+	off := 8
+	readField := func() ([]byte, error) {
+		if off+4 > len(data) {
+			return nil, fmt.Errorf("kv: restore engine: truncated at offset %d", off)
+		}
+		n := int(binary.LittleEndian.Uint32(data[off:]))
+		off += 4
+		if off+n > len(data) {
+			return nil, fmt.Errorf("kv: restore engine: field of %d bytes overruns %d-byte snapshot", n, len(data))
+		}
+		f := data[off : off+n]
+		off += n
+		return f, nil
+	}
+	for i := uint64(0); i < count; i++ {
+		k, err := readField()
+		if err != nil {
+			return err
+		}
+		v, err := readField()
+		if err != nil {
+			return err
+		}
+		next[string(k)] = clone(v)
+	}
+	if off != len(data) {
+		return fmt.Errorf("kv: restore engine: %d trailing bytes after %d entries", len(data)-off, count)
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.data = next
+	return nil
 }

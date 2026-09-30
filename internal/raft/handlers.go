@@ -206,14 +206,17 @@ func (n *Node) appendTail(wire []*raftpb.LogEntry) error {
 
 // prevLogMatches is the Raft §5.3 consistency check: does our log actually
 // contain an entry matching (prevLogIndex, prevLogTerm)? index 0 is the
-// base case (Term(0) = 0 by convention — an empty log matches).
+// base case (Term(0) = 0 by convention — an empty log matches). The
+// compaction boundary itself (index == firstIndex-1) is answerable since
+// Phase 12 — Term serves firstTerm (lastIncludedTerm); only BELOW it does
+// the check fail, which is Phase 13's InstallSnapshot territory.
 func (n *Node) prevLogMatches(index, term uint64) bool {
 	if index > n.rlog.LastIndex() {
 		return false // we don't have that far yet
 	}
 	t, err := n.rlog.Term(index)
 	if err != nil {
-		return false // below the compaction point (Phase 12) or missing
+		return false // below the compaction point or missing
 	}
 	return t == term
 }

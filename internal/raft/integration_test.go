@@ -41,15 +41,17 @@ type liveNode struct {
 	dir   string
 	peers []transport.Peer
 
-	lis    net.Listener
-	srv    *grpc.Server
-	tpt    *grpctransport.RealTransport
-	rlog   *raftlog.Log
-	rnode  *raft.Node
-	engine kv.Engine // this replica's state machine storage (Phase 7)
-	cancel context.CancelFunc
-	runErr chan error
-	dead   bool
+	lis       net.Listener
+	srv       *grpc.Server
+	tpt       *grpctransport.RealTransport
+	rlog      *raftlog.Log
+	rnode     *raft.Node
+	engine    kv.Engine // this replica's state machine storage (Phase 7)
+	sm        *kv.SM    // the SM adapter: Snapshot/Restore for Phase 12 tests
+	snapEvery uint64    // Config.SnapshotEvery this node booted with
+	cancel    context.CancelFunc
+	runErr    chan error
+	dead      bool
 }
 
 // debugLogger writes per-node Raft debug logs next to the log directory for
@@ -66,6 +68,13 @@ func debugLogger(dir string, id transport.NodeID) *slog.Logger {
 // ticker). lis is pre-allocated by the cluster builder; pass nil to listen
 // on addr itself (restart path).
 func bootNode(t *testing.T, id transport.NodeID, addr, dir string, peers []transport.Peer, lis net.Listener) *liveNode {
+	t.Helper()
+	return bootNodeSnap(t, id, addr, dir, peers, lis, 0)
+}
+
+// bootNodeSnap is bootNode with Config.SnapshotEvery set (Phase 12):
+// snapEvery == 0 disables snapshots, as every Phase ≤11 test wants.
+func bootNodeSnap(t *testing.T, id transport.NodeID, addr, dir string, peers []transport.Peer, lis net.Listener, snapEvery uint64) *liveNode {
 	t.Helper()
 
 	rlog, _, err := raftlog.Open(dir)
@@ -85,6 +94,7 @@ func bootNode(t *testing.T, id transport.NodeID, addr, dir string, peers []trans
 	// This replica's KV state machine: committed log entries decode to
 	// Commands and apply here, in log order (Phase 7).
 	engine := kv.NewMemEngine()
+	sm := kv.NewSM(engine)
 
 	rnode, err := raft.New(raft.Config{
 		ID:             id,
@@ -95,9 +105,10 @@ func bootNode(t *testing.T, id transport.NodeID, addr, dir string, peers []trans
 		HeartbeatTicks: heartbeatTicks,
 		// Distinct seed per boot: identical seeds across nodes would make
 		// their randomized timeouts collide every round (livelock).
-		RNG:          rand.New(rand.NewSource(time.Now().UnixNano() + int64(len(dir)))),
-		Logger:       debugLogger(dir, id),
-		StateMachine: kv.NewSM(engine),
+		RNG:           rand.New(rand.NewSource(time.Now().UnixNano() + int64(len(dir)))),
+		Logger:        debugLogger(dir, id),
+		StateMachine:  sm,
+		SnapshotEvery: snapEvery,
 	})
 	if err != nil {
 		t.Fatalf("%s: raft.New: %v", id, err)
@@ -139,7 +150,8 @@ func bootNode(t *testing.T, id transport.NodeID, addr, dir string, peers []trans
 	return &liveNode{
 		id: id, addr: lis.Addr().String(), dir: dir, peers: peers,
 		lis: lis, srv: srv, tpt: tpt, rlog: rlog, rnode: rnode,
-		engine: engine, cancel: cancel, runErr: runErr,
+		engine: engine, sm: sm, snapEvery: snapEvery,
+		cancel: cancel, runErr: runErr,
 	}
 }
 
@@ -164,16 +176,24 @@ func (ln *liveNode) kill() {
 }
 
 // restart reopens the same directory and re-serves the same address — a
-// crashed node coming back.
+// crashed node coming back. The node keeps its snapshot configuration
+// (Phase 12): a restart must resume the same compaction policy.
 func restartNode(t *testing.T, ln *liveNode) {
 	t.Helper()
-	fresh := bootNode(t, ln.id, ln.addr, ln.dir, ln.peers, nil)
+	fresh := bootNodeSnap(t, ln.id, ln.addr, ln.dir, ln.peers, nil, ln.snapEvery)
 	*ln = *fresh
 	ln.dead = false
 }
 
 // startCluster boots n nodes on loopback with static membership n1..nN.
 func startCluster(t *testing.T, n int) []*liveNode {
+	t.Helper()
+	return startClusterSnap(t, n, 0)
+}
+
+// startClusterSnap is startCluster with Config.SnapshotEvery set on every
+// node (Phase 12); 0 keeps snapshots off.
+func startClusterSnap(t *testing.T, n int, snapEvery uint64) []*liveNode {
 	t.Helper()
 	root := t.TempDir()
 
@@ -191,7 +211,7 @@ func startCluster(t *testing.T, n int) []*liveNode {
 	nodes := make([]*liveNode, n)
 	for i := 0; i < n; i++ {
 		dir := fmt.Sprintf("%s/%s", root, peers[i].ID)
-		nodes[i] = bootNode(t, peers[i].ID, peers[i].Addr, dir, peers, lis[i])
+		nodes[i] = bootNodeSnap(t, peers[i].ID, peers[i].Addr, dir, peers, lis[i], snapEvery)
 	}
 	t.Cleanup(func() {
 		for _, ln := range nodes {

@@ -1,6 +1,6 @@
 # Concurrency model — DistriKV
 
-> Status: through Phase 10. Maps the spec's three concurrency levels
+> Status: through Phase 12. Maps the spec's three concurrency levels
 > (§9 CONCURRENCY MODEL) onto the actual code, and names the primitive
 > that makes each level safe. Every claim names its test; see also
 > guarantee A1 in docs/consistency.md.
@@ -45,6 +45,14 @@
   fenced), current-term no-op committed, applied ≥ read point — so a
   read never observes state below its read point, and a non-leader
   refuses instead of answering from a possibly stale replica.
+- **Snapshots (Phase 12)**: `maybeSnapshot` runs at the *end* of
+  `applyCommitted`, on this same goroutine — `SM.Snapshot()` therefore
+  observes a quiescent state machine at an exact `lastApplied`, never a
+  half-applied one, and no lock guards the capture. Restore is
+  pre-loop: `raft.New` calls `Restore` before `Run`, so no event can
+  race it. The cost is loop-blocking (O(state) per window) — accepted
+  as the correctness-first choice; profiling (Phase 24) decides if it
+  ever moves off-loop.
 
 ## Level 3 — Multi-Raft / fixed-slot sharding (Phases 17–21, planned)
 
@@ -58,6 +66,8 @@ operation. Not implemented yet — DistriKV is one group until Phase 17.
 |---|---|---|---|
 | Engine KV data | apply loop (via `SM.Apply`) | gRPC handlers (after the ReadIndex barrier) | `MemEngine` `sync.RWMutex` |
 | Session table (Phase 9) | apply loop only | apply loop only | none needed — single goroutine, `-race` enforces |
+| Snapshot capture + compaction (Phase 12) | event loop (end of apply turn) | `raft.New` at startup (pre-loop) | loop single-threading; startup before `Run` |
+| Snapshot sidecar file | loop via `raftlog.SaveSnapshot` (atomic rename) | `Open`/`LoadSnapshot` | same file discipline as `hardstate` |
 | Raft term/vote/commit/apply cursor | event loop only | `Status()` readers | loop single-threading; status snapshots |
 | Propose waiters | loop releases them | waiting proposers | per-index channels, failed on step-down |
 | SDK endpoint + conns | any caller goroutine | any caller goroutine | `Client.mu` |
@@ -73,6 +83,7 @@ operation. Not implemented yet — DistriKV is one group until Phase 17.
 | 1 × 2 — many sessions, one loop | `TestMultiSessionConcurrentIncr`, `TestCASOptimisticLoopConvergence`, `TestDecrementIfPositiveExactlyOneWinner` (spec §8: exactly one winner) |
 | 1 × 2 on a real cluster | `TestConcurrentSessionsThroughCluster` (3 nodes, exact count on every replica) |
 | 2 — ReadIndex in the loop | `TestReadIndexContract` (returned index already applied), `TestFollowerRefusesDataReads`, `TestReadAfterFailoverSeesAcknowledgedWrite` |
+| 2 — snapshots in the loop | `TestSnapshotCompactsLog` (capture between applies, boundary term served), `TestRestartFromSnapshot` (pre-loop restore + tail replay), `TestSnapshotCrashBeforeCompaction` (startup reconciliation) |
 
 The whole suite runs under `go test -race`; any unsynchronized access
 above fails it regardless of assertions.

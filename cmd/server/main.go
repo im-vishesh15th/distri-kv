@@ -38,6 +38,13 @@ import (
 	"google.golang.org/grpc/reflection"
 )
 
+// snapshotEveryDefault is the -snapshot-every default: how many applied
+// entries trigger a state-machine snapshot and log-prefix compaction
+// (Phase 12). It bounds log growth in production: the log retains only the
+// entries after the newest snapshot plus what has applied since. 0 disables
+// compaction (legal for tests, never what a server wants).
+const snapshotEveryDefault = 1024
+
 func main() {
 	var (
 		id        = flag.String("id", "node1", "node identity")
@@ -45,6 +52,7 @@ func main() {
 		dataDir   = flag.String("data-dir", "data", "directory for persistent state (persistent Raft log)")
 		peersSpec = flag.String("peers", "", "static cluster membership: id@host:port,id@host:port,... (must include this node; empty = standalone)")
 		debug     = flag.Bool("debug", false, "enable debug-level structured logging")
+		snapEvery = flag.Uint64("snapshot-every", snapshotEveryDefault, "applied entries per state-machine snapshot + log compaction (0 disables; the log then grows without bound)")
 	)
 	flag.Parse()
 
@@ -54,13 +62,13 @@ func main() {
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 
-	if err := run(*id, *addr, *dataDir, *peersSpec, log); err != nil {
+	if err := run(*id, *addr, *dataDir, *peersSpec, *snapEvery, log); err != nil {
 		log.Error("server_exit", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 }
 
-func run(id, addr, dataDir, peersSpec string, log *slog.Logger) error {
+func run(id, addr, dataDir, peersSpec string, snapEvery uint64, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -130,8 +138,12 @@ func run(id, addr, dataDir, peersSpec string, log *slog.Logger) error {
 		HeartbeatTicks: 3,  // 30 ms heartbeats
 		Logger:         log,
 		// The KV engine IS the state machine: committed entries decode to
-		// Commands and apply in log order (Phase 7).
-		StateMachine: kv.NewSM(engine),
+		// Commands and apply in log order (Phase 7). kv.SM also snapshots
+		// (Phase 12): every -snapshot-every applied entries the node
+		// captures engine + session table and compacts the log prefix they
+		// cover, so the log cannot grow forever in production.
+		StateMachine:  kv.NewSM(engine),
+		SnapshotEvery: snapEvery,
 	})
 	if err != nil {
 		return fmt.Errorf("raft core: %w", err)

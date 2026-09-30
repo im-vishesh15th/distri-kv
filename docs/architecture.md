@@ -109,9 +109,11 @@ On-disk Raft log record framing (normative spec in [persistence.md](persistence.
   state machine as appropriate.
 - **Hard state** (`currentTerm`, `votedFor`) is durable before any RPC that
   depends on it is sent.
-- **Snapshots** (Phase 12): `{lastIncludedIndex, lastIncludedTerm, state}`;
-  atomic write (temp + fsync + rename); log prefix truncated behind the
-  snapshot; restart = load snapshot + replay tail.
+- **Snapshots** (Phase 12, implemented): `{lastIncludedIndex,
+  lastIncludedTerm, state}` — state = engine key space + session table
+  (`kv.SM.Snapshot`); atomic write (temp + fsync + rename); log prefix
+  truncated behind the durable snapshot only; restart = load snapshot +
+  replay the retained tail.
 - **Crash model tested:** partial writes at every byte offset of a record.
 
 ## 8. Failure model

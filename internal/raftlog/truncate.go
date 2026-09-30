@@ -43,6 +43,13 @@ func (l *Log) TruncateSuffix(fromIndex uint64) error {
 // The log's firstIndex becomes uptoIndex+1 and firstTerm becomes the term of
 // the discarded entry — the term Raft needs for lastIncludedTerm checks.
 // uptoIndex must lie in [firstIndex, lastIndex].
+//
+// Durability contract: the compaction point lives in memory unless a
+// snapshot records it. Callers must SaveSnapshot({uptoIndex, firstTerm},
+// payload) BEFORE calling this — then a crash before the rewrite leaves a
+// redundant-but-safe untruncated log, and Open re-establishes firstIndex
+// from the snapshot if the rewrite completed. Compacting without a snapshot
+// loses the compaction point on restart (firstIndex reverts to 1).
 func (l *Log) TruncatePrefix(uptoIndex uint64) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()

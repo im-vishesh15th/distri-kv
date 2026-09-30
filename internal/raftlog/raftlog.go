@@ -5,8 +5,9 @@
 // log and the write-ahead/command log for the replicated state machine. It
 // provides durable append, fsync semantics, index/term addressing, CRC-framed
 // records, torn-write recovery, suffix truncation (conflict resolution),
-// prefix truncation (snapshot compaction), and hard-state persistence for
-// currentTerm/votedFor.
+// prefix truncation (snapshot compaction), hard-state persistence for
+// currentTerm/votedFor, and snapshot persistence (Phase 12): the sidecar a
+// fully-compacted log reloads its firstIndex/firstTerm from.
 //
 // See docs/persistence.md for the on-disk format, durability policy, and the
 // recovery decision table.
@@ -63,15 +64,20 @@ type Log struct {
 
 	// firstIndex is the log's lowest retained index. After prefix
 	// truncation this is >1 and firstTerm carries the term of the last
-	// discarded entry (the snapshot's lastIncludedTerm).
+	// discarded entry (the snapshot's lastIncludedTerm) — Raft's
+	// lastIncludedTerm, the prevLogTerm anchor for a follower whose next
+	// entry sits exactly at the compaction boundary. firstTerm == 0 with
+	// firstIndex > 1 means the term is unknown (compaction without a
+	// snapshot — callers contractually snapshot first, so this only
+	// appears in tests); Term(firstIndex-1) then fails with ErrCompacted
+	// rather than serving a term it cannot know.
 	//
-	// Restart caveat (documented, pinned by TestTruncatePrefix): when
-	// compaction leaves at least one entry, firstIndex is recovered from
-	// entries[0]. A FULLY compacted log has an empty file, so firstIndex
-	// reverts to 1 on reopen. Phase 12 fixes that by re-establishing
-	// firstIndex/firstTerm from snapshot metadata (lastIncludedIndex/
-	// lastIncludedTerm) — which only exists once snapshots exist, i.e.
-	// exactly when compaction becomes possible.
+	// Recovery (Phase 12): with entries retained, firstIndex comes from
+	// entries[0] and firstTerm from the snapshot sidecar when its
+	// lastIncludedIndex+1 matches; a FULLY compacted log (empty file)
+	// restores both from snapshot metadata alone. Without a snapshot the
+	// compaction point does not survive a restart — pinned by
+	// TestTruncatePrefix.
 	firstIndex uint64
 	firstTerm  uint64
 
@@ -131,6 +137,19 @@ func Open(dir string) (*Log, Recovery, error) {
 		return nil, rec, herr
 	}
 
+	// Snapshot metadata fixes the compaction point across restarts (Phase
+	// 12). When entries remain, firstIndex comes from the first retained
+	// record as before — but when compaction discarded EVERYTHING, the
+	// empty file alone would revert firstIndex to 1 and address indexes
+	// that no longer exist; the snapshot's lastIncludedIndex/lastIncludedTerm
+	// is then the truth. A snapshot file that fails to parse is a hard error
+	// (readSnapshot), never a silent fallback to a wrong base.
+	snap, _, serr := readSnapshot(dir)
+	if serr != nil {
+		file.Close()
+		return nil, rec, serr
+	}
+
 	l := &Log{
 		dir:     dir,
 		file:    file,
@@ -139,7 +158,15 @@ func Open(dir string) (*Log, Recovery, error) {
 	}
 	if len(entries) > 0 {
 		l.firstIndex = entries[0].Index
-		l.firstTerm = entries[0].Term
+		// firstTerm = term of the entry BEFORE firstIndex. Only the
+		// snapshot knows it; without a boundary-matching snapshot it stays
+		// 0 (unknown), which Term refuses to serve.
+		if !snap.Zero() && snap.LastIncludedIndex+1 == entries[0].Index {
+			l.firstTerm = snap.LastIncludedTerm
+		}
+	} else if !snap.Zero() {
+		l.firstIndex = snap.LastIncludedIndex + 1
+		l.firstTerm = snap.LastIncludedTerm
 	} else {
 		l.firstIndex = 1
 	}
@@ -193,11 +220,21 @@ func (l *Log) lastTermLocked() uint64 {
 // Term(0) is (0, nil): index 0 is the empty-log base case Raft uses for
 // prevLogTerm of the very first entry. Get(0) remains an error — there is no
 // entry 0.
+//
+// Term(firstIndex-1) is (firstTerm, nil) when known: the last compacted
+// entry's term (snapshot lastIncludedTerm), which a leader needs as the
+// prevLogTerm anchor for a follower caught up exactly at the compaction
+// boundary. Below that — genuinely compacted territory — the answer is
+// ErrCompacted: there is no term to give, and guessing is how replicas
+// diverge (Phase 13's InstallSnapshot serves those peers instead).
 func (l *Log) Term(index uint64) (uint64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if index == 0 {
 		return 0, nil
+	}
+	if index+1 == l.firstIndex && l.firstTerm > 0 {
+		return l.firstTerm, nil
 	}
 	e, err := l.getLocked(index)
 	if err != nil {

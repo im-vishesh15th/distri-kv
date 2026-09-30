@@ -302,18 +302,45 @@ func TestTruncatePrefix(t *testing.T) {
 		t.Fatalf("TruncateSuffix(10) on compacted log = %v, want ErrCompacted", err)
 	}
 
-	// Restart with a FULLY compacted (zero-entry) log: the file is empty, so
-	// firstIndex reverts to 1 — the compaction point exists only in memory
-	// today. Phase 12 fixes this by re-establishing firstIndex/firstTerm from
-	// snapshot metadata (lastIncludedIndex/lastIncludedTerm), which is where
-	// the truth will live. This test pins that documented behavior.
+	// Restart with a FULLY compacted (zero-entry) log and NO snapshot: the
+	// file is empty and nothing records where compaction stopped, so
+	// firstIndex reverts to 1. This is the documented fallback for callers
+	// that compact without snapshotting — raft's own policy is
+	// SaveSnapshot BEFORE TruncatePrefix (snapshot.go), so the real system
+	// never lands here. This test pins the fallback.
 	if err := l.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	l2, _ := mustOpen(t, dir)
 	if l2.FirstIndex() != 1 || l2.LastIndex() != 0 || l2.Count() != 0 {
-		t.Fatalf("reopened fully-compacted log: first=%d last=%d count=%d, want 1/0/0 (Phase-12 caveat)",
+		t.Fatalf("reopened fully-compacted log: first=%d last=%d count=%d, want 1/0/0 (no-snapshot fallback)",
 			l2.FirstIndex(), l2.LastIndex(), l2.Count())
+	}
+
+	// WITH a snapshot the compaction point survives restart (Phase 12):
+	// SaveSnapshot records lastIncludedIndex/lastIncludedTerm, and Open
+	// re-establishes firstIndex/firstTerm from the sidecar. Term(boundary)
+	// answers from firstTerm; below it, ErrCompacted.
+	if err := l2.SaveSnapshot(SnapshotMeta{LastIncludedIndex: 10, LastIncludedTerm: 2}, []byte("state@10")); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	if err := l2.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	lSnap, _ := mustOpen(t, dir)
+	if lSnap.FirstIndex() != 11 || lSnap.LastIndex() != 10 || lSnap.Count() != 0 || lSnap.LastTerm() != 2 {
+		t.Fatalf("reopened snapshotted compacted log: first=%d last=%d count=%d lastTerm=%d, want 11/10/0/2",
+			lSnap.FirstIndex(), lSnap.LastIndex(), lSnap.Count(), lSnap.LastTerm())
+	}
+	if term, err := lSnap.Term(10); err != nil || term != 2 {
+		t.Fatalf("Term(10) = (%d, %v), want (2, nil) — lastIncludedTerm must serve the boundary", term, err)
+	}
+	if _, err := lSnap.Term(9); !errors.Is(err, ErrCompacted) {
+		t.Fatalf("Term(9) = %v, want ErrCompacted", err)
+	}
+	meta, payload, err := lSnap.LoadSnapshot()
+	if err != nil || meta.LastIncludedIndex != 10 || meta.LastIncludedTerm != 2 || string(payload) != "state@10" {
+		t.Fatalf("LoadSnapshot = (%+v, %q, %v), want {10 2} \"state@10\" nil", meta, payload, err)
 	}
 
 	// By contrast, PARTIAL compaction (entries remain) survives restart:

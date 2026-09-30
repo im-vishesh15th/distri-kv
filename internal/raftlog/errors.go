@@ -28,4 +28,10 @@ var (
 	// parsed. Failing loudly is mandatory: silently falling back to a zero
 	// term/vote could permit a double-vote after a crash.
 	ErrHardStateCorrupt = errors.New("raftlog: corrupt hard state")
+
+	// ErrSnapshotCorrupt indicates the snapshot sidecar exists but cannot be
+	// parsed. Failing loudly is mandatory: silently proceeding would make the
+	// node restore a wrong (or empty) state machine while believing it
+	// resumed from a snapshot — silent state divergence.
+	ErrSnapshotCorrupt = errors.New("raftlog: corrupt snapshot")
 )

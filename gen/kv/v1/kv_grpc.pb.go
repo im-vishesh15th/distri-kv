@@ -1,7 +1,8 @@
 // DistriKV public KV API.
 //
 // Status: client RPCs (Phase 2), replicated Command encoding (Phase 7),
-// leader routing (Phase 8), client sessions (Phase 9). Every mutating
+// leader routing (Phase 8), client sessions (Phase 9), state-machine
+// snapshots (Phase 12). Every mutating
 // request carries client_id/sequence_number; since Phase 9 the server
 // REQUIRES them (InvalidArgument otherwise) and replicates them inside the
 // Command so the state machine can suppress duplicate application of a

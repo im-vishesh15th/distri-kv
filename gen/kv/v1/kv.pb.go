@@ -1,7 +1,8 @@
 // DistriKV public KV API.
 //
 // Status: client RPCs (Phase 2), replicated Command encoding (Phase 7),
-// leader routing (Phase 8), client sessions (Phase 9). Every mutating
+// leader routing (Phase 8), client sessions (Phase 9), state-machine
+// snapshots (Phase 12). Every mutating
 // request carries client_id/sequence_number; since Phase 9 the server
 // REQUIRES them (InvalidArgument otherwise) and replicates them inside the
 // Command so the state machine can suppress duplicate application of a
@@ -949,6 +950,163 @@ func (x *GetStatusResponse) GetLeaderAddr() string {
 	return ""
 }
 
+// StateMachineSnapshot is kv.SM's full state at one log position.
+type StateMachineSnapshot struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The engine's own encoding (opaque here — only Engine.Restore reads it).
+	EngineState []byte `protobuf:"bytes,1,opt,name=engine_state,json=engineState,proto3" json:"engine_state,omitempty"`
+	// One entry per live session, sorted by client_id.
+	Sessions []*SessionState `protobuf:"bytes,2,rep,name=sessions,proto3" json:"sessions,omitempty"`
+	// The SM's next session-birth counter. Restoring it exactly keeps
+	// deterministic session eviction (sessionCap in sm.go) aligned across
+	// replicas after a restore.
+	NextSessionBirth uint64 `protobuf:"varint,3,opt,name=next_session_birth,json=nextSessionBirth,proto3" json:"next_session_birth,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *StateMachineSnapshot) Reset() {
+	*x = StateMachineSnapshot{}
+	mi := &file_proto_kv_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StateMachineSnapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StateMachineSnapshot) ProtoMessage() {}
+
+func (x *StateMachineSnapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_kv_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StateMachineSnapshot.ProtoReflect.Descriptor instead.
+func (*StateMachineSnapshot) Descriptor() ([]byte, []int) {
+	return file_proto_kv_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *StateMachineSnapshot) GetEngineState() []byte {
+	if x != nil {
+		return x.EngineState
+	}
+	return nil
+}
+
+func (x *StateMachineSnapshot) GetSessions() []*SessionState {
+	if x != nil {
+		return x.Sessions
+	}
+	return nil
+}
+
+func (x *StateMachineSnapshot) GetNextSessionBirth() uint64 {
+	if x != nil {
+		return x.NextSessionBirth
+	}
+	return 0
+}
+
+// SessionState is one dedup session as it appears in a snapshot.
+type SessionState struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	ClientId string                 `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	// The last sequence applied for this session (dedup high-water mark).
+	LastSequence uint64 `protobuf:"varint,2,opt,name=last_sequence,json=lastSequence,proto3" json:"last_sequence,omitempty"`
+	// Cached response of that application.
+	Applied     bool   `protobuf:"varint,3,opt,name=applied,proto3" json:"applied,omitempty"`
+	ResultValue []byte `protobuf:"bytes,4,opt,name=result_value,json=resultValue,proto3" json:"result_value,omitempty"`
+	// Error() of the cached domain error; "" = none. Known sentinels
+	// (ErrNotInteger/ErrOverflow/...) map back to their error values on
+	// restore so a replayed retry still answers errors.Is correctly.
+	ResultError string `protobuf:"bytes,5,opt,name=result_error,json=resultError,proto3" json:"result_error,omitempty"`
+	// Session creation order (deterministic eviction tie-breaker).
+	Birth         uint64 `protobuf:"varint,6,opt,name=birth,proto3" json:"birth,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionState) Reset() {
+	*x = SessionState{}
+	mi := &file_proto_kv_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionState) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionState) ProtoMessage() {}
+
+func (x *SessionState) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_kv_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionState.ProtoReflect.Descriptor instead.
+func (*SessionState) Descriptor() ([]byte, []int) {
+	return file_proto_kv_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *SessionState) GetClientId() string {
+	if x != nil {
+		return x.ClientId
+	}
+	return ""
+}
+
+func (x *SessionState) GetLastSequence() uint64 {
+	if x != nil {
+		return x.LastSequence
+	}
+	return 0
+}
+
+func (x *SessionState) GetApplied() bool {
+	if x != nil {
+		return x.Applied
+	}
+	return false
+}
+
+func (x *SessionState) GetResultValue() []byte {
+	if x != nil {
+		return x.ResultValue
+	}
+	return nil
+}
+
+func (x *SessionState) GetResultError() string {
+	if x != nil {
+		return x.ResultError
+	}
+	return ""
+}
+
+func (x *SessionState) GetBirth() uint64 {
+	if x != nil {
+		return x.Birth
+	}
+	return 0
+}
+
 var File_proto_kv_proto protoreflect.FileDescriptor
 
 const file_proto_kv_proto_rawDesc = "" +
@@ -1007,7 +1165,18 @@ const file_proto_kv_proto_rawDesc = "" +
 	"\x04role\x18\x02 \x01(\tR\x04role\x12\x1b\n" +
 	"\tleader_id\x18\x03 \x01(\tR\bleaderId\x12\x1f\n" +
 	"\vleader_addr\x18\x04 \x01(\tR\n" +
-	"leaderAddr*{\n" +
+	"leaderAddr\"\x9e\x01\n" +
+	"\x14StateMachineSnapshot\x12!\n" +
+	"\fengine_state\x18\x01 \x01(\fR\vengineState\x125\n" +
+	"\bsessions\x18\x02 \x03(\v2\x19.distrikv.v1.SessionStateR\bsessions\x12,\n" +
+	"\x12next_session_birth\x18\x03 \x01(\x04R\x10nextSessionBirth\"\xc6\x01\n" +
+	"\fSessionState\x12\x1b\n" +
+	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12#\n" +
+	"\rlast_sequence\x18\x02 \x01(\x04R\flastSequence\x12\x18\n" +
+	"\aapplied\x18\x03 \x01(\bR\aapplied\x12!\n" +
+	"\fresult_value\x18\x04 \x01(\fR\vresultValue\x12!\n" +
+	"\fresult_error\x18\x05 \x01(\tR\vresultError\x12\x14\n" +
+	"\x05birth\x18\x06 \x01(\x04R\x05birth*{\n" +
 	"\tCommandOp\x12\x1a\n" +
 	"\x16COMMAND_OP_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eCOMMAND_OP_SET\x10\x01\x12\x15\n" +
@@ -1036,46 +1205,49 @@ func file_proto_kv_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_kv_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_kv_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_proto_kv_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_proto_kv_proto_goTypes = []any{
-	(CommandOp)(0),            // 0: distrikv.v1.CommandOp
-	(*GetRequest)(nil),        // 1: distrikv.v1.GetRequest
-	(*GetResponse)(nil),       // 2: distrikv.v1.GetResponse
-	(*PutRequest)(nil),        // 3: distrikv.v1.PutRequest
-	(*PutResponse)(nil),       // 4: distrikv.v1.PutResponse
-	(*DeleteRequest)(nil),     // 5: distrikv.v1.DeleteRequest
-	(*DeleteResponse)(nil),    // 6: distrikv.v1.DeleteResponse
-	(*ExistsRequest)(nil),     // 7: distrikv.v1.ExistsRequest
-	(*ExistsResponse)(nil),    // 8: distrikv.v1.ExistsResponse
-	(*CASRequest)(nil),        // 9: distrikv.v1.CASRequest
-	(*CASResponse)(nil),       // 10: distrikv.v1.CASResponse
-	(*IncrRequest)(nil),       // 11: distrikv.v1.IncrRequest
-	(*IncrResponse)(nil),      // 12: distrikv.v1.IncrResponse
-	(*Command)(nil),           // 13: distrikv.v1.Command
-	(*GetStatusRequest)(nil),  // 14: distrikv.v1.GetStatusRequest
-	(*GetStatusResponse)(nil), // 15: distrikv.v1.GetStatusResponse
+	(CommandOp)(0),               // 0: distrikv.v1.CommandOp
+	(*GetRequest)(nil),           // 1: distrikv.v1.GetRequest
+	(*GetResponse)(nil),          // 2: distrikv.v1.GetResponse
+	(*PutRequest)(nil),           // 3: distrikv.v1.PutRequest
+	(*PutResponse)(nil),          // 4: distrikv.v1.PutResponse
+	(*DeleteRequest)(nil),        // 5: distrikv.v1.DeleteRequest
+	(*DeleteResponse)(nil),       // 6: distrikv.v1.DeleteResponse
+	(*ExistsRequest)(nil),        // 7: distrikv.v1.ExistsRequest
+	(*ExistsResponse)(nil),       // 8: distrikv.v1.ExistsResponse
+	(*CASRequest)(nil),           // 9: distrikv.v1.CASRequest
+	(*CASResponse)(nil),          // 10: distrikv.v1.CASResponse
+	(*IncrRequest)(nil),          // 11: distrikv.v1.IncrRequest
+	(*IncrResponse)(nil),         // 12: distrikv.v1.IncrResponse
+	(*Command)(nil),              // 13: distrikv.v1.Command
+	(*GetStatusRequest)(nil),     // 14: distrikv.v1.GetStatusRequest
+	(*GetStatusResponse)(nil),    // 15: distrikv.v1.GetStatusResponse
+	(*StateMachineSnapshot)(nil), // 16: distrikv.v1.StateMachineSnapshot
+	(*SessionState)(nil),         // 17: distrikv.v1.SessionState
 }
 var file_proto_kv_proto_depIdxs = []int32{
 	0,  // 0: distrikv.v1.Command.op:type_name -> distrikv.v1.CommandOp
-	1,  // 1: distrikv.v1.KVService.Get:input_type -> distrikv.v1.GetRequest
-	3,  // 2: distrikv.v1.KVService.Put:input_type -> distrikv.v1.PutRequest
-	5,  // 3: distrikv.v1.KVService.Delete:input_type -> distrikv.v1.DeleteRequest
-	7,  // 4: distrikv.v1.KVService.Exists:input_type -> distrikv.v1.ExistsRequest
-	9,  // 5: distrikv.v1.KVService.CAS:input_type -> distrikv.v1.CASRequest
-	11, // 6: distrikv.v1.KVService.Incr:input_type -> distrikv.v1.IncrRequest
-	14, // 7: distrikv.v1.KVService.GetStatus:input_type -> distrikv.v1.GetStatusRequest
-	2,  // 8: distrikv.v1.KVService.Get:output_type -> distrikv.v1.GetResponse
-	4,  // 9: distrikv.v1.KVService.Put:output_type -> distrikv.v1.PutResponse
-	6,  // 10: distrikv.v1.KVService.Delete:output_type -> distrikv.v1.DeleteResponse
-	8,  // 11: distrikv.v1.KVService.Exists:output_type -> distrikv.v1.ExistsResponse
-	10, // 12: distrikv.v1.KVService.CAS:output_type -> distrikv.v1.CASResponse
-	12, // 13: distrikv.v1.KVService.Incr:output_type -> distrikv.v1.IncrResponse
-	15, // 14: distrikv.v1.KVService.GetStatus:output_type -> distrikv.v1.GetStatusResponse
-	8,  // [8:15] is the sub-list for method output_type
-	1,  // [1:8] is the sub-list for method input_type
-	1,  // [1:1] is the sub-list for extension type_name
-	1,  // [1:1] is the sub-list for extension extendee
-	0,  // [0:1] is the sub-list for field type_name
+	17, // 1: distrikv.v1.StateMachineSnapshot.sessions:type_name -> distrikv.v1.SessionState
+	1,  // 2: distrikv.v1.KVService.Get:input_type -> distrikv.v1.GetRequest
+	3,  // 3: distrikv.v1.KVService.Put:input_type -> distrikv.v1.PutRequest
+	5,  // 4: distrikv.v1.KVService.Delete:input_type -> distrikv.v1.DeleteRequest
+	7,  // 5: distrikv.v1.KVService.Exists:input_type -> distrikv.v1.ExistsRequest
+	9,  // 6: distrikv.v1.KVService.CAS:input_type -> distrikv.v1.CASRequest
+	11, // 7: distrikv.v1.KVService.Incr:input_type -> distrikv.v1.IncrRequest
+	14, // 8: distrikv.v1.KVService.GetStatus:input_type -> distrikv.v1.GetStatusRequest
+	2,  // 9: distrikv.v1.KVService.Get:output_type -> distrikv.v1.GetResponse
+	4,  // 10: distrikv.v1.KVService.Put:output_type -> distrikv.v1.PutResponse
+	6,  // 11: distrikv.v1.KVService.Delete:output_type -> distrikv.v1.DeleteResponse
+	8,  // 12: distrikv.v1.KVService.Exists:output_type -> distrikv.v1.ExistsResponse
+	10, // 13: distrikv.v1.KVService.CAS:output_type -> distrikv.v1.CASResponse
+	12, // 14: distrikv.v1.KVService.Incr:output_type -> distrikv.v1.IncrResponse
+	15, // 15: distrikv.v1.KVService.GetStatus:output_type -> distrikv.v1.GetStatusResponse
+	9,  // [9:16] is the sub-list for method output_type
+	2,  // [2:9] is the sub-list for method input_type
+	2,  // [2:2] is the sub-list for extension type_name
+	2,  // [2:2] is the sub-list for extension extendee
+	0,  // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_proto_kv_proto_init() }
@@ -1089,7 +1261,7 @@ func file_proto_kv_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_kv_proto_rawDesc), len(file_proto_kv_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   15,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

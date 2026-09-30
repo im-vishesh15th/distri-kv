@@ -1,7 +1,8 @@
 # Persistence — DistriKV's Persistent Raft Log
 
-> Status: Phase 3 (implemented and tested). This is the normative description
-> of the on-disk format and recovery policy.
+> Status: Phase 12 (log + hard state + snapshot sidecar, implemented and
+> tested). This is the normative description of the on-disk format and
+> recovery policy.
 
 ## 1. One log, no WAL
 
@@ -20,7 +21,9 @@ decision to eliminate a whole class of ordering/durability bugs.
 ```
 <data-dir>/raft/
 ├── raft.log      # framed entry records (the log)
-└── hardstate     # currentTerm + votedFor (atomically replaced)
+├── hardstate     # currentTerm + votedFor (atomically replaced)
+└── snapshot      # lastIncludedIndex + lastIncludedTerm + SM payload
+                  # (atomically replaced; Phase 12 — exactly one exists)
 ```
 
 ## 3. Entry record format (little-endian)
@@ -48,7 +51,37 @@ Properties:
 and is rewritten atomically (temp file → fsync → rename → dir sync), so disk
 always holds either the previous or the new hard state, never a mixture.
 
-## 4. Durability policy (fsync semantics)
+## 4. Snapshot sidecar format (Phase 12)
+
+```
+0        4          8                16               24          24+N
++--------+----------+----------------+----------------+------------+
+| len u32| crc32 u32| lastIndex u64   | lastTerm u64   | payload (N)
++--------+----------+----------------+----------------+------------+
+
+len = 16 + N                    (size of lastIncludedIndex+term+payload)
+crc = CRC-32/IEEE over len || body
+```
+
+- `lastIndex`/`lastTerm` are Raft's `lastIncludedIndex`/`lastIncludedTerm`:
+  the log position the payload reconstructs. Everything `≤ lastIndex` is
+  discardable (prefix truncation), and `lastTerm` becomes `firstTerm` —
+  the `prevLogTerm` anchor at the compaction boundary.
+- The payload is opaque to this package: `kv.SM`'s serialized engine key
+  space + session table (see `proto/kv.proto` `StateMachineSnapshot`).
+- Same atomic-write discipline as `hardstate`, same CRC coverage of the
+  `len` field. A damaged file refuses to load (`ErrSnapshotCorrupt`) — on
+  **both** `Open` (which reads it to derive `firstIndex`) and `LoadSnapshot`.
+  Silently proceeding would reconstruct the wrong state machine while
+  believing it resumed from a snapshot.
+- `lastIndex == 0` is reserved as "no snapshot" (Raft indexes start at 1)
+  and is refused by the writer.
+- **Ordering contract:** callers `SaveSnapshot` BEFORE `TruncatePrefix`ing
+  the entries it covers. A crash in between leaves redundant-but-safe
+  entries (startup truncates them); the reverse order could leave a
+  compacted log with nothing to restore from.
+
+## 5. Durability policy (fsync semantics)
 
 | Operation | What it guarantees |
 |---|---|
@@ -56,13 +89,14 @@ always holds either the previous or the new hard state, never a mixture.
 | `Sync()` | fsync — the prefix written so far survives **process crash and machine crash** |
 | `TruncateSuffix/Prefix` | full rewrite via temp+rename+fsync — discarded entries cannot reappear after a crash |
 | `SetHardState` | atomic replace + fsync — safe to send the RPC that assumes the new term/vote only after it returns |
+| `SaveSnapshot` | atomic replace + fsync — the snapshot is complete or absent, never torn; must precede the `TruncatePrefix` it justifies |
 
 **The Raft rule this enables:** fsync-before-ack. Raft will call `Sync()`
 before acknowledging entries to a leader, before counting its own vote, and
 before serving state that depends on them. That ordering is precisely why the
 "invalid final record" recovery case below is safe.
 
-## 5. Recovery decision table
+## 6. Recovery decision table
 
 On `Open` the log is scanned sequentially; every record must pass CRC and
 index-contiguity checks:
@@ -77,6 +111,10 @@ index-contiguity checks:
 | index discontinuity (e.g. 2 → 7) | structural damage | **hard error `ErrCorrupt`** |
 | hard-state file damaged | term/vote uncertainty | **hard error `ErrHardStateCorrupt`** |
 | hard-state file missing or 0 bytes | fresh node | zero `HardState` |
+| snapshot file damaged (bad len/CRC) | state-machine uncertainty | **hard error `ErrSnapshotCorrupt`** (on `Open` and on `LoadSnapshot`) |
+| snapshot file missing or 0 bytes | no snapshot ever taken | no snapshot (zero meta) |
+| snapshot + empty log file | fully compacted | `firstIndex = lastIncludedIndex+1`, `firstTerm = lastIncludedTerm` |
+| snapshot + retained entries | crash before prefix truncation | entries win for `firstIndex`; `raft.New` truncates the covered prefix (idempotent catch-up) |
 
 `Recovery{Records, TornTail, TruncatedBytes}` is returned to the caller and
 logged — recovery is never silent.
@@ -95,24 +133,28 @@ normal crash unrecoverable. Under DistriKV's stated crash model (process crash
 + torn machine writes, not silent bit-rot on acked data), this is the correct
 trade-off.
 
-## 6. Truncation
+## 7. Truncation
 
 - **Suffix** (Raft conflict resolution): drop entries `≥ fromIndex`. Rewrite
   via temp+rename; Raft must never re-see discarded entries.
 - **Prefix** (snapshot compaction, Phase 12): drop entries `≤ uptoIndex`;
   `firstIndex = uptoIndex+1`, `firstTerm = term(uptoIndex)` (= the snapshot's
-  `lastIncludedTerm`).
+  `lastIncludedTerm`, which `Term(firstIndex-1)` serves afterward).
 - Rewrites are full-file: conflict truncation is rare and compaction is
   bounded by snapshot intervals, so simplicity beats segment bookkeeping. If
   profiles (Phase 24) ever disagree, segmentation is an optimization that
   doesn't change this format.
 
-**Known caveat, pinned by test:** a *fully* compacted log (zero entries) has
-an empty file, so `firstIndex` reverts to 1 on reopen. Phase 12 re-establishes
-it from snapshot metadata — which only exists exactly when compaction can
-happen. Partial compaction recovers `firstIndex` from `entries[0]`.
+**Compaction point across restart (Phase 12):** with a snapshot, the
+point survives — `Open` re-establishes `firstIndex`/`firstTerm` from
+`lastIncludedIndex`/`lastIncludedTerm` (fully compacted log: from the
+sidecar alone; retained entries: `firstIndex` from `entries[0]`,
+`firstTerm` from a boundary-matching sidecar). Without a snapshot
+(compacting before persisting — contract violation, kept working as a
+fallback and pinned by `TestTruncatePrefix`), an empty file reverts
+`firstIndex` to 1: nothing on disk recorded where compaction stopped.
 
-## 7. Memory model
+## 8. Memory model
 
 Valid records are loaded into an in-memory slice for O(1) `Get`/`Term`; the
 file is the durable source of truth. Payloads are cloned in on `Append` and
@@ -120,7 +162,7 @@ out on `Get`/`Replay` — the log never aliases caller memory. Snapshots
 (Phase 12) bound how much log exists at all; if Phase 24 profiling shows the
 resident copy matters, it becomes an evidence-based change, not a guess.
 
-## 8. Crash model covered by tests
+## 9. Crash model covered by tests
 
 | Test | What it proves |
 |---|---|
@@ -129,4 +171,8 @@ resident copy matters, it becomes an evidence-based change, not a guess.
 | `TestTornFirstRecord` | crash during the very first append → fresh-node semantics, not corruption |
 | `TestHardStateCorruptionIsLoud` | damaged/truncated term-or-vote file refuses to open (silently zeroing could permit a double-vote) |
 | `TestRaftVoteDurabilityScenario` | persist-vote → crash → restart still remembers the vote |
-| `TestTruncateSuffix/Prefix` | truncations survive restart; discarded entries cannot be resurrected |
+| `TestTruncateSuffix/Prefix` | truncations survive restart; discarded entries cannot be resurrected; with a snapshot the compaction point (`firstIndex`/`firstTerm`) survives a fully compacted reopen (the no-snapshot fallback is pinned too) |
+| `TestSnapshotSaveLoadRoundTrip` | sidecar save→load round trip; newer save atomically replaces; temp file consumed |
+| `TestOpenRefusedOnCorruptSnapshot`, `TestLoadSnapshotRefusedOnCorruptSnapshot` | damaged snapshot refuses to load — on `Open` and on `LoadSnapshot`, never a silent wrong-state resume |
+| `TestSnapshotRejectsZeroIndex`, `TestSnapshotClosedLog` | zero `lastIndex` (the "none" marker) refused by the writer; use after `Close` is `ErrClosed` |
+| `TestSnapshotCrashBeforeCompaction` (raft, real gRPC) | snapshot durable + compaction not yet run → startup truncates the covered prefix and resumes at the snapshot position |

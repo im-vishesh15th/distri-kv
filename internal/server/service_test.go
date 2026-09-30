@@ -80,11 +80,12 @@ func startSingleNode(t *testing.T) (kv.Engine, *raft.Node) {
 	return engine, node
 }
 
-// newTestClient wires a real gRPC server (bufconn) + the pkg/client SDK
+// newTestClients wires a real gRPC server (bufconn) + n SDK clients
 // entirely in-process, so these tests exercise the full wire stack:
 // SDK -> protobuf -> gRPC -> service -> Raft propose -> apply -> engine,
-// and the reverse.
-func newTestClient(t *testing.T) *client.Client {
+// and the reverse. Each client is an INDEPENDENT session (its own
+// client_id) — Phase 10's cross-session tests need several racing.
+func newTestClients(t *testing.T, n int) []*client.Client {
 	t.Helper()
 
 	engine, node := startSingleNode(t)
@@ -101,16 +102,30 @@ func newTestClient(t *testing.T) *client.Client {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	c, err := client.Dial(ctx, "passthrough:///bufnet",
-		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
-			return lis.Dial()
-		}),
-	)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
+	clients := make([]*client.Client, 0, n)
+	for i := 0; i < n; i++ {
+		c, err := client.Dial(ctx, "passthrough:///bufnet",
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+				return lis.Dial()
+			}),
+		)
+		if err != nil {
+			t.Fatalf("dial client %d: %v", i, err)
+		}
+		clients = append(clients, c)
 	}
-	t.Cleanup(func() { _ = c.Close() })
-	return c
+	t.Cleanup(func() {
+		for _, c := range clients {
+			_ = c.Close()
+		}
+	})
+	return clients
+}
+
+// newTestClient is newTestClients for one session.
+func newTestClient(t *testing.T) *client.Client {
+	t.Helper()
+	return newTestClients(t, 1)[0]
 }
 
 // newRawStack wires the same single-node stack but returns a RAW stub, for

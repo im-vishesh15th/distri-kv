@@ -41,7 +41,7 @@ make proto                           # regenerate gen/ from proto/kv.proto
 | **M0 Foundation** | 0 | Repo, design docs, baseline | ✅ done |
 | **M1 Single-node DB** | 1–2 | In-memory engine + gRPC API | ✅ done |
 | **M2 Durable consensus** | 3–7 | Persistent log, election, replication, state machine | ✅ done |
-| **M3 Hardening** | 8–11 | Leader routing, dedup, atomics, linearizable reads | 🔄 **current** (Phase 10 next) |
+| **M3 Hardening** | 8–11 | Leader routing, dedup, atomics, linearizable reads | 🔄 **current** (Phase 11 next) |
 | **M4 Lifecycle** | 12–13 | Snapshots, log compaction, InstallSnapshot | ⬜ |
 | **M5 Proof** | 14–16 | Simulated network, fault tests, linearizability checking | ⬜ |
 | **M6 Scale** | 17–21 | Multi-Raft, fixed-slot sharding, cluster router | ⬜ |
@@ -59,6 +59,7 @@ half-finished extra.
 - [Persistence](docs/persistence.md) — on-disk format, fsync policy, recovery decision table
 - [Raft](docs/raft.md) — election core: event-loop model, tick time, vote rules, tests
 - [Consistency](docs/consistency.md) — precise guarantees and the tests that prove them
+- [Concurrency](docs/concurrency.md) — three levels (clients / event loop / shards) and who owns what
 
 ## Non-goals
 

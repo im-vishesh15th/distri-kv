@@ -1,9 +1,10 @@
 # Consistency — DistriKV
 
-> Status: through Phase 9 (client sessions). Implementations and their proofs
-> are added phase by phase; every claim below must eventually name the test that
-> demonstrates it. Vague phrases like "strong consistency" are forbidden in
-> this project unless immediately defined.
+> Status: through Phase 10 (atomic operations + concurrency correctness).
+> Implementations and their proofs are added phase by phase; every claim below
+> must eventually name the test that demonstrates it. Vague phrases like
+> "strong consistency" are forbidden in this project unless immediately
+> defined.
 
 ## Terms
 
@@ -32,6 +33,7 @@
 | W2 | Writes commit only with majority agreement | Raft majority commit rule | `TestCommitRequiresMajority`; partition fault tests (Phase 14–15) | 6 |
 | W3 | No acknowledged write is lost across leader change | Raft safety + persisted hard state | `TestReplicationSurvivesLeaderKill` | 6 |
 | R1 | Reads are linearizable | ReadIndex: confirm leadership in current term → wait for `lastApplied ≥ readIndex` → serve | stale-follower & leader-change read tests | 11 (planned) |
+| A1 | Atomic operations apply indivisibly: among concurrent attempts exactly one CAS wins, and INCREMENT/DECREMENT never lose an update | each command is one indivisible step in the event loop's in-order apply (linearization point = position in the committed log); the engine holds one lock per operation | `TestMemEngineConcurrentCASExactlyOneWinner`, `TestMemEngineConcurrentApplyAtomicity` (engine); `TestMultiSessionConcurrentIncr`, `TestCASOptimisticLoopConvergence`, `TestDecrementIfPositiveExactlyOneWinner`, `TestConcurrentReadsDuringWrites` (full stack, cross-session); `TestConcurrentSessionsThroughCluster` (3-node); `TestConcurrentIncrThroughWire` (one session) | 10 |
 | S1 | A retried mutation applies at most once, and its original response is replayed | replicated session table in the SM: `(client_id → last seq, response)` decided from the logged command at apply time | `TestDedupReplaysCachedResult`, `TestDedupRejectsSupersededSequence`, `TestDedupReplaysCachedError`, `TestDedupReplaysCachedCASFailure`; `TestDuplicateRetryAppliesOnce` (full stack); failover INCR in `TestClientRoutesWritesToLeader` | 9 |
 | S2 | Session/dedup state survives replication and restart | session table is deterministic SM state: replicated via the log, rebuilt by replay (`TestSessionStateSurvivesReplay`); snapshot serialization still owed | `TestSessionStateSurvivesReplay`; snapshot tests 12 (planned) | 9/12 (planned) |
 | D1 | All replicas converge to identical state | deterministic in-order apply | `TestStateMachinesConverge` (byte-identical state + restart replay), `TestFollowerAppliesOnlyCommitted` | 7 |

@@ -119,9 +119,9 @@ type Client struct {
 	conns map[string]*grpc.ClientConn // address -> connection (memoized)
 	opts  []grpc.DialOption           // applied to every dial (tests, future TLS)
 	orig  string                      // the address the caller dialed (fallback endpoint)
-	// current is the endpoint reads and writes prefer: initially the dial
-	// target, then the discovered leader. Guarded by mu.
-	current string
+	// leaders is the per-group preferred endpoint (leader once discovered,
+	// else the dial target). Guarded by mu. Empty -> use orig.
+	leaders map[raft.GroupID]string
 
 	mutateMu sync.Mutex // serializes mutations AND sequence allocation
 
@@ -157,9 +157,11 @@ func Dial(ctx context.Context, addr string, opts ...grpc.DialOption) (*Client, e
 		conns:   make(map[string]*grpc.ClientConn),
 		opts:    opts,
 		orig:    addr,
-		current: addr,
+		leaders: make(map[raft.GroupID]string),
 		seqs:    make(map[raft.GroupID]uint64),
 	}
+	// Initialize group 0's leader to the dial target.
+	c.leaders[0] = addr
 	if _, err := c.connLocked(addr); err != nil {
 		return nil, err
 	}
@@ -186,9 +188,10 @@ func (c *Client) Close() error {
 }
 
 // Status returns the routing view of the endpoint the client currently
-// prefers (the leader once discovered, else the dial target).
+// prefers (the leader once discovered, else the dial target). It queries
+// group 0 for backward compatibility with single-group clusters.
 func (c *Client) Status(ctx context.Context) (NodeStatus, error) {
-	stub, _ := c.endpoint()
+	stub, _ := c.endpoint(0)
 	resp, err := stub.GetStatus(ctx, &kv1.GetStatusRequest{})
 	if err != nil {
 		return NodeStatus{}, unwrap(err)
@@ -204,7 +207,7 @@ func (c *Client) Status(ctx context.Context) (NodeStatus, error) {
 // Get returns the value for key, or ErrKeyNotFound.
 func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 	var out []byte
-	err := c.read(ctx, func(stub kv1.KVServiceClient) error {
+	err := c.read(ctx, key, func(stub kv1.KVServiceClient) error {
 		resp, err := stub.Get(ctx, &kv1.GetRequest{Key: key})
 		if err != nil {
 			return err
@@ -246,7 +249,7 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 // Exists reports whether key is present.
 func (c *Client) Exists(ctx context.Context, key string) (bool, error) {
 	var exists bool
-	err := c.read(ctx, func(stub kv1.KVServiceClient) error {
+	err := c.read(ctx, key, func(stub kv1.KVServiceClient) error {
 		resp, err := stub.Exists(ctx, &kv1.ExistsRequest{Key: key})
 		if err != nil {
 			return err
@@ -347,12 +350,13 @@ func (c *Client) mutate(ctx context.Context, key string, op writeOp) error {
 	c.mutateMu.Lock()
 	defer c.mutateMu.Unlock()
 
-	seq := c.nextSeq(c.groupFor(key)) // per-group counter, under the lock
+	gid := c.groupFor(key)
+	seq := c.nextSeq(gid) // per-group counter, under the lock
 	var err error
 	redirects, retries := 0, 0
 	backoff := initialRetryBackoff
 	for {
-		stub, addr := c.endpoint()
+		stub, addr := c.endpoint(gid)
 		err = op(stub, seq)
 		if err == nil {
 			return nil
@@ -362,7 +366,10 @@ func (c *Client) mutate(ctx context.Context, key string, op writeOp) error {
 			if redirects >= maxLeaderHops {
 				return err // redirect budget exhausted
 			}
-			if next, ok := c.discover(ctx, stub, addr); ok && c.switchTo(next) {
+			if next, ok := c.discover(ctx, stub, key); ok {
+				if next != "" {
+					c.switchToGroup(gid, next)
+				}
 				redirects++
 				continue // immediate: the redirect itself moved us
 			}
@@ -370,7 +377,7 @@ func (c *Client) mutate(ctx context.Context, key string, op writeOp) error {
 		case codes.Unavailable:
 			// Ambiguous outcome — retried since Phase 9 under the same
 			// session sequence. Discovery is a read, always safe.
-			c.repair(ctx, addr)
+			c.repair(ctx, key, addr)
 		default:
 			return err // domain outcome or context error
 		}
@@ -400,8 +407,8 @@ func sleepBackoff(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// read runs a read against the current endpoint. Reads never mutate, so
-// the policy is purely about reaching a node that can answer
+// read runs a read against the endpoint for the key's group. Reads never
+// mutate, so the policy is purely about reaching a node that can answer
 // linearizably (Phase 11):
 //
 //   - codes.Aborted (a non-leader refusing a data read): discover the
@@ -410,12 +417,13 @@ func sleepBackoff(ctx context.Context, d time.Duration) bool {
 //   - codes.Unavailable (endpoint dead): repair routing to a live
 //     endpoint and retry with backoff (maxTransientRetries).
 //   - anything else (domain outcomes, context errors): untouched.
-func (c *Client) read(ctx context.Context, op readOp) error {
+func (c *Client) read(ctx context.Context, key string, op readOp) error {
 	var err error
+	gid := c.groupFor(key)
 	redirects, retries := 0, 0
 	backoff := initialRetryBackoff
 	for {
-		stub, addr := c.endpoint()
+		stub, addr := c.endpoint(gid)
 		err = op(stub)
 		if err == nil {
 			return nil
@@ -425,13 +433,16 @@ func (c *Client) read(ctx context.Context, op readOp) error {
 			if redirects >= maxLeaderHops {
 				return err // redirect budget exhausted
 			}
-			if next, ok := c.discover(ctx, stub, addr); ok && c.switchTo(next) {
+			if next, ok := c.discover(ctx, stub, key); ok {
+				if next != "" {
+					c.switchToGroup(gid, next)
+				}
 				redirects++
 				continue // immediate: the redirect itself moved us
 			}
 			// No routable leader (election in progress): transient.
 		case codes.Unavailable:
-			c.repair(ctx, addr)
+			c.repair(ctx, key, addr)
 		default:
 			return err // domain outcome or context error
 		}
@@ -448,11 +459,11 @@ func (c *Client) read(ctx context.Context, op readOp) error {
 	}
 }
 
-// discover asks the node that just redirected us where the leader lives.
-// Returns false when routing is impossible (no leader known, or the
-// address is unusable — checked by switchTo).
-func (c *Client) discover(ctx context.Context, stub kv1.KVServiceClient, askedAddr string) (string, bool) {
-	resp, err := stub.GetStatus(ctx, &kv1.GetStatusRequest{})
+// discover asks the node that just redirected us where the leader lives
+// for the given key's group. Returns false when routing is impossible
+// (no leader known, or the address is unusable).
+func (c *Client) discover(ctx context.Context, stub kv1.KVServiceClient, key string) (string, bool) {
+	resp, err := stub.GetStatus(ctx, &kv1.GetStatusRequest{Key: key})
 	if err != nil {
 		return "", false
 	}
@@ -462,42 +473,44 @@ func (c *Client) discover(ctx context.Context, stub kv1.KVServiceClient, askedAd
 	case resp.LeaderId == resp.NodeId:
 		// The node we asked won leadership between rejecting the write and
 		// this lookup: stay put and retry.
-		return askedAddr, true
+		return "", true // caller will retry on same address
 	default:
 		return "", false // election in progress — caller surfaces ErrNotLeader
 	}
 }
 
-// repair re-points routing at a live endpoint after a transport failure on
-// failedAddr — discovery is a read, always safe, and never affects the
-// error the current call returns.
-func (c *Client) repair(ctx context.Context, failedAddr string) {
+// repair re-points routing for the given key's group at a live endpoint
+// after a transport failure on failedAddr — discovery is a read, always
+// safe, and never affects the error the current call returns.
+func (c *Client) repair(ctx context.Context, key, failedAddr string) {
 	alt, altStub, ok := c.otherConn(failedAddr)
 	if !ok {
 		return
 	}
 	next := alt
-	if resp, err := altStub.GetStatus(ctx, &kv1.GetStatusRequest{}); err == nil {
+	if resp, err := altStub.GetStatus(ctx, &kv1.GetStatusRequest{Key: key}); err == nil {
 		// Adopt the discovered leader unless the hint points back at the
 		// endpoint that just failed (stale view of a dead leader).
 		if resp.LeaderAddr != "" && resp.LeaderAddr != failedAddr {
 			next = resp.LeaderAddr
 		}
 	}
-	c.switchTo(next)
+	c.switchToGroup(c.groupFor(key), next)
 }
 
-// endpoint returns the stub and address mutations/reads currently prefer.
-func (c *Client) endpoint() (kv1.KVServiceClient, string) {
+// endpoint returns the stub and address for the given group.
+func (c *Client) endpoint(gid raft.GroupID) (kv1.KVServiceClient, string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	conn, err := c.connLocked(c.current)
+	addr := c.leaders[gid]
+	if addr == "" {
+		addr = c.orig
+	}
+	conn, err := c.connLocked(addr)
 	if err != nil {
-		// connLocked only fails on unparseable targets; current came from
-		// dial or a validated hint. Fall back to the dial target.
 		conn, _ = c.connLocked(c.orig)
 	}
-	return kv1.NewKVServiceClient(conn), c.current
+	return kv1.NewKVServiceClient(conn), addr
 }
 
 // otherConn returns a live-candidate connection to some endpoint other
@@ -528,10 +541,9 @@ func (c *Client) otherConn(addr string) (string, kv1.KVServiceClient, bool) {
 	return "", nil, false
 }
 
-// switchTo moves the preferred endpoint to addr (dialed lazily, memoized).
-// Returns false if the address cannot even form a client — callers then
-// keep their current routing.
-func (c *Client) switchTo(addr string) bool {
+// switchToGroup moves the preferred endpoint for a group to addr (dialed lazily, memoized).
+// Returns false if the address cannot even form a client.
+func (c *Client) switchToGroup(gid raft.GroupID, addr string) bool {
 	if addr == "" {
 		return false
 	}
@@ -540,7 +552,7 @@ func (c *Client) switchTo(addr string) bool {
 	if _, err := c.connLocked(addr); err != nil {
 		return false
 	}
-	c.current = addr
+	c.leaders[gid] = addr
 	return true
 }
 

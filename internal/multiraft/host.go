@@ -108,3 +108,18 @@ func (h *Host) HandleInstallSnapshot(ctx context.Context, req *raftpb.InstallSna
 	}
 	return g.HandleInstallSnapshot(ctx, req)
 }
+
+// ReadIndex runs the linearizable-read barrier on the named group.
+func (h *Host) ReadIndex(ctx context.Context, gid raft.GroupID) (uint64, error) {
+	g := h.group(gid)
+	if g == nil {
+		return 0, fmt.Errorf("multiraft: node %s does not host group %d", h.id, gid)
+	}
+	return g.ReadIndex(ctx)
+}
+
+// Group returns the group for id, or nil if this host does not host it.
+// Exported so cmd/server can start each group's run loop/ticker.
+func (h *Host) Group(gid raft.GroupID) *raft.Group {
+	return h.group(gid)
+}

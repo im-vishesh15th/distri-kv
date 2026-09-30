@@ -838,8 +838,12 @@ func (x *Command) GetSequenceNumber() uint64 {
 }
 
 // GetStatus is the leader-routing discovery call (Phase 8).
+// With a key (Phase 20): the server returns the status of the Raft group
+// that owns that key (key -> slot -> group). Empty key means group 0,
+// preserving backward compatibility with single-group clusters.
 type GetStatusRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -872,6 +876,13 @@ func (x *GetStatusRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use GetStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetStatusRequest) Descriptor() ([]byte, []int) {
 	return file_proto_kv_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *GetStatusRequest) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
 }
 
 type GetStatusResponse struct {
@@ -1158,8 +1169,9 @@ const file_proto_kv_proto_rawDesc = "" +
 	"\x0eexpected_value\x18\x05 \x01(\fR\rexpectedValue\x12\x14\n" +
 	"\x05delta\x18\x06 \x01(\x03R\x05delta\x12\x1b\n" +
 	"\tclient_id\x18\a \x01(\tR\bclientId\x12'\n" +
-	"\x0fsequence_number\x18\b \x01(\x04R\x0esequenceNumber\"\x12\n" +
-	"\x10GetStatusRequest\"~\n" +
+	"\x0fsequence_number\x18\b \x01(\x04R\x0esequenceNumber\"$\n" +
+	"\x10GetStatusRequest\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\"~\n" +
 	"\x11GetStatusResponse\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x12\n" +
 	"\x04role\x18\x02 \x01(\tR\x04role\x12\x1b\n" +

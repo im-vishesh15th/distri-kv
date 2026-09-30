@@ -28,9 +28,11 @@ import (
 
 	kv1 "distrikv/gen/kv/v1"
 	"distrikv/internal/kv"
+	"distrikv/internal/multiraft"
 	"distrikv/internal/raft"
 	"distrikv/internal/raftlog"
 	"distrikv/internal/server"
+	"distrikv/internal/shard"
 	"distrikv/internal/transport"
 	grpctransport "distrikv/internal/transport/grpc"
 
@@ -47,12 +49,13 @@ const snapshotEveryDefault = 1024
 
 func main() {
 	var (
-		id        = flag.String("id", "node1", "node identity")
-		addr      = flag.String("addr", ":8080", "gRPC listen address")
-		dataDir   = flag.String("data-dir", "data", "directory for persistent state (persistent Raft log)")
-		peersSpec = flag.String("peers", "", "static cluster membership: id@host:port,id@host:port,... (must include this node; empty = standalone)")
-		debug     = flag.Bool("debug", false, "enable debug-level structured logging")
-		snapEvery = flag.Uint64("snapshot-every", snapshotEveryDefault, "applied entries per state-machine snapshot + log compaction (0 disables; the log then grows without bound)")
+		id          = flag.String("id", "node1", "node identity")
+		addr        = flag.String("addr", ":8080", "gRPC listen address")
+		dataDir     = flag.String("data-dir", "data", "directory for persistent state (persistent Raft log)")
+		peersSpec   = flag.String("peers", "", "static cluster membership: id@host:port,id@host:port,... (must include this node; empty = standalone)")
+		shardConfig = flag.String("shard-config", "", "path to shard configuration JSON (optional; enables multi-group mode)")
+		debug       = flag.Bool("debug", false, "enable debug-level structured logging")
+		snapEvery   = flag.Uint64("snapshot-every", snapshotEveryDefault, "applied entries per state-machine snapshot + log compaction (0 disables; the log then grows without bound)")
 	)
 	flag.Parse()
 
@@ -62,36 +65,30 @@ func main() {
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 
-	if err := run(*id, *addr, *dataDir, *peersSpec, *snapEvery, log); err != nil {
+	if err := run(*id, *addr, *dataDir, *peersSpec, *shardConfig, *snapEvery, log); err != nil {
 		log.Error("server_exit", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 }
 
-func run(id, addr, dataDir, peersSpec string, snapEvery uint64, log *slog.Logger) error {
+func run(id, addr, dataDir, peersSpec, shardConfigPath string, snapEvery uint64, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	engine := kv.NewMemEngine()
-
-	// Open the persistent Raft log (Phase 3). Recovery is reported, never
-	// silent: a torn tail is discarded loudly, mid-file corruption refuses
-	// to start the node.
-	rlog, rec, err := raftlog.Open(filepath.Join(dataDir, "raft"))
-	if err != nil {
-		return fmt.Errorf("open raft log: %w", err)
-	}
-	defer func() {
-		if cerr := rlog.Close(); cerr != nil {
-			log.Error("raft_log_close", slog.String("error", cerr.Error()))
+	// Load shard config if provided.
+	var shardCfg *shard.Config
+	if shardConfigPath != "" {
+		cfg, err := shard.LoadConfig(shardConfigPath)
+		if err != nil {
+			return fmt.Errorf("load shard config: %w", err)
 		}
-	}()
-	log.Info("raft_log_opened",
-		slog.String("node_id", id),
-		slog.Int64("records", rec.Records),
-		slog.Bool("torn_tail_discarded", rec.TornTail),
-		slog.Int64("truncated_bytes", rec.TruncatedBytes),
-	)
+		shardCfg = cfg
+		log.Info("shard_config_loaded",
+			slog.String("path", shardConfigPath),
+			slog.Uint64("version", cfg.Version),
+			slog.Uint64("groups", cfg.Groups),
+		)
+	}
 
 	// Static cluster membership + transport (Phase 4).
 	peers, err := transport.ParsePeers(peersSpec)
@@ -108,9 +105,6 @@ func run(id, addr, dataDir, peersSpec string, snapEvery uint64, log *slog.Logger
 		}
 	}()
 	peerIDs := make([]string, 0, len(peers))
-	// Leader-routing addresses for GetStatus (Phase 8): ID -> dialable
-	// addr as given by -peers, which must be client-reachable for hints
-	// to work. Empty for standalone (leader_id == node_id routes instead).
 	leaderAddrs := make(map[transport.NodeID]string, len(peers))
 	for _, p := range peers {
 		peerIDs = append(peerIDs, string(p.ID))
@@ -122,35 +116,100 @@ func run(id, addr, dataDir, peersSpec string, snapEvery uint64, log *slog.Logger
 		slog.Any("members", peerIDs),
 	)
 
-	// Raft core (Phase 5): election over the transport above, hard state
-	// (term/vote) in the persistent log. Empty peers → standalone cluster
-	// of one (the node elects itself).
 	raftPeers := make([]transport.NodeID, len(peers))
 	for i, p := range peers {
 		raftPeers[i] = p.ID
 	}
-	rn, err := raft.New(raft.Config{
-		ID:             transport.NodeID(id),
-		Peers:          raftPeers,
-		Transport:      rt,
-		Log:            rlog,
-		ElectionTicks:  10, // randomized timeout: 100–190 ms at 10 ms/tick
-		HeartbeatTicks: 3,  // 30 ms heartbeats
-		Logger:         log,
-		// The KV engine IS the state machine: committed entries decode to
-		// Commands and apply in log order (Phase 7). kv.SM also snapshots
-		// (Phase 12): every -snapshot-every applied entries the node
-		// captures engine + session table and compacts the log prefix they
-		// cover, so the log cannot grow forever in production.
-		StateMachine:  kv.NewSM(engine),
-		SnapshotEvery: snapEvery,
-	})
-	if err != nil {
-		return fmt.Errorf("raft core: %w", err)
+
+	// Determine groups to host.
+	var groups []raft.GroupID
+	if shardCfg != nil {
+		for g := uint64(0); g < shardCfg.Groups; g++ {
+			groups = append(groups, raft.GroupID(g))
+		}
+	} else {
+		groups = []raft.GroupID{0}
 	}
-	// Inbound Raft RPCs now reach the core instead of returning
-	// Unimplemented. Must happen before the server starts serving.
-	rt.SetHandler(rn)
+
+	// Build per-group engines, logs, and raft groups.
+	engines := make(map[raft.GroupID]kv.Engine)
+	var host *multiraft.Host
+	var singleRaft *raft.Group // for backward compat when no shard config
+
+	if shardCfg != nil {
+		// Multi-group mode: create one Host with all groups.
+		host = multiraft.NewHost(transport.NodeID(id))
+		for _, gid := range groups {
+			// Per-group directory: data/g<g>/<node>/raft
+			dir := filepath.Join(dataDir, fmt.Sprintf("g%d", gid), id, "raft")
+			rlog, rec, err := raftlog.Open(dir)
+			if err != nil {
+				return fmt.Errorf("group %d: open raft log: %w", gid, err)
+			}
+			log.Info("raft_log_opened",
+				slog.String("node_id", id),
+				slog.Uint64("group", uint64(gid)),
+				slog.Int64("records", rec.Records),
+				slog.Bool("torn_tail_discarded", rec.TornTail),
+				slog.Int64("truncated_bytes", rec.TruncatedBytes),
+			)
+			engine := kv.NewMemEngine()
+			engines[gid] = engine
+			group, err := raft.New(raft.Config{
+				ID:             transport.NodeID(id),
+				GroupID:        gid,
+				Peers:          raftPeers,
+				Transport:      rt,
+				Log:            rlog,
+				ElectionTicks:  10,
+				HeartbeatTicks: 3,
+				Logger:         log,
+				StateMachine:   kv.NewSM(engine),
+				SnapshotEvery:  snapEvery,
+			})
+			if err != nil {
+				return fmt.Errorf("group %d: raft.New: %w", gid, err)
+			}
+			host.AddGroup(group)
+		}
+		rt.SetHandler(host)
+	} else {
+		// Single-group mode (backward compatible).
+		engine := kv.NewMemEngine()
+		engines[0] = engine
+		rlog, rec, err := raftlog.Open(filepath.Join(dataDir, "raft"))
+		if err != nil {
+			return fmt.Errorf("open raft log: %w", err)
+		}
+		defer func() {
+			if cerr := rlog.Close(); cerr != nil {
+				log.Error("raft_log_close", slog.String("error", cerr.Error()))
+			}
+		}()
+		log.Info("raft_log_opened",
+			slog.String("node_id", id),
+			slog.Int64("records", rec.Records),
+			slog.Bool("torn_tail_discarded", rec.TornTail),
+			slog.Int64("truncated_bytes", rec.TruncatedBytes),
+		)
+		rn, err := raft.New(raft.Config{
+			ID:             transport.NodeID(id),
+			GroupID:        0,
+			Peers:          raftPeers,
+			Transport:      rt,
+			Log:            rlog,
+			ElectionTicks:  10,
+			HeartbeatTicks: 3,
+			Logger:         log,
+			StateMachine:   kv.NewSM(engine),
+			SnapshotEvery:  snapEvery,
+		})
+		if err != nil {
+			return fmt.Errorf("raft core: %w", err)
+		}
+		singleRaft = rn
+		rt.SetHandler(rn)
+	}
 
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -158,13 +217,26 @@ func run(id, addr, dataDir, peersSpec string, snapEvery uint64, log *slog.Logger
 	}
 
 	grpcServer := grpc.NewServer()
-	// The service mutates through Raft (rn.Propose) and reads through
-	// rn.ReadIndex (Phase 11: linearizable; followers refuse with
-	// codes.Aborted and clients redirect). rn.Status + the -peers
-	// addresses power GetStatus leader routing.
-	kv1.RegisterKVServiceServer(grpcServer, server.NewService(engine, rn, rn.Status, leaderAddrs, log))
+
+	// Create the appropriate KV service.
+	var kvService kv1.KVServiceServer
+	if shardCfg != nil {
+		// Multi-group: use GroupedService with per-group engines.
+		kvService = server.NewGroupedService(
+			shardCfg,
+			host,        // implements GroupProposer
+			host.Status, // implements GroupStatusFunc
+			leaderAddrs,
+			log,
+			engines,
+		)
+	} else {
+		// Single-group: use legacy Service.
+		kvService = server.NewService(engines[0], singleRaft, singleRaft.Status, leaderAddrs, log)
+	}
+
+	kv1.RegisterKVServiceServer(grpcServer, kvService)
 	grpctransport.RegisterRaftService(grpcServer, rt)
-	// Reflection lets grpcurl/gRPC tooling discover the API without stubs.
 	reflection.Register(grpcServer)
 
 	errCh := make(chan error, 1)
@@ -178,28 +250,56 @@ func run(id, addr, dataDir, peersSpec string, snapEvery uint64, log *slog.Logger
 		}
 	}()
 
-	// Start the Raft event loop and its time source. A halted loop (disk
-	// failure persisting term/vote) takes the node down: without durable
-	// hard state it cannot uphold the one-vote-per-term guarantee.
-	go func() {
-		if raftErr := rn.Run(ctx); raftErr != nil {
-			log.Error("raft_halted",
-				slog.String("node_id", id),
-				slog.String("error", raftErr.Error()),
-			)
-			select {
-			case errCh <- raftErr:
-			default:
-			}
+	// Start Raft event loops.
+	if shardCfg != nil {
+		// Multi-group: start each group's loop + ticker.
+		for _, gid := range groups {
+			g := host.Group(gid)
+			go func(group *raft.Group) {
+				if raftErr := group.Run(ctx); raftErr != nil {
+					log.Error("raft_halted",
+						slog.String("node_id", id),
+						slog.Uint64("group", uint64(group.GroupID())),
+						slog.String("error", raftErr.Error()),
+					)
+					select {
+					case errCh <- raftErr:
+					default:
+					}
+				}
+			}(g)
+			raft.StartTicker(ctx, g, 10*time.Millisecond)
 		}
-	}()
-	raft.StartTicker(ctx, rn, 10*time.Millisecond)
-	if s := rn.Status(); s.Role != "" {
-		log.Info("raft_started",
-			slog.String("node_id", id),
-			slog.String("role", string(s.Role)),
-			slog.Uint64("term", s.Term),
-		)
+		if s := host.Group(0).Status(); s.Role != "" {
+			log.Info("raft_started",
+				slog.String("node_id", id),
+				slog.String("role", string(s.Role)),
+				slog.Uint64("term", s.Term),
+				slog.Uint64("group", 0),
+			)
+		}
+	} else {
+		// Single-group.
+		go func() {
+			if raftErr := singleRaft.Run(ctx); raftErr != nil {
+				log.Error("raft_halted",
+					slog.String("node_id", id),
+					slog.String("error", raftErr.Error()),
+				)
+				select {
+				case errCh <- raftErr:
+				default:
+				}
+			}
+		}()
+		raft.StartTicker(ctx, singleRaft, 10*time.Millisecond)
+		if s := singleRaft.Status(); s.Role != "" {
+			log.Info("raft_started",
+				slog.String("node_id", id),
+				slog.String("role", string(s.Role)),
+				slog.Uint64("term", s.Term),
+			)
+		}
 	}
 
 	select {
@@ -209,8 +309,7 @@ func run(id, addr, dataDir, peersSpec string, snapEvery uint64, log *slog.Logger
 		log.Info("server_shutting_down", slog.String("node_id", id))
 	}
 
-	// Graceful stop with a hard deadline: in-flight RPCs get a chance to
-	// finish, but shutdown can never hang.
+	// Graceful stop with a hard deadline.
 	stopped := make(chan struct{})
 	go func() {
 		grpcServer.GracefulStop()

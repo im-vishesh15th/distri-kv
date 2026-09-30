@@ -11,11 +11,16 @@ import (
 	"testing"
 )
 
-// currentTarget reports the gRPC target of the endpoint the client prefers.
+// currentTarget reports the gRPC target of the endpoint the client prefers
+// for group 0.
 func currentTarget(c *Client) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.conns[c.current].Target()
+	addr := c.leaders[0]
+	if addr == "" {
+		addr = c.orig
+	}
+	return c.conns[addr].Target()
 }
 
 func TestDialBareTargetUsesPassthrough(t *testing.T) {

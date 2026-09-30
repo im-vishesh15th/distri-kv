@@ -163,7 +163,12 @@ message Command {
 }
 
 // GetStatus is the leader-routing discovery call (Phase 8).
-message GetStatusRequest {}
+// With a key (Phase 20): the server returns the status of the Raft group
+// that owns that key (key -> slot -> group). Empty key means group 0,
+// preserving backward compatibility with single-group clusters.
+message GetStatusRequest {
+  string key = 1;
+}
 
 message GetStatusResponse {
   // The node that answered.

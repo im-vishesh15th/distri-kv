@@ -44,6 +44,7 @@ import (
 	kv1 "distrikv/gen/kv/v1"
 	"distrikv/internal/kv"
 	"distrikv/internal/raft"
+	"distrikv/internal/shard"
 	"distrikv/internal/transport"
 )
 
@@ -69,6 +70,17 @@ type Proposer interface {
 	ReadIndex(ctx context.Context) (uint64, error)
 }
 
+// GroupProposer is the multi-group analog of Proposer: every operation is
+// routed to a specific Raft group by its GroupID. *multiraft.Host implements
+// it.
+type GroupProposer interface {
+	Propose(ctx context.Context, gid raft.GroupID, payload []byte) (uint64, any, error)
+	ReadIndex(ctx context.Context, gid raft.GroupID) (uint64, error)
+}
+
+// GroupStatusFunc reports the Raft status for a specific group.
+type GroupStatusFunc func(gid raft.GroupID) (raft.Status, error)
+
 // Service adapts a kv.Engine to the gRPC KVService.
 type Service struct {
 	kv1.UnimplementedKVServiceServer
@@ -90,6 +102,83 @@ func NewService(engine kv.Engine, proposer Proposer, status StatusFunc,
 	return &Service{
 		engine: engine, proposer: proposer, status: status, addrs: addrs, log: log,
 	}
+}
+
+// GroupedService adapts multiple KV engines (one per Raft group) to the
+// gRPC KVService, using a shard map to route keys to groups. If shard is
+// nil, all keys map to group 0 (single-group compatibility).
+type GroupedService struct {
+	kv1.UnimplementedKVServiceServer
+
+	shard    *shard.Config
+	proposer GroupProposer
+	status   GroupStatusFunc
+	addrs    map[transport.NodeID]string
+	log      *slog.Logger
+
+	// engines maps groupID -> kv.Engine for reads. Writes go through
+	// proposer which routes to the correct group's SM.
+	engines map[raft.GroupID]kv.Engine
+}
+
+// NewGroupedService returns a KVService that routes every operation to the
+// Raft group that owns its key (per the shard map). shard may be nil (all
+// keys -> group 0). proposer/status must be able to serve all groups in the
+// shard; an unknown group returns codes.Internal. addrs maps node ID ->
+// dialable address for leader hints. log may be nil.
+//
+// engines is the per-group engine map (required for reads).
+func NewGroupedService(shard *shard.Config, proposer GroupProposer, status GroupStatusFunc,
+	addrs map[transport.NodeID]string, log *slog.Logger, engines map[raft.GroupID]kv.Engine) *GroupedService {
+	return &GroupedService{
+		shard: shard, proposer: proposer, status: status, addrs: addrs, log: log, engines: engines,
+	}
+}
+
+// groupFor returns the group that owns key. Nil shard -> group 0.
+// Empty key maps to group 0 (backward compatibility for GetStatus with
+// no key specified).
+func (s *GroupedService) groupFor(key string) raft.GroupID {
+	if s.shard == nil || key == "" {
+		return 0
+	}
+	return s.shard.Group(key)
+}
+
+// propose routes a mutation to the group that owns the key.
+func (s *GroupedService) propose(ctx context.Context, key string, cmd kv.Command, clientID string, seq uint64) error {
+	_, rerr := s.proposeResult(ctx, key, cmd, clientID, seq)
+	return rerr
+}
+
+// proposeResult is the write path: stamp session -> encode -> Propose (with gid)
+// -> extract the kv.Result the state machine produced for this entry.
+func (s *GroupedService) proposeResult(ctx context.Context, key string, cmd kv.Command, clientID string, seq uint64) (kv.Result, error) {
+	gid := s.groupFor(key)
+	cmd.ClientID, cmd.Sequence = clientID, seq
+	payload, err := kv.EncodeCommand(cmd)
+	if err != nil {
+		return kv.Result{}, statusErrorInternal(err)
+	}
+	_, result, perr := s.proposer.Propose(ctx, gid, payload)
+	if perr != nil {
+		return kv.Result{}, mapRaftError(perr)
+	}
+	res, ok := result.(kv.Result)
+	if !ok {
+		return kv.Result{}, statusErrorInternal(
+			fmt.Errorf("state machine returned %T, want kv.Result (node wired with kv.NewSM?)", result))
+	}
+	return res, nil
+}
+
+// linearizableRead runs the ReadIndex barrier on the group that owns the key.
+func (s *GroupedService) linearizableRead(ctx context.Context, key string) error {
+	gid := s.groupFor(key)
+	if _, err := s.proposer.ReadIndex(ctx, gid); err != nil {
+		return mapRaftError(err)
+	}
+	return nil
 }
 
 // GetStatus answers "who am I, who leads, where is the leader" for client
@@ -297,5 +386,158 @@ func (s *Service) logOp(ctx context.Context, op, key, clientID string, seq uint6
 		slog.String("key", key),
 		slog.String("client_id", clientID),
 		slog.Uint64("sequence_number", seq),
+	)
+}
+
+// --- GroupedService KVService methods ---
+
+// GetStatus answers "who am I, who leads, where is the leader" for the
+// Raft group that owns the requested key (Phase 20). Empty key -> group 0.
+func (s *GroupedService) GetStatus(ctx context.Context, req *kv1.GetStatusRequest) (*kv1.GetStatusResponse, error) {
+	gid := s.groupFor(req.Key)
+	if s.status == nil {
+		return nil, statusErrorInternal(fmt.Errorf("service has no status source (wire a GroupStatusFunc)"))
+	}
+	st, err := s.status(gid)
+	if err != nil {
+		return nil, statusErrorInternal(fmt.Errorf("group %d status: %w", gid, err))
+	}
+	resp := &kv1.GetStatusResponse{
+		NodeId:   string(st.ID),
+		Role:     string(st.Role),
+		LeaderId: string(st.LeaderID),
+	}
+	if st.LeaderID != "" {
+		resp.LeaderAddr = s.addrs[st.LeaderID]
+	}
+	return resp, nil
+}
+
+// Get returns the value for key or codes.NotFound. The read is
+// linearizable: the ReadIndex barrier gates it on the group that owns key.
+func (s *GroupedService) Get(ctx context.Context, req *kv1.GetRequest) (*kv1.GetResponse, error) {
+	if err := validateKey(req.Key); err != nil {
+		return nil, err
+	}
+	if err := s.linearizableRead(ctx, req.Key); err != nil {
+		return nil, err
+	}
+	v, gerr := s.engineFor(req.Key).Get(req.Key)
+	if gerr != nil {
+		return nil, mapError(gerr)
+	}
+	return &kv1.GetResponse{Value: v}, nil
+}
+
+// Exists reports key presence (same ReadIndex barrier as Get).
+func (s *GroupedService) Exists(ctx context.Context, req *kv1.ExistsRequest) (*kv1.ExistsResponse, error) {
+	if err := validateKey(req.Key); err != nil {
+		return nil, err
+	}
+	if err := s.linearizableRead(ctx, req.Key); err != nil {
+		return nil, err
+	}
+	return &kv1.ExistsResponse{Exists: s.engineFor(req.Key).Exists(req.Key)}, nil
+}
+
+// Put stores value at key (upsert), replicated through Raft.
+func (s *GroupedService) Put(ctx context.Context, req *kv1.PutRequest) (*kv1.PutResponse, error) {
+	if err := validateKey(req.Key); err != nil {
+		return nil, err
+	}
+	if err := validateSession(req.ClientId, req.SequenceNumber); err != nil {
+		return nil, err
+	}
+	if err := s.propose(ctx, req.Key, kv.Set(req.Key, req.Value), req.ClientId, req.SequenceNumber); err != nil {
+		return nil, err
+	}
+	s.logOp(ctx, "put", req.Key, req.ClientId, req.SequenceNumber)
+	return &kv1.PutResponse{}, nil
+}
+
+// Delete removes key (idempotent), replicated through Raft.
+func (s *GroupedService) Delete(ctx context.Context, req *kv1.DeleteRequest) (*kv1.DeleteResponse, error) {
+	if err := validateKey(req.Key); err != nil {
+		return nil, err
+	}
+	if err := validateSession(req.ClientId, req.SequenceNumber); err != nil {
+		return nil, err
+	}
+	if err := s.propose(ctx, req.Key, kv.Delete(req.Key), req.ClientId, req.SequenceNumber); err != nil {
+		return nil, err
+	}
+	s.logOp(ctx, "delete", req.Key, req.ClientId, req.SequenceNumber)
+	return &kv1.DeleteResponse{}, nil
+}
+
+// CAS conditionally stores new_value. applied=false is a normal outcome,
+// decided by the replicated apply — all replicas agree on it because they
+// all evaluated the same precondition in the same log position.
+func (s *GroupedService) CAS(ctx context.Context, req *kv1.CASRequest) (*kv1.CASResponse, error) {
+	if err := validateKey(req.Key); err != nil {
+		return nil, err
+	}
+	if err := validateSession(req.ClientId, req.SequenceNumber); err != nil {
+		return nil, err
+	}
+	var expected []byte
+	if req.ExpectedExists {
+		expected = req.ExpectedValue
+		if expected == nil {
+			expected = []byte{}
+		}
+	}
+	res, rerr := s.proposeResult(ctx, req.Key, kv.CAS(req.Key, expected, req.NewValue),
+		req.ClientId, req.SequenceNumber)
+	if rerr != nil {
+		return nil, rerr
+	}
+	return &kv1.CASResponse{Applied: res.Applied}, nil
+}
+
+// Incr atomically adds delta (negative = decrement) to the int64 at key.
+func (s *GroupedService) Incr(ctx context.Context, req *kv1.IncrRequest) (*kv1.IncrResponse, error) {
+	if err := validateKey(req.Key); err != nil {
+		return nil, err
+	}
+	if err := validateSession(req.ClientId, req.SequenceNumber); err != nil {
+		return nil, err
+	}
+	res, rerr := s.proposeResult(ctx, req.Key, kv.IncrBy(req.Key, req.Delta),
+		req.ClientId, req.SequenceNumber)
+	if rerr != nil {
+		return nil, rerr
+	}
+	n, perr := strconv.ParseInt(string(res.Value), 10, 64)
+	if perr != nil {
+		return nil, statusErrorInternal(kv.ErrUnknownOp)
+	}
+	return &kv1.IncrResponse{Value: n}, nil
+}
+
+// engineFor returns the engine for the group that owns key.
+func (s *GroupedService) engineFor(key string) kv.Engine {
+	gid := s.groupFor(key)
+	eng, ok := s.engines[gid]
+	if !ok {
+		// This is a misconfiguration — the group should have been registered.
+		// Return a nil engine to trigger a proper error.
+		return nil
+	}
+	return eng
+}
+
+// logOp emits one debug line per mutation. Debug level keeps normal operation
+// quiet while staying available for distributed-failure investigation.
+func (s *GroupedService) logOp(ctx context.Context, op, key, clientID string, seq uint64) {
+	if s.log == nil {
+		return
+	}
+	s.log.DebugContext(ctx, "kv_op",
+		slog.String("op", op),
+		slog.String("key", key),
+		slog.String("client_id", clientID),
+		slog.Uint64("sequence_number", seq),
+		slog.Uint64("group", uint64(s.groupFor(key))),
 	)
 }

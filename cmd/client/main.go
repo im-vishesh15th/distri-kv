@@ -24,12 +24,14 @@ import (
 	"strconv"
 	"time"
 
+	"distrikv/internal/shard"
 	"distrikv/pkg/client"
 )
 
 func main() {
 	addr := flag.String("addr", "localhost:8080", "DistriKV server address")
 	timeout := flag.Duration("timeout", 5*time.Second, "request timeout")
+	shardConfig := flag.String("shard-config", "", "path to shard configuration JSON (optional; enables multi-group routing)")
 	flag.Parse()
 
 	args := flag.Args()
@@ -46,6 +48,14 @@ func main() {
 		fatal(err)
 	}
 	defer c.Close()
+
+	if *shardConfig != "" {
+		cfg, err := shard.LoadConfig(*shardConfig)
+		if err != nil {
+			fatal(err)
+		}
+		c.SetShardMap(cfg)
+	}
 
 	if err := dispatch(ctx, c, args); err != nil {
 		fatal(err)

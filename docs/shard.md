@@ -117,9 +117,5 @@ multi-group writes (see docs/multiraft.md's resolved follow-up).
 
 ## What's next
 
-- **Phase 20**: the cluster router — the component that ties
-  `key → slot → group → leader → node` together for clients, and wires the
-  versioned config (Phase 19) into the server so every node routes keys to the
-  right group.
 - **Phase 21** (optional): rebalancing — moving slot ranges between groups
   via the metadata Raft group (Tier 3).

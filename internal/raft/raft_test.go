@@ -39,6 +39,16 @@ type appResult struct {
 	err  error
 }
 
+type snapCall struct {
+	to  transport.NodeID
+	req *raftpb.InstallSnapshotRequest
+}
+
+type snapResult struct {
+	resp *raftpb.InstallSnapshotResponse
+	err  error
+}
+
 // fakeTransport records outbound RPCs and returns replies the test scripts
 // per peer. A peer with no queued reply blocks until the node's RPC context
 // is cancelled — i.e. it simulates an unreachable peer.
@@ -46,8 +56,10 @@ type fakeTransport struct {
 	id          transport.NodeID
 	voteCalls   chan voteCall
 	appCalls    chan appCall
+	snapCalls   chan snapCall
 	voteReplies map[transport.NodeID]chan voteResult
 	appReplies  map[transport.NodeID]chan appResult
+	snapReplies map[transport.NodeID]chan snapResult
 }
 
 func newFakeTransport(id transport.NodeID, peers []transport.NodeID) *fakeTransport {
@@ -55,8 +67,10 @@ func newFakeTransport(id transport.NodeID, peers []transport.NodeID) *fakeTransp
 		id:          id,
 		voteCalls:   make(chan voteCall, 256),
 		appCalls:    make(chan appCall, 256),
+		snapCalls:   make(chan snapCall, 256),
 		voteReplies: make(map[transport.NodeID]chan voteResult),
 		appReplies:  make(map[transport.NodeID]chan appResult),
+		snapReplies: make(map[transport.NodeID]chan snapResult),
 	}
 	for _, p := range peers {
 		if p == id {
@@ -64,6 +78,7 @@ func newFakeTransport(id transport.NodeID, peers []transport.NodeID) *fakeTransp
 		}
 		f.voteReplies[p] = make(chan voteResult, 8)
 		f.appReplies[p] = make(chan appResult, 8)
+		f.snapReplies[p] = make(chan snapResult, 8)
 	}
 	return f
 }
@@ -98,6 +113,25 @@ func (f *fakeTransport) AppendEntries(ctx context.Context, to transport.NodeID, 
 		return nil, ctx.Err()
 	}
 	ch, ok := f.appReplies[to]
+	if !ok {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	select {
+	case r := <-ch:
+		return r.resp, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (f *fakeTransport) InstallSnapshot(ctx context.Context, to transport.NodeID, req *raftpb.InstallSnapshotRequest) (*raftpb.InstallSnapshotResponse, error) {
+	select {
+	case f.snapCalls <- snapCall{to: to, req: req}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	ch, ok := f.snapReplies[to]
 	if !ok {
 		<-ctx.Done()
 		return nil, ctx.Err()

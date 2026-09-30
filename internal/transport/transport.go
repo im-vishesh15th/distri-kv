@@ -51,6 +51,11 @@ type Transport interface {
 	// is empty) to `to`.
 	AppendEntries(ctx context.Context, to NodeID, req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error)
 
+	// InstallSnapshot sends an InstallSnapshot RPC to `to` (Phase 13):
+	// used when the peer is behind the sender's compaction point and
+	// entries alone can no longer catch it up.
+	InstallSnapshot(ctx context.Context, to NodeID, req *raftpb.InstallSnapshotRequest) (*raftpb.InstallSnapshotResponse, error)
+
 	// LocalID is this transport's node identity.
 	LocalID() NodeID
 
@@ -66,6 +71,7 @@ type Transport interface {
 type Handler interface {
 	HandleRequestVote(ctx context.Context, req *raftpb.RequestVoteRequest) (*raftpb.RequestVoteResponse, error)
 	HandleAppendEntries(ctx context.Context, req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error)
+	HandleInstallSnapshot(ctx context.Context, req *raftpb.InstallSnapshotRequest) (*raftpb.InstallSnapshotResponse, error)
 }
 
 // Transport-level errors.

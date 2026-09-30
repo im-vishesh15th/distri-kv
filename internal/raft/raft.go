@@ -245,6 +245,36 @@ type appRespEvent struct {
 
 func (appRespEvent) isEvent() {}
 
+// snapReqEvent is an inbound InstallSnapshot RPC (Phase 13), routed
+// through the loop like every other Raft decision.
+type snapReqEvent struct {
+	req   *raftpb.InstallSnapshotRequest
+	reply chan snapReply
+}
+
+func (snapReqEvent) isEvent() {}
+
+type snapReply struct {
+	resp *raftpb.InstallSnapshotResponse
+	err  error
+}
+
+// snapRespEvent is an outbound InstallSnapshot reply. included is the
+// request's lastIncludedIndex — success advances the follower's match to
+// it (the response doesn't echo it back). term/gen mirror appRespEvent:
+// which leadership epoch the send belongs to (stale-response fencing) and
+// the ReadIndex send generation.
+type snapRespEvent struct {
+	from     transport.NodeID
+	term     uint64
+	gen      uint64
+	included uint64
+	resp     *raftpb.InstallSnapshotResponse
+	err      error
+}
+
+func (snapRespEvent) isEvent() {}
+
 type statusEvent struct{ reply chan Status }
 
 func (statusEvent) isEvent() {}
@@ -433,6 +463,10 @@ func New(cfg Config) (*Node, error) {
 //  3. Snapshot saved but compaction not finished (crash between
 //     SaveSnapshot and TruncatePrefix): the log still holds covered
 //     entries — truncate them now (idempotent), then adopt the position.
+//  4. Snapshot saved but the log ends before it (crash between the
+//     follower's SaveSnapshot and Reset during InstallSnapshot): every
+//     retained entry is covered — discard them all and rebase the
+//     boundary on the metadata (Reset).
 //
 // A snapshot whose state machine cannot restore (or whose payload sits
 // beyond the log's retained start — entries lost) is a hard error: running
@@ -456,10 +490,17 @@ func (n *Node) restoreSnapshot() error {
 			meta.LastIncludedIndex, first, meta.LastIncludedIndex+1, first-1)
 	}
 	// Crash-window catch-up: discard entries the snapshot already covers
-	// (TruncatePrefix is a no-op when already compacted past them).
-	if meta.LastIncludedIndex > first-1 {
-		if err := n.rlog.TruncatePrefix(meta.LastIncludedIndex); err != nil {
-			return fmt.Errorf("raft: compact to snapshot index %d: %w", meta.LastIncludedIndex, err)
+	// (TruncatePrefix is a no-op when already compacted past them). If the
+	// log ends BEFORE the snapshot position — the InstallSnapshot crash
+	// window (sidecar saved, log not yet rebased) — every retained entry is
+	// covered, so discard all and rebase the boundary instead.
+	if idx := meta.LastIncludedIndex; idx > first-1 {
+		if idx > n.rlog.LastIndex() {
+			if err := n.rlog.Reset(meta); err != nil {
+				return fmt.Errorf("raft: rebase log on snapshot index %d: %w", idx, err)
+			}
+		} else if err := n.rlog.TruncatePrefix(idx); err != nil {
+			return fmt.Errorf("raft: compact to snapshot index %d: %w", idx, err)
 		}
 	}
 
@@ -608,6 +649,26 @@ func (n *Node) HandleAppendEntries(ctx context.Context, req *raftpb.AppendEntrie
 	}
 }
 
+// HandleInstallSnapshot implements transport.Handler (see HandleRequestVote).
+func (n *Node) HandleInstallSnapshot(ctx context.Context, req *raftpb.InstallSnapshotRequest) (*raftpb.InstallSnapshotResponse, error) {
+	reply := make(chan snapReply, 1)
+	select {
+	case n.events <- snapReqEvent{req: req, reply: reply}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-n.done:
+		return nil, ErrStopped
+	}
+	select {
+	case r := <-reply:
+		return r.resp, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-n.done:
+		return nil, ErrStopped
+	}
+}
+
 // StartTicker drives n.Tick at period until ctx is cancelled. This is the
 // production time source; tests call Tick manually instead.
 func StartTicker(ctx context.Context, n *Node, period time.Duration) {
@@ -658,6 +719,14 @@ func (n *Node) dispatch(ev event) error {
 		resp, err := n.onAppendEntries(e.req)
 		e.reply <- appReply{resp: resp, err: err}
 		return err
+
+	case snapReqEvent:
+		resp, err := n.onInstallSnapshot(e.req)
+		e.reply <- snapReply{resp: resp, err: err}
+		return err
+
+	case snapRespEvent:
+		return n.onInstallSnapshotResponse(e)
 
 	case statusEvent:
 		e.reply <- n.snapshot()

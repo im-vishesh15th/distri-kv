@@ -158,6 +158,152 @@ func (n *Node) onAppendEntries(req *raftpb.AppendEntriesRequest) (*raftpb.Append
 	return resp, nil
 }
 
+// onInstallSnapshot handles a leader's InstallSnapshot RPC (Phase 13):
+// our log ends below the leader's compaction point, so entries alone can
+// no longer catch us up — the leader ships the snapshot instead (Raft §7).
+//
+// Mutation order, chosen so every crash/retry window is safe:
+//
+//  1. Restore first: it validates the payload and is all-or-nothing
+//     (kv.SM.Restore builds the new state before swapping). A failure
+//     changes NOTHING durable — we stay behind and the leader retries
+//     with the same bytes (debug-level log each attempt; this is a
+//     capacity/decode issue, not a safety breach).
+//  2. Position adopted with the restore: the state machine is already at
+//     lastIncludedIndex, so applying our old tail on top of it would
+//     double-apply.
+//  3. SaveSnapshot makes the intent durable — a crash after this is
+//     reconciled at startup by restoreSnapshot's catch-up.
+//  4. The log is rebased: a compatible tail (matching term at the
+//     boundary) is kept via TruncatePrefix; a short or divergent tail is
+//     discarded wholesale via Reset. Structural disk failure halts, as
+//     anywhere else.
+//
+// If step 3 fails after the in-memory install, we still respond failure —
+// the leader retries, and the "already at that position" guard below
+// answers success so its match advances. A crash before the retry restarts
+// us from the OLD durable state (old log, old sidecar), which is
+// self-consistent: the adopted position was memory-only.
+func (n *Node) onInstallSnapshot(req *raftpb.InstallSnapshotRequest) (*raftpb.InstallSnapshotResponse, error) {
+	resp := &raftpb.InstallSnapshotResponse{Term: n.term, Success: false}
+
+	if req.Term < n.term {
+		// Stale leader from a dead epoch: reject, change nothing — in
+		// particular we do NOT reset our election timer for it.
+		return resp, nil
+	}
+	if req.Term > n.term {
+		n.term = req.Term
+		n.votedFor = ""
+		if err := n.persistHardState(); err != nil {
+			return nil, err // disk failure: halt
+		}
+		resp.Term = n.term
+	}
+
+	// Same authority acceptance as AppendEntries: a valid-term leader
+	// message defers our election (and steps us down if we thought we
+	// were leader — split brain at the same term shouldn't happen, but
+	// stepping down keeps us safe if it ever does).
+	if n.role != RoleFollower {
+		n.logf("step_down", "reason", "valid_leader_snapshot", "was", string(n.role), "leader", req.LeaderId)
+	}
+	n.leaveLeadership()
+	n.leaderID = transport.NodeID(req.LeaderId)
+	n.resetElectionTimer()
+
+	// Protocol validity: position 0 is meaningless (Raft terms start at
+	// index 0/term 0 only as the genesis base), and a term-0 boundary can
+	// never match a real entry — reject without mutation.
+	if req.LastIncludedIndex == 0 || req.LastIncludedTerm == 0 {
+		n.logf("install_snapshot_malformed", "leader", req.LeaderId,
+			"last_included_index", req.LastIncludedIndex, "last_included_term", req.LastIncludedTerm)
+		return resp, nil
+	}
+
+	// Never regress: we have already applied this position (or past it),
+	// so the snapshot is redundant — acknowledge so the leader can advance
+	// its match, but change nothing. This also answers the retry after a
+	// failed persistence attempt (position adopted in memory, sidecar not
+	// yet durable).
+	if req.LastIncludedIndex <= n.lastApplied {
+		resp.Success = true
+		return resp, nil
+	}
+
+	if n.snapshottable == nil {
+		// Our state machine cannot restore snapshots: an install can never
+		// be verified or applied, so refuse it. The cluster's majority does
+		// not depend on us; we simply keep falling behind.
+		n.logf("install_snapshot_unsupported", "leader", req.LeaderId, "index", req.LastIncludedIndex)
+		return resp, nil
+	}
+	meta := raftlog.SnapshotMeta{
+		LastIncludedIndex: req.LastIncludedIndex,
+		LastIncludedTerm:  req.LastIncludedTerm,
+	}
+
+	// 1. Restore: all-or-nothing validation of the leader's payload.
+	if err := n.snapshottable.Restore(req.Data); err != nil {
+		n.logf("install_snapshot_failed", "leader", req.LeaderId,
+			"index", req.LastIncludedIndex, "err", err.Error())
+		return resp, nil // state untouched: retry-safe
+	}
+
+	// 2. The state machine now contains lastIncludedIndex's state.
+	n.commitIndex = req.LastIncludedIndex
+	n.lastApplied = req.LastIncludedIndex
+
+	// 3. Durable intent (before the log rewrite it justifies).
+	if err := n.rlog.SaveSnapshot(meta, req.Data); err != nil {
+		n.logf("install_snapshot_persist_failed", "leader", req.LeaderId,
+			"index", req.LastIncludedIndex, "err", err.Error())
+		return resp, nil // capacity failure: position kept in memory only
+	}
+	n.lastSnapIndex = req.LastIncludedIndex
+
+	// 4. Rebase the log onto the snapshot boundary.
+	if err := n.adoptLogPosition(meta); err != nil {
+		return nil, err // structural disk failure: halt
+	}
+
+	resp.Success = true
+	n.logfInfo("snapshot_installed",
+		"leader", req.LeaderId,
+		"last_included_index", meta.LastIncludedIndex,
+		"last_included_term", meta.LastIncludedTerm,
+		"payload_bytes", len(req.Data),
+		"log_first_index", n.rlog.FirstIndex(),
+	)
+	return resp, nil
+}
+
+// adoptLogPosition rebases our log onto the snapshot's boundary after an
+// install (Phase 13). Loop goroutine only.
+//
+// A tail we still hold with the boundary entry (same term at
+// lastIncludedIndex) is compatible — keep everything after it: those are
+// uncommitted entries a new leader may still want. Anything else — tail
+// shorter than the snapshot, or a divergent term at the boundary — means
+// nothing we hold is trusted: discard every entry and adopt the metadata
+// (Reset). Errors are structural (disk) and halt the node.
+func (n *Node) adoptLogPosition(meta raftlog.SnapshotMeta) error {
+	idx := meta.LastIncludedIndex
+	if idx <= n.rlog.LastIndex() {
+		t, err := n.rlog.Term(idx)
+		if err == nil && t == meta.LastIncludedTerm {
+			if err := n.rlog.TruncatePrefix(idx); err != nil {
+				return fmt.Errorf("raft: install snapshot compact to %d: %w", idx, err)
+			}
+			return nil
+		}
+	}
+	if err := n.rlog.Reset(meta); err != nil {
+		return fmt.Errorf("raft: install snapshot rebase to %d: %w", idx, err)
+	}
+	return nil
+}
+
 // applyEntries merges the request's entries into our log: matching prefixes
 // are skipped, the first divergent index truncates our tail, and everything
 // from there on is appended and fsynced. Loop goroutine only.

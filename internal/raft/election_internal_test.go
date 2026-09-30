@@ -34,6 +34,11 @@ func (t *nopTransport) AppendEntries(ctx context.Context, _ transport.NodeID, _ 
 	return nil, ctx.Err()
 }
 
+func (t *nopTransport) InstallSnapshot(ctx context.Context, _ transport.NodeID, _ *raftpb.InstallSnapshotRequest) (*raftpb.InstallSnapshotResponse, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 func (t *nopTransport) Close() error { return nil }
 
 // newTestNode builds a node whose loop is running but idle: tests mutate

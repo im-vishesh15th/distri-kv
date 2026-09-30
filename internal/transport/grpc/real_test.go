@@ -25,6 +25,7 @@ type testHandler struct {
 	mu       sync.Mutex
 	lastVote *raftpb.RequestVoteRequest
 	lastApp  *raftpb.AppendEntriesRequest
+	lastSnap *raftpb.InstallSnapshotRequest
 
 	voteResp *raftpb.RequestVoteResponse
 	appResp  *raftpb.AppendEntriesResponse
@@ -48,6 +49,13 @@ func (h *testHandler) HandleAppendEntries(_ context.Context, req *raftpb.AppendE
 		return h.appResp, nil
 	}
 	return &raftpb.AppendEntriesResponse{Term: req.Term, Success: true}, nil
+}
+
+func (h *testHandler) HandleInstallSnapshot(_ context.Context, req *raftpb.InstallSnapshotRequest) (*raftpb.InstallSnapshotResponse, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lastSnap = req
+	return &raftpb.InstallSnapshotResponse{Term: req.Term, Success: true}, nil
 }
 
 // testNode is one in-process node: a real TCP listener, a real gRPC server
@@ -278,6 +286,50 @@ func TestAppendEntriesRoundTrip(t *testing.T) {
 	}
 	if got.PrevLogIndex != 4 || got.PrevLogTerm != 2 || got.LeaderCommit != 4 || got.LeaderId != "node1" {
 		t.Fatalf("request fields not forwarded: %+v", got)
+	}
+}
+
+// TestInstallSnapshotRoundTrip proves the Phase 13 RPC's client and server
+// plumbing: the transport's InstallSnapshot reaches the handler with every
+// field (including the opaque snapshot payload) intact.
+func TestInstallSnapshotRoundTrip(t *testing.T) {
+	snapHandler := &testHandler{}
+	nodes := startCluster(t, 3, func(id transport.NodeID) transport.Handler {
+		if id == "node3" {
+			return snapHandler
+		}
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	payload := []byte{0xFE, 0xED, 0xFA, 0xCE, 0x00, 0x99}
+	resp, err := nodes[0].tpt.InstallSnapshot(ctx, "node3", &raftpb.InstallSnapshotRequest{
+		Term:              7,
+		LeaderId:          "node1",
+		LastIncludedIndex: 9000,
+		LastIncludedTerm:  5,
+		Data:              payload,
+	})
+	if err != nil {
+		t.Fatalf("InstallSnapshot: %v", err)
+	}
+	if !resp.Success || resp.Term != 7 {
+		t.Fatalf("response = %+v, want {term 7 success}", resp)
+	}
+
+	snapHandler.mu.Lock()
+	got := snapHandler.lastSnap
+	snapHandler.mu.Unlock()
+	if got == nil {
+		t.Fatal("handler received nothing")
+	}
+	if got.LastIncludedIndex != 9000 || got.LastIncludedTerm != 5 || got.Term != 7 || got.LeaderId != "node1" {
+		t.Fatalf("request fields not forwarded: %+v", got)
+	}
+	if string(got.Data) != string(payload) {
+		t.Fatalf("payload = %x, want %x", got.Data, payload)
 	}
 }
 

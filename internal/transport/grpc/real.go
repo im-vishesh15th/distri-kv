@@ -155,6 +155,19 @@ func (t *RealTransport) AppendEntries(ctx context.Context, to transport.NodeID, 
 	return resp, nil
 }
 
+// InstallSnapshot implements transport.Transport (Phase 13).
+func (t *RealTransport) InstallSnapshot(ctx context.Context, to transport.NodeID, req *raftpb.InstallSnapshotRequest) (*raftpb.InstallSnapshotResponse, error) {
+	conn, err := t.conn(to)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := raftpb.NewRaftServiceClient(conn).InstallSnapshot(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("grpctransport: install snapshot to %s: %w", to, err)
+	}
+	return resp, nil
+}
+
 // conn returns the peer's client connection.
 func (t *RealTransport) conn(to transport.NodeID) (*grpc.ClientConn, error) {
 	t.mu.Lock()
@@ -217,4 +230,15 @@ func (s *server) AppendEntries(ctx context.Context, req *raftpb.AppendEntriesReq
 		return nil, status.Error(codes.Unimplemented, "raft core not attached (Phase 5)")
 	}
 	return h.HandleAppendEntries(ctx, req)
+}
+
+// InstallSnapshot forwards to the Raft core (Phase 13).
+func (s *server) InstallSnapshot(ctx context.Context, req *raftpb.InstallSnapshotRequest) (*raftpb.InstallSnapshotResponse, error) {
+	s.t.mu.Lock()
+	h := s.t.handler
+	s.t.mu.Unlock()
+	if h == nil {
+		return nil, status.Error(codes.Unimplemented, "raft core not attached")
+	}
+	return h.HandleInstallSnapshot(ctx, req)
 }

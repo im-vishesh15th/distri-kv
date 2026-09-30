@@ -1,10 +1,9 @@
 // Internal Raft transport RPCs (node-to-node). These are NOT part of the
 // client-facing API (proto/kv.proto).
 //
-// Phase 4 status: message plumbing only — no Raft logic yet. The request/
-// response shapes follow the Raft paper so Phase 5 (election) and Phase 6
-// (replication) fill them in without wire changes. InstallSnapshot joins in
-// Phase 13 as a new RPC, not a change to these.
+// Phase 13 status: InstallSnapshot added as its own RPC (as originally
+// planned — a new RPC, not a change to the others). The request/response
+// shapes follow the Raft paper.
 //
 // Every request carries `term`: receivers can reject stale-term messages
 // early (the term-awareness Raft requires).
@@ -26,6 +25,12 @@ service RaftService {
   // AppendEntries implements Raft's AppendEntries RPC (Phase 6). With an
   // empty entries list it is also the heartbeat.
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+
+  // InstallSnapshot implements Raft's InstallSnapshot RPC (Phase 13): used
+  // when a follower is too far behind for entries — its prevLog anchor is
+  // below the leader's compaction point — so the leader ships the snapshot
+  // itself instead of thousands of discarded entries.
+  rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
 }
 
 message PingRequest {
@@ -69,6 +74,24 @@ message AppendEntriesRequest {
 }
 
 message AppendEntriesResponse {
+  uint64 term = 1;
+  bool success = 2;
+}
+
+message InstallSnapshotRequest {
+  uint64 term = 1;
+  string leader_id = 2;
+  // The log position the payload reconstructs (Raft's lastIncludedIndex/
+  // lastIncludedTerm) — everything at or before last_included_index is
+  // inside the snapshot and may already be compacted away on the leader.
+  uint64 last_included_index = 3;
+  uint64 last_included_term = 4;
+  // The state machine's serialized state: opaque to raft (only the same
+  // state machine reads it back).
+  bytes data = 5;
+}
+
+message InstallSnapshotResponse {
   uint64 term = 1;
   bool success = 2;
 }

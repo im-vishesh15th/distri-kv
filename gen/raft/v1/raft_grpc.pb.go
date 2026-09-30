@@ -1,10 +1,9 @@
 // Internal Raft transport RPCs (node-to-node). These are NOT part of the
 // client-facing API (proto/kv.proto).
 //
-// Phase 4 status: message plumbing only — no Raft logic yet. The request/
-// response shapes follow the Raft paper so Phase 5 (election) and Phase 6
-// (replication) fill them in without wire changes. InstallSnapshot joins in
-// Phase 13 as a new RPC, not a change to these.
+// Phase 13 status: InstallSnapshot added as its own RPC (as originally
+// planned — a new RPC, not a change to the others). The request/response
+// shapes follow the Raft paper.
 //
 // Every request carries `term`: receivers can reject stale-term messages
 // early (the term-awareness Raft requires).
@@ -30,9 +29,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RaftService_Ping_FullMethodName          = "/distrikv.raft.v1.RaftService/Ping"
-	RaftService_RequestVote_FullMethodName   = "/distrikv.raft.v1.RaftService/RequestVote"
-	RaftService_AppendEntries_FullMethodName = "/distrikv.raft.v1.RaftService/AppendEntries"
+	RaftService_Ping_FullMethodName            = "/distrikv.raft.v1.RaftService/Ping"
+	RaftService_RequestVote_FullMethodName     = "/distrikv.raft.v1.RaftService/RequestVote"
+	RaftService_AppendEntries_FullMethodName   = "/distrikv.raft.v1.RaftService/AppendEntries"
+	RaftService_InstallSnapshot_FullMethodName = "/distrikv.raft.v1.RaftService/InstallSnapshot"
 )
 
 // RaftServiceClient is the client API for RaftService service.
@@ -47,6 +47,11 @@ type RaftServiceClient interface {
 	// AppendEntries implements Raft's AppendEntries RPC (Phase 6). With an
 	// empty entries list it is also the heartbeat.
 	AppendEntries(ctx context.Context, in *AppendEntriesRequest, opts ...grpc.CallOption) (*AppendEntriesResponse, error)
+	// InstallSnapshot implements Raft's InstallSnapshot RPC (Phase 13): used
+	// when a follower is too far behind for entries — its prevLog anchor is
+	// below the leader's compaction point — so the leader ships the snapshot
+	// itself instead of thousands of discarded entries.
+	InstallSnapshot(ctx context.Context, in *InstallSnapshotRequest, opts ...grpc.CallOption) (*InstallSnapshotResponse, error)
 }
 
 type raftServiceClient struct {
@@ -87,6 +92,16 @@ func (c *raftServiceClient) AppendEntries(ctx context.Context, in *AppendEntries
 	return out, nil
 }
 
+func (c *raftServiceClient) InstallSnapshot(ctx context.Context, in *InstallSnapshotRequest, opts ...grpc.CallOption) (*InstallSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InstallSnapshotResponse)
+	err := c.cc.Invoke(ctx, RaftService_InstallSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RaftServiceServer is the server API for RaftService service.
 // All implementations must embed UnimplementedRaftServiceServer
 // for forward compatibility.
@@ -99,6 +114,11 @@ type RaftServiceServer interface {
 	// AppendEntries implements Raft's AppendEntries RPC (Phase 6). With an
 	// empty entries list it is also the heartbeat.
 	AppendEntries(context.Context, *AppendEntriesRequest) (*AppendEntriesResponse, error)
+	// InstallSnapshot implements Raft's InstallSnapshot RPC (Phase 13): used
+	// when a follower is too far behind for entries — its prevLog anchor is
+	// below the leader's compaction point — so the leader ships the snapshot
+	// itself instead of thousands of discarded entries.
+	InstallSnapshot(context.Context, *InstallSnapshotRequest) (*InstallSnapshotResponse, error)
 	mustEmbedUnimplementedRaftServiceServer()
 }
 
@@ -117,6 +137,9 @@ func (UnimplementedRaftServiceServer) RequestVote(context.Context, *RequestVoteR
 }
 func (UnimplementedRaftServiceServer) AppendEntries(context.Context, *AppendEntriesRequest) (*AppendEntriesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AppendEntries not implemented")
+}
+func (UnimplementedRaftServiceServer) InstallSnapshot(context.Context, *InstallSnapshotRequest) (*InstallSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method InstallSnapshot not implemented")
 }
 func (UnimplementedRaftServiceServer) mustEmbedUnimplementedRaftServiceServer() {}
 func (UnimplementedRaftServiceServer) testEmbeddedByValue()                     {}
@@ -193,6 +216,24 @@ func _RaftService_AppendEntries_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RaftService_InstallSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InstallSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RaftServiceServer).InstallSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RaftService_InstallSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RaftServiceServer).InstallSnapshot(ctx, req.(*InstallSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RaftService_ServiceDesc is the grpc.ServiceDesc for RaftService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -211,6 +252,10 @@ var RaftService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AppendEntries",
 			Handler:    _RaftService_AppendEntries_Handler,
+		},
+		{
+			MethodName: "InstallSnapshot",
+			Handler:    _RaftService_InstallSnapshot_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

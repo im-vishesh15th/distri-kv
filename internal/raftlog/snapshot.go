@@ -116,6 +116,30 @@ func (l *Log) LoadSnapshot() (SnapshotMeta, []byte, error) {
 	return readSnapshot(l.dir)
 }
 
+// Reset discards EVERY retained entry and rebases the log's boundary on
+// meta (Phase 13): firstIndex = LastIncludedIndex+1, firstTerm =
+// LastIncludedTerm. It is the snapshot-adoption path for a follower whose
+// log does not contain the snapshot's position — the tail is either too
+// short or divergent, so there is no compatible suffix to keep.
+//
+// Like TruncatePrefix, Reset does NOT persist the snapshot itself: the
+// caller must SaveSnapshot BEFORE resetting, so a crash in between is
+// reconciled at startup (restoreSnapshot catch-up). Without a sidecar the
+// rebase is in-memory only and does not survive a restart (empty file,
+// no metadata ⇒ firstIndex falls back to 1 — pinned by
+// TestResetRebasesBoundary).
+func (l *Log) Reset(meta SnapshotMeta) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return ErrClosed
+	}
+	if meta.LastIncludedIndex == 0 {
+		return fmt.Errorf("raftlog: reset LastIncludedIndex must be >= 1")
+	}
+	return l.rewriteLocked(nil, meta.LastIncludedIndex+1, meta.LastIncludedTerm)
+}
+
 // readSnapshot loads the snapshot sidecar from dir (see LoadSnapshot).
 func readSnapshot(dir string) (SnapshotMeta, []byte, error) {
 	data, err := os.ReadFile(snapshotPath(dir))

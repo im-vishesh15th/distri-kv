@@ -1,8 +1,9 @@
 # DistriKV's Raft core
 
 Custom implementation — no Hashicorp Raft, no etcd/raft. This document covers
-what exists **now (Phases 5–7: leader election, log replication, and
-state-machine apply)** and how it is built.
+what exists **now (Phases 5–13: leader election, log replication,
+state-machine apply, ReadIndex reads, snapshots + compaction, and
+InstallSnapshot)** and how it is built.
 
 ## Concurrency model: one event loop owns all state
 
@@ -285,22 +286,95 @@ committed). Apply then resumes at the retained tail — recovery is
 **Boundary term:** `Term(firstIndex-1)` answers from `firstTerm`
 (`lastIncludedTerm`), so a follower acknowledged exactly at the
 compaction point keeps receiving entries; deeper behind, replication
-reports `append_blocked` until Phase 13's `InstallSnapshot`.
+switches to `InstallSnapshot` (next section).
 
-**Policy:** per-node, not consensus — each replica snapshots its own pace;
+**Policy:** per-node, not consensus — each replica snapshots at its own pace;
 safety invariants (never past `lastApplied`, never discard committed
 entries uncaptured) hold locally. Failures to capture/persist are logged
 (debug) and retried next window: snapshotting is capacity, not safety, and
 never halts the node. `cmd/server` sets `-snapshot-every 1024` (0
-disables). The known interim limit until Phase 13: a peer that misses more
-than one snapshot window of entries while disconnected cannot catch up
-from entries alone (its anchor is compacted away) — InstallSnapshot closes
-that.
+disables).
 
-## What is deliberately not here yet (Phase 13+)
+## InstallSnapshot (Phase 13)
 
-Conflict-term backoff hints (deferred to measurement), `InstallSnapshot`
-transfer for peers behind the compaction point.
+A follower may fall arbitrarily far behind (spec §16): the leader has
+compacted past everything it would need to send. Instead of thousands of
+missing entries, the leader ships the snapshot itself, and the follower
+reconstructs its state machine from the payload, then continues with the
+remaining log.
+
+**Leader side** (`replicate.go`): two triggers, both inside `sendAppendTo`
+and sharing the per-peer in-flight slot with normal appends:
+
+1. `progress.match + 1 < firstIndex` (confirmed behind, `match > 0`) —
+   install directly; probing down one reject per round trip would cost
+   gap-many round trips. `match == 0` is a fresh term with no evidence of
+   where the follower is — probe normally, so a caught-up follower after a
+   leader change isn't shipped a needless full snapshot.
+2. `prev + 1 < firstIndex` — the anchor crossed below the boundary during
+   a reject walk-down (`prev == firstIndex-1` remains answerable from the
+   boundary term; only below it do entries run out).
+
+The payload comes from the durable sidecar (`LoadSnapshot`), so a leader
+always still has what its compaction discarded; if none exists (impossible
+when compaction ran — it saves first), the send is refused and logged
+rather than guessed at. Success advances
+`match = lastIncludedIndex` (monotonic — a redundant install must never
+regress it), re-arms `next = match + 1`, counts as a ReadIndex quorum
+acknowledgment (same accounting as an append success), and flows the tail
+beyond the snapshot through normal appends. Refusals have no back-off to
+walk: they retry on the heartbeat cadence, with pending triggers dropped
+deliberately so a repeated refusal cannot spin a retry loop.
+
+**Follower side** (`handlers.go` → `onInstallSnapshot`), in an order
+chosen so every crash/retry window is safe:
+
+1. Term gates + authority, exactly like AppendEntries: stale term ⇒
+   refuse untouched (no election-timer reset); newer term adopted and
+   persisted; a valid-term leader message steps us down if needed, sets
+   `leaderID`, defers our election.
+2. Guards before any mutation: position 0 or boundary term 0 is malformed
+   ⇒ refuse; `lastIncludedIndex ≤ lastApplied` ⇒ **success without
+   touching anything** (never regress applied state — this also answers
+   the retry after a failed persistence attempt); a state machine that
+   isn't snapshot-capable ⇒ refuse.
+3. **`Restore` first** — all-or-nothing payload validation
+   (`kv.SM.Restore` builds the new state before swapping). A failure
+   mutates nothing durable: the follower stays behind and the leader
+   retries with the same bytes (debug-level log each attempt — capacity,
+   not safety).
+4. Adopt `commitIndex = lastApplied = lastIncludedIndex` with the
+   restore: the state machine already contains that position, so
+   re-applying our old tail on top of it would double-apply.
+5. `SaveSnapshot` — durable intent before the log it justifies. A
+   persistence failure responds failure with the position kept in memory;
+   the next attempt hits the "already installed" guard and answers
+   success, so the leader's match still advances. A crash before that
+   restarts the node from its old durable state (old log, old sidecar),
+   which is self-consistent — the adoption was memory-only.
+6. Rebase the log: a tail whose boundary entry matches the snapshot's
+   term is compatible — `TruncatePrefix` keeps whatever follows
+   (uncommitted entries a new leader may still want). A short or
+   divergent tail means nothing held is trusted — `Reset` discards every
+   entry and adopts the metadata. Structural disk failure halts, as
+   anywhere else.
+
+**Restart recovery** covers the install crash window: sidecar saved but
+the log not yet rebased (the log ends *before* `lastIncludedIndex`) —
+startup discards all retained entries (`Reset`) and adopts the boundary.
+The Phase 12 `TruncatePrefix` catch-up handles the other window (sidecar
+saved, covered entries still present); together every point between step 5
+and step 6 restarts into the installed state.
+
+`snapshot_installed` is an info-level lifecycle event (leader, position,
+payload bytes, new log boundary); all refusal/persistence paths are
+debug-level, since they can repeat every heartbeat.
+
+## What is deliberately not here yet (deferred)
+
+Conflict-term backoff hints (deferred until measurement shows catch-up
+gaps actually cost — the reject walk-down terminates correctly without
+them).
 
 ## How this phase is tested
 
@@ -335,7 +409,12 @@ transfer for peers behind the compaction point.
 | `TestRestartFromSnapshot` (real gRPC, standalone) | state restored from snapshot with covered entries gone; retained tail replays (`snapshot + remaining log`); session table + dedup survive the restore (retry replays, next seq applies) |
 | `TestSnapshotCrashBeforeCompaction` (real gRPC) | the SaveSnapshot→TruncatePrefix crash window: startup truncates covered entries, adopts the snapshot position, keeps serving |
 | `TestNewRefusesBrokenSnapshotStates` | snapshot without a restorable state machine ⇒ refuse; snapshot beyond the log's retained start (lost tail) ⇒ refuse |
+| `TestInstallSnapshotFollowerHandler` | stale-term install refused untouched; fresh install restores the SM + persists the sidecar + rebases the log + adopts the position; a redundant snapshot at/below `lastApplied` answers success WITHOUT touching state (even with a payload the SM would refuse); a corrupt payload above our position is refused with sidecar/log/position unchanged; position-0 refused |
+| `TestInstallSnapshotRefusedStates` | SM that cannot restore ⇒ refuse untouched, **no sidecar written** (would make the node unrestartable); SM without snapshot support ⇒ refuse untouched |
+| `TestRestoreSnapshotReconcilesInstallCrashWindow` | install crash window (sidecar above the log's end): startup discards the old log via `Reset`, adopts the snapshot position, keeps serving |
+| `TestInstallSnapshotCatchesFarBehindFollower` (real gRPC, 3-node) | spec §16 end-to-end: follower offline across 40 writes against a window of 2; leader compacts past its entire history; restart ⇒ the log is rebased BEYOND every index it ever held (installation, not entry catch-up — the proof), sidecar in place, state rebuilt incl. pre-outage keys, tail + further writes converge |
 | `TestSnapshotSaveLoadRoundTrip`, `TestOpenRefusedOnCorruptSnapshot`, `TestLoadSnapshotRefusedOnCorruptSnapshot`, `TestSnapshotRejectsZeroIndex`, `TestSnapshotClosedLog`, `TestTruncatePrefix` (raftlog) | sidecar round trip + replace; CRC/length damage is loud on both Open and load; zero index refused; closed log refused; compaction point survives restart **with** a snapshot (no-snapshot fallback pinned) |
+| `TestResetRebasesBoundary` (raftlog) | `Reset` discards every entry and rebases firstIndex/firstTerm on the metadata; the boundary answers with the metadata's term; the rebase survives reopen WITH a sidecar; the no-sidecar fallback (reopens at index 1) is pinned; zero index and closed log refused |
 
 Unit tests inject time (`Tick`) and the network (scripted transport)
 directly, so all timeout/ordering claims are deterministic; the integration

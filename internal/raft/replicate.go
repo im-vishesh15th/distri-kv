@@ -88,11 +88,29 @@ func (n *Node) sendAppendTo(to transport.NodeID) {
 		prog.next = last + 1 // defensive clamp
 	}
 	prev := prog.next - 1
+
+	// Confirmed position below our compaction point (Phase 13): nothing
+	// can be appended above the boundary for a follower that far behind —
+	// and walking down one reject per RTT would burn gap-many round trips.
+	// Install directly. (match == 0 is a fresh term with no evidence of
+	// where the follower is; fall through to normal probing so a caught-up
+	// follower isn't shipped a needless snapshot.)
+	if prog.match > 0 && prog.match+1 < n.rlog.FirstIndex() {
+		n.sendInstallSnapshotTo(to)
+		return
+	}
+	// Same condition via the anchor: during a reject walk-down prev crosses
+	// below the boundary — prev == firstIndex-1 is still answerable from
+	// the boundary term, only below it do entries run out.
+	if prev+1 < n.rlog.FirstIndex() {
+		n.sendInstallSnapshotTo(to)
+		return
+	}
 	prevTerm, err := n.rlog.Term(prev)
 	if err != nil {
-		// prev below the compaction point — needs InstallSnapshot
-		// (Phases 12–13). Impossible before compaction exists; log and let
-		// the next heartbeat retry.
+		// Defensive: prev >= firstIndex-1 must be answerable (boundary
+		// term at firstIndex-1, entries above). Anything else is
+		// structural — log and let the next heartbeat retry.
 		n.logf("append_blocked", "peer", to, "prev", prev, "err", err.Error())
 		return
 	}
@@ -127,6 +145,114 @@ func (n *Node) sendAppendTo(to transport.NodeID) {
 		case <-n.done:
 		}
 	}()
+}
+
+// sendInstallSnapshotTo ships the whole snapshot to a peer below our
+// compaction point (Phase 13): its log can no longer be anchored there, so
+// instead of entries the follower gets lastIncludedIndex/Term + the state
+// machine payload, then catches up on the tail from match+1. It shares the
+// per-peer in-flight slot with sendAppendTo (which has already checked it
+// when calling, so this guard is belt-and-suspenders for future callers).
+func (n *Node) sendInstallSnapshotTo(to transport.NodeID) {
+	prog, ok := n.progress[to]
+	if !ok {
+		return // stale trigger from a previous term
+	}
+	if prog.inflight {
+		prog.pending = true
+		return
+	}
+	meta, payload, err := n.rlog.LoadSnapshot()
+	if err != nil || meta.Zero() {
+		// No usable snapshot (missing/corrupt sidecar — impossible if
+		// compaction ran, since it saves first, but refuse to guess):
+		// log and let the next heartbeat retry.
+		reason := "no snapshot on disk"
+		if err != nil {
+			reason = err.Error()
+		}
+		n.logf("snapshot_send_blocked", "peer", to, "reason", reason)
+		return
+	}
+
+	prog.inflight = true
+	prog.gen++
+	gen := prog.gen
+	req := &raftpb.InstallSnapshotRequest{
+		Term:              n.term,
+		LeaderId:          string(n.id),
+		LastIncludedIndex: meta.LastIncludedIndex,
+		LastIncludedTerm:  meta.LastIncludedTerm,
+		Data:              payload,
+	}
+	go func() {
+		resp, err := n.transport.InstallSnapshot(n.rpcCtx, to, req)
+		select {
+		case n.events <- snapRespEvent{from: to, term: req.Term, gen: gen, included: meta.LastIncludedIndex, resp: resp, err: err}:
+		case <-n.rpcCtx.Done():
+		case <-n.done:
+		}
+	}()
+}
+
+// onInstallSnapshotResponse folds one InstallSnapshot reply into
+// replication state (Phase 13). Success advances match to the snapshot's
+// lastIncludedIndex (monotonic: a redundant snapshot must not regress it)
+// so the follower then catches up on the tail through normal appends.
+func (n *Node) onInstallSnapshotResponse(e snapRespEvent) error {
+	if e.err != nil {
+		// Errors carry no term, so gate on ours: only the CURRENT
+		// leadership epoch may touch progress (same reasoning as
+		// onAppendResponse — a stale error must not clear a newer slot).
+		if n.role != RoleLeader || e.term != n.term {
+			return nil
+		}
+		if prog, ok := n.progress[e.from]; ok {
+			prog.inflight = false
+			prog.pending = false
+		}
+		n.logf("snapshot_rpc_failed", "peer", e.from, "err", e.err.Error())
+		return nil
+	}
+	if e.resp.Term > n.term {
+		return n.stepDown(e.resp.Term, "higher_term_in_snapshot_response")
+	}
+	if n.role != RoleLeader || e.resp.Term < n.term {
+		return nil // stale response from an older term
+	}
+	prog, ok := n.progress[e.from]
+	if !ok {
+		return nil
+	}
+	prog.inflight = false
+	triggered := prog.pending
+	prog.pending = false
+
+	if e.resp.Success {
+		if e.included > prog.match {
+			prog.match = e.included
+		}
+		prog.next = prog.match + 1
+		// ReadIndex: same accounting as an append success — this follower
+		// accepted our CURRENT term as of this response (readindex.go
+		// gate 1).
+		n.countReadAck(e.from, e.term, e.gen)
+		if err := n.maybeAdvanceCommit(); err != nil {
+			return err
+		}
+		// The tail beyond the snapshot still has to flow.
+		if triggered || prog.next <= n.rlog.LastIndex() {
+			n.sendAppendTo(e.from)
+		}
+		return nil
+	}
+
+	// Refused (persistence capacity or a payload the follower cannot
+	// restore — logged there). Installs have no back-off to walk: retry on
+	// the heartbeat cadence; pending triggers are dropped deliberately so
+	// a repeated refusal cannot spin a retry loop.
+	n.logf("install_rejected", "peer", e.from, "index", e.included)
+	return nil
 }
 
 // onAppendResponse folds one AppendEntries reply into replication state.

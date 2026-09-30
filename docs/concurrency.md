@@ -1,6 +1,6 @@
 # Concurrency model — DistriKV
 
-> Status: through Phase 12. Maps the spec's three concurrency levels
+> Status: through Phase 13. Maps the spec's three concurrency levels
 > (§9 CONCURRENCY MODEL) onto the actual code, and names the primitive
 > that makes each level safe. Every claim names its test; see also
 > guarantee A1 in docs/consistency.md.
@@ -53,6 +53,14 @@
   race it. The cost is loop-blocking (O(state) per window) — accepted
   as the correctness-first choice; profiling (Phase 24) decides if it
   ever moves off-loop.
+- **InstallSnapshot (Phase 13)**: the inbound handler event, the
+  Restore/adopt/SaveSnapshot/rebase sequence, and the leader's send +
+  response handling all run on this same goroutine — so the follower's
+  state machine swap, position adoption, and log rebase are one
+  indivisible loop turn (an apply can never interleave between "SM is at
+  position N" and "position says N"). Only the RPC itself (disk read of
+  the sidecar, then network) runs on a short-lived goroutine, posting its
+  reply back as an event — same shape as appends/votes.
 
 ## Level 3 — Multi-Raft / fixed-slot sharding (Phases 17–21, planned)
 
@@ -84,6 +92,7 @@ operation. Not implemented yet — DistriKV is one group until Phase 17.
 | 1 × 2 on a real cluster | `TestConcurrentSessionsThroughCluster` (3 nodes, exact count on every replica) |
 | 2 — ReadIndex in the loop | `TestReadIndexContract` (returned index already applied), `TestFollowerRefusesDataReads`, `TestReadAfterFailoverSeesAcknowledgedWrite` |
 | 2 — snapshots in the loop | `TestSnapshotCompactsLog` (capture between applies, boundary term served), `TestRestartFromSnapshot` (pre-loop restore + tail replay), `TestSnapshotCrashBeforeCompaction` (startup reconciliation) |
+| 2 — install in the loop | `TestInstallSnapshotFollowerHandler` (restore/adopt/rebase observed atomically through `HandleInstallSnapshot`), `TestInstallSnapshotRefusedStates` (refusals mutate nothing), `TestInstallSnapshotCatchesFarBehindFollower` (real gRPC: install + tail under live heartbeats) |
 
 The whole suite runs under `go test -race`; any unsynchronized access
 above fails it regardless of assertions.

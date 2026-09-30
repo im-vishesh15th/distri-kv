@@ -1,28 +1,38 @@
 // Package client is the DistriKV Go SDK.
 //
-// Status (Phase 8): single-endpoint dial with leader-aware routing. The
-// client dials any node it is given, follows leader redirects for
-// mutations, and fails reads over between endpoints it has seen. Client
-// sessions (client_id/sequence_number enforcement) land in Phase 9 — this
-// client already generates and sends both fields on every mutation so the
-// wire behavior never changes when the server starts honoring them.
+// Status (Phase 9): leader-aware routing + client sessions. The client
+// dials any node it is given, follows leader redirects for mutations,
+// retries transient failures under the session's sequence number, and
+// fails reads over between endpoints it has seen.
 //
-// Routing and retry policy (the load-bearing part):
+// Session model: one Client == one session. A stable random client_id and
+// one sequence number per LOGICAL operation — retries of that operation
+// reuse it (allocated inside mutate's critical section, so issue order
+// always equals sequence order), the counter starts at 1, and mutations
+// are serialized per Client. That ordering is what lets the server-side
+// session table adjudicate duplicates precisely (S1: a retried mutation
+// applies at most once and its original response is replayed; see
+// docs/consistency.md for the exact bounds — this is deliberately NOT
+// called "exactly once").
 //
-//   - codes.Aborted (raft.ErrNotLeader): the proposal was rejected BEFORE
-//     append — nothing happened. The client calls GetStatus, re-dials the
-//     leader, and retries the write itself. Safe by construction, bounded
-//     by maxLeaderHops and the caller's context.
-//   - codes.Unavailable (leadership lost, node down, transport break): the
-//     outcome is AMBIGUOUS — the entry may still commit elsewhere. Writes
-//     are never auto-retried in this class until Phase 9's deduplication
-//     makes retries safe; the error surfaces to the caller. The client
-//     does repair its routing (discovery is a read) so the NEXT call is
-//     correctly aimed. Reads — side-effect-free, and valid on any node
-//     until Phase 11's linearizability work — fail over freely.
-//   - Mutating calls are otherwise NOT auto-retried: before Phase 9, a
-//     retry after a lost response could double-apply a write. Callers
-//     control retries explicitly via their own context policy.
+// Routing and retry policy:
+//
+//   - codes.Aborted (raft.ErrNotLeader): rejected BEFORE append — nothing
+//     happened. The client calls GetStatus, re-dials the leader, retries
+//     immediately (bounded by maxLeaderHops). If no leader is known yet
+//     (election in progress), it backs off and retries like any transient
+//     failure — still provably nothing applied.
+//   - codes.Unavailable (leadership lost, node down, transport break):
+//     outcome ambiguous — the original entry may still commit. Retried
+//     since Phase 9 with the SAME session sequence: whether or not the
+//     original landed, the session table caps application at once. Backoff
+//     (50ms doubling to 800ms, maxTransientRetries tries) rides out
+//     elections; the caller's context bounds the whole call.
+//   - Domain outcomes (ErrKeyNotFound, ErrNotInteger, ...) and context
+//     errors return untouched — never retried by the SDK.
+//   - Reads never mutate: they fail over between known endpoints freely
+//     and may be served by any node (linearizability is server-side,
+//     Phase 11).
 package client
 
 import (
@@ -33,6 +43,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	kv1 "distrikv/gen/kv/v1"
 	"distrikv/internal/kv"
@@ -60,6 +71,16 @@ var (
 // maxLeaderHops bounds leader redirects within one call.
 const maxLeaderHops = 3
 
+// Phase 9 transient-retry budget: dedup makes retrying a mutation safe, so
+// the SDK rides out elections and failovers instead of surfacing them.
+// Backoff doubles from initial to max between tries; the caller's context
+// deadline bounds the total.
+const (
+	maxTransientRetries = 5
+	initialRetryBackoff = 50 * time.Millisecond
+	maxRetryBackoff     = 800 * time.Millisecond
+)
+
 // NodeStatus is the routing view returned by Status/GetStatus.
 type NodeStatus struct {
 	NodeID     string
@@ -68,7 +89,10 @@ type NodeStatus struct {
 	LeaderAddr string // dialable leader address; "" = unknown (standalone)
 }
 
-// Client is a DistriKV connection. It is safe for concurrent use.
+// Client is a DistriKV connection. It is safe for concurrent use:
+// mutations serialize on mutateMu (one in-flight mutation per session —
+// sequence numbers must be issued in order for dedup to adjudicate them),
+// while reads and status calls run freely.
 //
 // One connection is maintained per address ever needed (memoized, closed
 // only by Close): yanking a connection out from under in-flight RPCs would
@@ -81,6 +105,8 @@ type Client struct {
 	// current is the endpoint reads and writes prefer: initially the dial
 	// target, then the discovered leader. Guarded by mu.
 	current string
+
+	mutateMu sync.Mutex // serializes mutations AND sequence allocation
 
 	clientID string
 	seq      atomic.Uint64
@@ -116,7 +142,7 @@ func Dial(ctx context.Context, addr string, opts ...grpc.DialOption) (*Client, e
 		return nil, err
 	}
 	c.clientID = id
-	c.seq.Store(1)
+	c.seq.Store(0) // first nextSeq() returns 1 (session sequences start at 1)
 	return c, nil
 }
 
@@ -168,12 +194,12 @@ func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 
 // Put stores value at key (upsert), routed to the leader.
 func (c *Client) Put(ctx context.Context, key string, value []byte) error {
-	return unwrap(c.mutate(ctx, func(stub kv1.KVServiceClient) error {
+	return unwrap(c.mutate(ctx, func(stub kv1.KVServiceClient, seq uint64) error {
 		_, err := stub.Put(ctx, &kv1.PutRequest{
 			Key:            key,
 			Value:          value,
 			ClientId:       c.clientID,
-			SequenceNumber: c.nextSeq(),
+			SequenceNumber: seq,
 		})
 		return err
 	}))
@@ -181,11 +207,11 @@ func (c *Client) Put(ctx context.Context, key string, value []byte) error {
 
 // Delete removes key (idempotent), routed to the leader.
 func (c *Client) Delete(ctx context.Context, key string) error {
-	return unwrap(c.mutate(ctx, func(stub kv1.KVServiceClient) error {
+	return unwrap(c.mutate(ctx, func(stub kv1.KVServiceClient, seq uint64) error {
 		_, err := stub.Delete(ctx, &kv1.DeleteRequest{
 			Key:            key,
 			ClientId:       c.clientID,
-			SequenceNumber: c.nextSeq(),
+			SequenceNumber: seq,
 		})
 		return err
 	}))
@@ -215,14 +241,14 @@ func (c *Client) Exists(ctx context.Context, key string) (bool, error) {
 // means "key must equal expected".
 func (c *Client) CAS(ctx context.Context, key string, expected, newValue []byte) (bool, error) {
 	var applied bool
-	err := c.mutate(ctx, func(stub kv1.KVServiceClient) error {
+	err := c.mutate(ctx, func(stub kv1.KVServiceClient, seq uint64) error {
 		resp, err := stub.CAS(ctx, &kv1.CASRequest{
 			Key:            key,
 			ExpectedExists: expected != nil,
 			ExpectedValue:  expected,
 			NewValue:       newValue,
 			ClientId:       c.clientID,
-			SequenceNumber: c.nextSeq(),
+			SequenceNumber: seq,
 		})
 		if err != nil {
 			return err
@@ -240,12 +266,12 @@ func (c *Client) CAS(ctx context.Context, key string, expected, newValue []byte)
 // and returns the new value. An absent key is treated as 0.
 func (c *Client) Incr(ctx context.Context, key string, delta int64) (int64, error) {
 	var out int64
-	err := c.mutate(ctx, func(stub kv1.KVServiceClient) error {
+	err := c.mutate(ctx, func(stub kv1.KVServiceClient, seq uint64) error {
 		resp, err := stub.Incr(ctx, &kv1.IncrRequest{
 			Key:            key,
 			Delta:          delta,
 			ClientId:       c.clientID,
-			SequenceNumber: c.nextSeq(),
+			SequenceNumber: seq,
 		})
 		if err != nil {
 			return err
@@ -269,52 +295,88 @@ func (c *Client) Decr(ctx context.Context, key string) (int64, error) {
 	return c.Incr(ctx, key, -1)
 }
 
-// --- routing (Phase 8) -----------------------------------------------------
+// --- routing + retries (Phases 8/9) ---------------------------------------
 //
-// mutate follows leader redirects (codes.Aborted only — see the package
-// doc); read fails over between endpoints (side-effect-free).
+// mutate follows leader redirects (codes.Aborted) and retries transient
+// failures with backoff (dedup makes mutation retries safe since Phase 9);
+// read fails over between endpoints (side-effect-free).
 
-type rpcOp func(stub kv1.KVServiceClient) error
+type readOp func(stub kv1.KVServiceClient) error              // reads: no session
+type writeOp func(stub kv1.KVServiceClient, seq uint64) error // mutations: session seq
 
-// mutate runs a write against the current endpoint, redirecting to the
-// discovered leader on codes.Aborted (provably rejected before append).
-// Every other failure — most importantly codes.Unavailable, whose outcome
-// is ambiguous — returns to the caller untouched.
-func (c *Client) mutate(ctx context.Context, op rpcOp) error {
+// mutate runs a write against the current endpoint. It holds mutateMu for
+// the whole call and allocates the sequence number INSIDE that critical
+// section: one in-flight mutation per session, issued order == sequence
+// order (the server's dedup rule needs both).
+//
+// Failure classes:
+//   - codes.Aborted + a routable leader: redirect immediately (nothing was
+//     appended on this node).
+//   - codes.Aborted + no leader known yet, codes.Unavailable: transient —
+//     repair routing, back off, retry within maxTransientRetries. Every
+//     attempt reuses this call's sequence number, so the server's session
+//     table guarantees at-most-once application (S1).
+//   - anything else (domain outcomes, context errors): returned untouched.
+func (c *Client) mutate(ctx context.Context, op writeOp) error {
+	c.mutateMu.Lock()
+	defer c.mutateMu.Unlock()
+
+	seq := c.nextSeq() // under the lock: sequence order == issue order
 	var err error
-	for hop := 0; hop <= maxLeaderHops; hop++ {
+	redirects, retries := 0, 0
+	backoff := initialRetryBackoff
+	for {
 		stub, addr := c.endpoint()
-		err = op(stub)
+		err = op(stub, seq)
 		if err == nil {
 			return nil
 		}
 		switch status.Code(err) {
 		case codes.Aborted:
-			if hop == maxLeaderHops {
+			if redirects >= maxLeaderHops {
 				return err // redirect budget exhausted
 			}
-			next, ok := c.discover(ctx, stub, addr)
-			if !ok {
-				return err // no routable leader (or the hint was useless)
+			if next, ok := c.discover(ctx, stub, addr); ok && c.switchTo(next) {
+				redirects++
+				continue // immediate: the redirect itself moved us
 			}
-			if !c.switchTo(next) {
-				return err // unusable hint address
-			}
+			// No routable leader (election in progress): transient.
 		case codes.Unavailable:
-			// Ambiguous: never retried pre-Phase 9. Discovery is a read,
-			// so repair routing for the NEXT call and surface the error.
+			// Ambiguous outcome — retried since Phase 9 under the same
+			// session sequence. Discovery is a read, always safe.
 			c.repair(ctx, addr)
-			return err
 		default:
 			return err // domain outcome or context error
 		}
+		if retries >= maxTransientRetries {
+			return err
+		}
+		retries++
+		if !sleepBackoff(ctx, backoff) {
+			return err // caller's deadline is our stop signal
+		}
+		if backoff < maxRetryBackoff {
+			backoff *= 2
+		}
 	}
-	return err
+}
+
+// sleepBackoff waits for d or the caller's context; false means the
+// context is done (the caller returns the last transport error).
+func sleepBackoff(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // read runs a read against the current endpoint and fails over to any
 // other known endpoint on transport failure.
-func (c *Client) read(ctx context.Context, op rpcOp) error {
+func (c *Client) read(ctx context.Context, op readOp) error {
 	stub, addr := c.endpoint()
 	err := op(stub)
 	if err == nil || status.Code(err) != codes.Unavailable {

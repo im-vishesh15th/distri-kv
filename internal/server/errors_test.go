@@ -28,6 +28,8 @@ func TestMapRaftErrorSafetyClasses(t *testing.T) {
 		{"not leader wrapped", fmt.Errorf("propose: %w", raft.ErrNotLeader), codes.Aborted},
 		{"leadership lost is ambiguous", raft.ErrLeadershipLost, codes.Unavailable},
 		{"stopped is ambiguous", raft.ErrStopped, codes.Unavailable},
+		{"stale sequence passes through", kv.ErrStaleSequence, codes.InvalidArgument},
+		{"stale sequence wrapped", fmt.Errorf("apply: %w", kv.ErrStaleSequence), codes.InvalidArgument},
 		{"not integer passes through", kv.ErrNotInteger, codes.FailedPrecondition},
 		{"overflow passes through", kv.ErrOverflow, codes.OutOfRange},
 		{"key not found passes through", kv.ErrKeyNotFound, codes.NotFound},

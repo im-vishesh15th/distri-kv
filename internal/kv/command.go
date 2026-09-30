@@ -44,11 +44,24 @@ type Command struct {
 
 	// Delta is the OpIncr amount (signed; negative = decrement).
 	Delta int64
+
+	// ClientID + Sequence identify the logical client request for retry
+	// deduplication (Phase 9). The SM consults them on every apply:
+	// Sequence > last (or first request) applies, == replays the cached
+	// result, < is rejected as superseded (see ErrStaleSequence).
+	//
+	// ClientID == "" opts out (internal/test commands: always applied).
+	// Set them via the constructors' results — the service assigns one
+	// sequence per logical operation, reused across retries.
+	ClientID string
+	Sequence uint64
 }
 
 // Result is the outcome of applying a Command. It is what gets recorded for
-// client responses and, later, in the session table for retry deduplication
-// (Phase 9): identical commands must yield identical Results on all replicas.
+// client responses and cached in the session table for retry deduplication
+// (Phase 9): a retry with the same (client_id, sequence_number) replays this
+// Result instead of re-applying. Identical commands must yield identical
+// Results on all replicas.
 type Result struct {
 	// Applied reports whether the mutation took effect.
 	// OpCAS returning Applied=false with error==nil is a normal
@@ -103,6 +116,14 @@ var (
 	// ErrUnknownOp is returned by Apply for an unrecognized Op — a signal of
 	// log corruption or version skew, never a routine outcome.
 	ErrUnknownOp = errors.New("kv: unknown command op")
+
+	// ErrStaleSequence is returned when a session request arrives with a
+	// sequence_number older than the last one already applied for that
+	// client_id (Phase 9). The request is NOT applied: its result is no
+	// longer retained, and re-applying it would clobber state produced by
+	// newer requests. Only misbehaving or long-abandoned clients can see
+	// it — an SDK's in-flight retries always carry the newest sequence.
+	ErrStaleSequence = errors.New("kv: sequence_number superseded by a newer request from this session")
 )
 
 // parseInt64 parses a canonical base-10 int64 (the form formatInt64 writes).

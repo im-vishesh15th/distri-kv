@@ -21,6 +21,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 )
@@ -110,6 +111,33 @@ func newTestClient(t *testing.T) *client.Client {
 	}
 	t.Cleanup(func() { _ = c.Close() })
 	return c
+}
+
+// newRawStack wires the same single-node stack but returns a RAW stub, for
+// tests that must control client_id/sequence_number by hand (Phase 9:
+// duplicate retries, missing session fields).
+func newRawStack(t *testing.T) (kv.Engine, kv1.KVServiceClient) {
+	t.Helper()
+
+	engine, node := startSingleNode(t)
+
+	lis := bufconn.Listen(1 << 20)
+	grpcServer := grpc.NewServer()
+	kv1.RegisterKVServiceServer(grpcServer, server.NewService(engine, node, node.Status, nil, nil))
+	go func() { _ = grpcServer.Serve(lis) }()
+	t.Cleanup(grpcServer.Stop)
+
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+			return lis.Dial()
+		}),
+	)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return engine, kv1.NewKVServiceClient(conn)
 }
 
 func TestRoundTrip(t *testing.T) {
@@ -237,11 +265,11 @@ func TestEmptyKeyRejected(t *testing.T) {
 	}
 }
 
-// TestSessionFieldsOnWire asserts the Phase-9 fields (client_id,
+// TestSessionFieldsOnWire asserts the session fields (client_id,
 // sequence_number) are populated by the SDK on every mutation: client_id is
-// stable and sequence_number increases monotonically. The server ignores them
-// until Phase 9 — this test pins the wire behavior so Phase 9 adds no client
-// changes.
+// stable and sequence_number increases monotonically — one per logical
+// operation. Since Phase 9 the server REQUIRES them (see
+// TestMutationRequiresSession); this test pins the producer side.
 func TestSessionFieldsOnWire(t *testing.T) {
 	lis := bufconn.Listen(1 << 20)
 
@@ -363,5 +391,100 @@ func TestStatusSingleLeaderSelf(t *testing.T) {
 	}
 	if st.LeaderAddr != "" {
 		t.Fatalf("leader_addr = %q, want empty (standalone has no peer map)", st.LeaderAddr)
+	}
+}
+
+// TestMutationRequiresSession pins the Phase-9 edge contract: every
+// mutation must carry client_id + sequence_number >= 1 — without them the
+// request is refused BEFORE anything is proposed (dedup would have
+// nothing to key on).
+func TestMutationRequiresSession(t *testing.T) {
+	engine, stub := newRawStack(t)
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"put without session", func() error {
+			_, err := stub.Put(ctx, &kv1.PutRequest{Key: "k", Value: []byte("v")})
+			return err
+		}()},
+		{"put without seq", func() error {
+			_, err := stub.Put(ctx, &kv1.PutRequest{Key: "k", Value: []byte("v"), ClientId: "c"})
+			return err
+		}()},
+		{"delete without session", func() error {
+			_, err := stub.Delete(ctx, &kv1.DeleteRequest{Key: "k"})
+			return err
+		}()},
+		{"cas without session", func() error {
+			_, err := stub.CAS(ctx, &kv1.CASRequest{Key: "k", NewValue: []byte("v")})
+			return err
+		}()},
+		{"incr without session", func() error {
+			_, err := stub.Incr(ctx, &kv1.IncrRequest{Key: "k", Delta: 1})
+			return err
+		}()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if code := status.Code(tc.err); code != codes.InvalidArgument {
+				t.Fatalf("code = %v (%v), want InvalidArgument", code, tc.err)
+			}
+		})
+	}
+	if engine.Exists("k") {
+		t.Fatal("refused mutation still reached the engine")
+	}
+}
+
+// TestDuplicateRetryAppliesOnce is the spec §13 example end-to-end through
+// the full stack (wire -> service -> Raft log -> replicated session table):
+// the response is lost, the client retries the SAME (client_id,
+// sequence_number) — the INCR applies once, both responses agree, and the
+// recorded outcome is replayed for the original sequence.
+func TestDuplicateRetryAppliesOnce(t *testing.T) {
+	engine, stub := newRawStack(t)
+	ctx := context.Background()
+
+	inc := func(seq uint64) (*kv1.IncrResponse, error) {
+		return stub.Incr(ctx, &kv1.IncrRequest{
+			Key: "counter", Delta: 1, ClientId: "client-A", SequenceNumber: seq,
+		})
+	}
+
+	first, err := inc(42)
+	if err != nil {
+		t.Fatalf("original: %v", err)
+	}
+	if first.Value != 1 {
+		t.Fatalf("original = %d, want 1", first.Value)
+	}
+
+	// The retry: identical session fields, as the SDK resends after a lost
+	// response. It must replay, not re-apply.
+	retry, err := inc(42)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if retry.Value != 1 {
+		t.Fatalf("retry = %d, want 1 (duplicate response differs)", retry.Value)
+	}
+	if v, gerr := engine.Get("counter"); gerr != nil || string(v) != "1" {
+		t.Fatalf("engine = %q (%v), want 1 — duplicate applied twice", v, gerr)
+	}
+
+	// A new sequence applies normally...
+	next, err := inc(43)
+	if err != nil || next.Value != 2 {
+		t.Fatalf("seq 43 = (%v, %v), want (2, nil)", next, err)
+	}
+	// ...and a superseded sequence is refused without applying.
+	if _, err := inc(41); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("stale seq code = %v (%v), want InvalidArgument", status.Code(err), err)
+	}
+	if v, _ := engine.Get("counter"); string(v) != "2" {
+		t.Fatalf("engine = %q, want 2 (stale write applied)", v)
 	}
 }

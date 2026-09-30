@@ -162,7 +162,8 @@ the state machine's result for that entry:
   redirects via GetStatus and retries, safe because nothing was appended);
 - leadership lost while in flight → `ErrLeadershipLost`, *fast* — the entry's
   fate is unknowable from the old leader (it may still commit under the new
-  one), which is exactly why blind client retries wait for Phase 9 dedup;
+  one); the SDK's retry reuses the same session sequence, so Phase 9's
+  dedup keeps the outcome at-most-once either way;
 - empty payload → `ErrEmptyProposal` (empty is reserved for internal no-ops);
 - cancelling `ctx` does **not** retract an appended entry;
 - a state-machine domain error (e.g. `ErrNotInteger`) is the entry's
@@ -208,10 +209,20 @@ returns `kv.Result`, which travels back through `Propose` to the gRPC
 service. The service's mutations go through this path; reads (until
 Phase 11) hit the engine directly.
 
-## What is deliberately not here yet (Phase 9+)
+Since Phase 9, `kv.SM` also owns the **replicated session table** (spec
+§13): before touching the engine it checks the logged command's
+`client_id`/`sequence_number` against the last sequence applied for that
+client — a duplicate (`== last`) replays the recorded response without
+re-applying, a superseded sequence (`< last`) is refused
+(`ErrStaleSequence`), anything newer applies. Because the decision comes
+from the entry bytes themselves, in log order, every replica makes it
+identically — dedup is ordinary deterministic SM state, rebuilt by log
+replay on restart and owed a place in future snapshots (Phase 12).
+
+## What is deliberately not here yet (Phase 10+)
 
 Conflict-term backoff hints (deferred to measurement), snapshots/
-`InstallSnapshot`, dedup, ReadIndex.
+`InstallSnapshot` (which must serialize the session table too), ReadIndex.
 
 ## How this phase is tested
 

@@ -1,17 +1,18 @@
 // DistriKV public KV API.
 //
-// Status: client RPCs (Phase 2) + the replicated Command encoding (Phase 7).
-// Fields client_id/sequence_number ride every mutating request from day one
-// so the wire format never breaks when client-session deduplication lands in
-// Phase 9 (the server ignores them until then; the Command message gains
-// them then too).
+// Status: client RPCs (Phase 2), replicated Command encoding (Phase 7),
+// leader routing (Phase 8), client sessions (Phase 9). Every mutating
+// request carries client_id/sequence_number; since Phase 9 the server
+// REQUIRES them (InvalidArgument otherwise) and replicates them inside the
+// Command so the state machine can suppress duplicate application of a
+// retried request (see docs/consistency.md S1 for the precise guarantee).
 //
 // Design notes:
 //   - GET/EXISTS are reads: they never enter the Raft log. Mutating RPCs are
 //     the future log entries.
 //   - CAS precondition failure is a NORMAL OUTCOME (applied=false), not a
-//     gRPC error: all replicas must agree on it and Phase 9 will cache it in
-//     the session table like any other response.
+//     gRPC error: all replicas must agree on it, and the session table
+//     caches it like any other response so a retry replays it.
 //   - proto3 bytes fields cannot distinguish "absent" from "empty", so CAS
 //     carries an explicit expected_exists flag instead of relying on nil.
 

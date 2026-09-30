@@ -1,17 +1,18 @@
 // DistriKV public KV API.
 //
-// Status: client RPCs (Phase 2) + the replicated Command encoding (Phase 7).
-// Fields client_id/sequence_number ride every mutating request from day one
-// so the wire format never breaks when client-session deduplication lands in
-// Phase 9 (the server ignores them until then; the Command message gains
-// them then too).
+// Status: client RPCs (Phase 2), replicated Command encoding (Phase 7),
+// leader routing (Phase 8), client sessions (Phase 9). Every mutating
+// request carries client_id/sequence_number; since Phase 9 the server
+// REQUIRES them (InvalidArgument otherwise) and replicates them inside the
+// Command so the state machine can suppress duplicate application of a
+// retried request (see docs/consistency.md S1 for the precise guarantee).
 //
 // Design notes:
 //   - GET/EXISTS are reads: they never enter the Raft log. Mutating RPCs are
 //     the future log entries.
 //   - CAS precondition failure is a NORMAL OUTCOME (applied=false), not a
-//     gRPC error: all replicas must agree on it and Phase 9 will cache it in
-//     the session table like any other response.
+//     gRPC error: all replicas must agree on it, and the session table
+//     caches it like any other response so a retry replays it.
 //   - proto3 bytes fields cannot distinguish "absent" from "empty", so CAS
 //     carries an explicit expected_exists flag instead of relying on nil.
 
@@ -187,7 +188,9 @@ type PutRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Key   string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
 	Value []byte                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
-	// Reserved for Phase 9 client sessions (ignored by the server until then).
+	// Client session (required since Phase 9): stable per SDK connection,
+	// sequence_number >= 1, one number per logical operation (retries of
+	// that operation reuse it).
 	ClientId       string `protobuf:"bytes,3,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
 	SequenceNumber uint64 `protobuf:"varint,4,opt,name=sequence_number,json=sequenceNumber,proto3" json:"sequence_number,omitempty"`
 	unknownFields  protoimpl.UnknownFields
@@ -721,9 +724,11 @@ func (x *IncrResponse) GetValue() int64 {
 // Command is the unit of replication: one deterministic mutation riding in
 // one Raft log entry.
 //
-// client_id/sequence_number join this message in Phase 9 — deduplication
-// must read them from the LOGGED command, since the session table itself is
-// replicated state applied from entries.
+// client_id/sequence_number ride in the LOGGED command (Phase 9): the
+// session table is replicated state applied from entries, so dedup must
+// read its keys from the same entries — an entry with session fields
+// suppressed as a duplicate is still applied (as a no-op) on every replica
+// identically.
 type Command struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Op    CommandOp              `protobuf:"varint,1,opt,name=op,proto3,enum=distrikv.v1.CommandOp" json:"op,omitempty"`
@@ -736,9 +741,13 @@ type Command struct {
 	ExpectedExists bool   `protobuf:"varint,4,opt,name=expected_exists,json=expectedExists,proto3" json:"expected_exists,omitempty"`
 	ExpectedValue  []byte `protobuf:"bytes,5,opt,name=expected_value,json=expectedValue,proto3" json:"expected_value,omitempty"`
 	// INCR signed delta.
-	Delta         int64 `protobuf:"varint,6,opt,name=delta,proto3" json:"delta,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Delta int64 `protobuf:"varint,6,opt,name=delta,proto3" json:"delta,omitempty"`
+	// Client session identity (Phase 9). client_id == "" marks an internal /
+	// test command that opts out of deduplication (always applied).
+	ClientId       string `protobuf:"bytes,7,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	SequenceNumber uint64 `protobuf:"varint,8,opt,name=sequence_number,json=sequenceNumber,proto3" json:"sequence_number,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Command) Reset() {
@@ -809,6 +818,20 @@ func (x *Command) GetExpectedValue() []byte {
 func (x *Command) GetDelta() int64 {
 	if x != nil {
 		return x.Delta
+	}
+	return 0
+}
+
+func (x *Command) GetClientId() string {
+	if x != nil {
+		return x.ClientId
+	}
+	return ""
+}
+
+func (x *Command) GetSequenceNumber() uint64 {
+	if x != nil {
+		return x.SequenceNumber
 	}
 	return 0
 }
@@ -968,14 +991,16 @@ const file_proto_kv_proto_rawDesc = "" +
 	"\tclient_id\x18\x03 \x01(\tR\bclientId\x12'\n" +
 	"\x0fsequence_number\x18\x04 \x01(\x04R\x0esequenceNumber\"$\n" +
 	"\fIncrResponse\x12\x14\n" +
-	"\x05value\x18\x01 \x01(\x03R\x05value\"\xbf\x01\n" +
+	"\x05value\x18\x01 \x01(\x03R\x05value\"\x85\x02\n" +
 	"\aCommand\x12&\n" +
 	"\x02op\x18\x01 \x01(\x0e2\x16.distrikv.v1.CommandOpR\x02op\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x03 \x01(\fR\x05value\x12'\n" +
 	"\x0fexpected_exists\x18\x04 \x01(\bR\x0eexpectedExists\x12%\n" +
 	"\x0eexpected_value\x18\x05 \x01(\fR\rexpectedValue\x12\x14\n" +
-	"\x05delta\x18\x06 \x01(\x03R\x05delta\"\x12\n" +
+	"\x05delta\x18\x06 \x01(\x03R\x05delta\x12\x1b\n" +
+	"\tclient_id\x18\a \x01(\tR\bclientId\x12'\n" +
+	"\x0fsequence_number\x18\b \x01(\x04R\x0esequenceNumber\"\x12\n" +
 	"\x10GetStatusRequest\"~\n" +
 	"\x11GetStatusResponse\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x12\n" +

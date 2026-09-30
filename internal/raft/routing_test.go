@@ -8,7 +8,6 @@ package raft_test
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -91,9 +90,10 @@ func TestClientRoutesWritesToLeader(t *testing.T) {
 		return true
 	})
 
-	// Kill the leader: the client's cached endpoint dies with it. The first
-	// write afterwards is the AMBIGUOUS class — it must surface (no
-	// auto-retry pre-Phase 9) while routing is repaired for the next call.
+	// Kill the leader: the client's cached endpoint dies with it. Phase 9
+	// turns Phase 8's surfaced Unavailable into a RETRIED write — the SDK
+	// re-sends the same session sequence, so the outcome is at-most-once
+	// (S1) whether or not the original attempt survived the old leader.
 	leader.kill()
 	survivors := make([]*liveNode, 0, 2)
 	for _, n := range nodes {
@@ -103,29 +103,29 @@ func TestClientRoutesWritesToLeader(t *testing.T) {
 	}
 	waitForLeadership(t, 10*time.Second, "new leader after kill", survivors)
 
-	perr := c.Put(ctx, "after", []byte("kill"))
-	if perr == nil {
-		t.Fatal("write to the dead leader endpoint unexpectedly succeeded")
+	// One call — the SDK rides the failover out on its own (bounded
+	// transient retries within ctx), and the INCR applies EXACTLY once.
+	v, err := c.Incr(ctx, "failover-counter", 1)
+	if err != nil {
+		t.Fatalf("post-kill write should ride out failover: %v", err)
 	}
-	if code := status.Code(perr); code != codes.Unavailable {
-		t.Fatalf("post-kill write code = %v (%v), want Unavailable (ambiguous class)", code, perr)
+	if v != 1 {
+		t.Fatalf("failover incr = %d, want 1 (retry double-applied)", v)
 	}
-
-	// Every failure while the cluster settles is ErrNotLeader (Aborted ->
-	// nothing applied), so re-attempting is safe by construction; routing
-	// has been repaired to a live endpoint and follows the new leader.
-	waitFor(t, 10*time.Second, "routed write after failover", func() bool {
-		err := c.Put(ctx, "after", []byte("kill"))
-		if err == nil {
-			return true
+	// Every surviving replica converges on exactly one application: the
+	// session table is replicated SM state, identical on all nodes. (The
+	// killed leader is excluded — its engine is frozen at the moment of
+	// death, as it must be.)
+	waitFor(t, 10*time.Second, "exactly-once replication", func() bool {
+		for _, n := range survivors {
+			got, gerr := n.engine.Get("failover-counter")
+			if gerr != nil || string(got) != "1" {
+				return false
+			}
 		}
-		if errors.Is(err, client.ErrNotLeader) {
-			return false // election/heartbeat settling — safe to re-attempt
-		}
-		t.Fatalf("post-failover write: %v", err)
-		return false
+		return true
 	})
-	if v, err := c.Get(ctx, "after"); err != nil || string(v) != "kill" {
-		t.Fatalf("read after failover: (%q, %v)", v, err)
+	if v, err := c.Get(ctx, "failover-counter"); err != nil || string(v) != "1" {
+		t.Fatalf("read after failover: (%q, %v), want 1", v, err)
 	}
 }

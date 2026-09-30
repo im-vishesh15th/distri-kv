@@ -1,12 +1,15 @@
 package kv
 
-// Command wire encoding (Phase 7): the bytes that ride in Raft log entries.
+// Command wire encoding (Phase 7, session fields since Phase 9): the bytes
+// that ride in Raft log entries.
 //
 // One Command per entry, protobuf-encoded (proto/kv.proto). Determinism is
 // the contract: every replica decodes identical bytes and applies them in
 // identical order, so Encode/Decode must be lossless for every legal
 // Command — the CAS presence flag included (proto3 bytes cannot tell nil
-// from empty, so the encoding carries the distinction explicitly).
+// from empty, so the encoding carries the distinction explicitly) and the
+// client session fields included (deduplication reads them from the logged
+// command itself).
 
 import (
 	"fmt"
@@ -21,10 +24,12 @@ import (
 // outcome: commands are built via the constructors above.
 func EncodeCommand(cmd Command) ([]byte, error) {
 	m := &kv1.Command{
-		Op:    kv1.CommandOp(cmd.Op),
-		Key:   cmd.Key,
-		Value: cmd.Value,
-		Delta: cmd.Delta,
+		Op:             kv1.CommandOp(cmd.Op),
+		Key:            cmd.Key,
+		Value:          cmd.Value,
+		Delta:          cmd.Delta,
+		ClientId:       cmd.ClientID,
+		SequenceNumber: cmd.Sequence,
 	}
 	// Expected nil = "key must be absent"; non-nil (even empty) = "must be
 	// present and byte-equal". Presence is explicit on the wire.
@@ -68,10 +73,12 @@ func DecodeCommand(payload []byte) (Command, error) {
 		return Command{}, fmt.Errorf("kv: decode command: empty key")
 	}
 	cmd := Command{
-		Op:    op,
-		Key:   m.Key,
-		Value: m.Value,
-		Delta: m.Delta,
+		Op:       op,
+		Key:      m.Key,
+		Value:    m.Value,
+		Delta:    m.Delta,
+		ClientID: m.ClientId,
+		Sequence: m.SequenceNumber,
 	}
 	if m.ExpectedExists {
 		// Empty-but-present must stay non-nil (see Command.Expected).

@@ -12,13 +12,18 @@
 //	kv.ErrNotInteger           -> codes.FailedPrecondition -> ErrNotInteger
 //	kv.ErrOverflow             -> codes.OutOfRange       -> ErrOverflow
 //	kv.ErrUnknownOp            -> codes.Internal         -> passes through
+//	kv.ErrStaleSequence        -> codes.InvalidArgument  -> raw message
+//	  (superseded session request: never applied, no sentinel — only
+//	   misbehaving or long-abandoned clients can see it)
 //	empty key                  -> codes.InvalidArgument
+//	missing session fields     -> codes.InvalidArgument
+//	  (Phase 9: mutations require client_id + sequence_number >= 1)
 //	raft.ErrNotLeader          -> codes.Aborted          -> ErrNotLeader
 //	  (provably rejected before append: safe for the SDK to redirect and retry)
 //	raft.ErrLeadershipLost /
-//	raft.ErrStopped            -> codes.Unavailable      -> ambiguous
-//	  (entry may still commit elsewhere: the SDK must NOT auto-retry
-//	   mutations until Phase 9's dedup makes retries safe)
+//	raft.ErrStopped            -> codes.Unavailable      -> retried (Phase 9)
+//	  (outcome ambiguous, but the retry reuses the same session sequence,
+//	   so the session table guarantees at-most-once application)
 //	context cancellation       -> passes through untouched
 //
 // CAS precondition failure is NOT an error: it returns applied=false.
@@ -103,12 +108,14 @@ func (s *Service) Get(ctx context.Context, req *kv1.GetRequest) (*kv1.GetRespons
 }
 
 // Put stores value at key (upsert), replicated through Raft.
-// client_id/sequence_number are accepted but ignored until Phase 9.
 func (s *Service) Put(ctx context.Context, req *kv1.PutRequest) (*kv1.PutResponse, error) {
 	if err := validateKey(req.Key); err != nil {
 		return nil, err
 	}
-	if err := s.propose(ctx, kv.Set(req.Key, req.Value)); err != nil {
+	if err := validateSession(req.ClientId, req.SequenceNumber); err != nil {
+		return nil, err
+	}
+	if err := s.propose(ctx, kv.Set(req.Key, req.Value), req.ClientId, req.SequenceNumber); err != nil {
 		return nil, err
 	}
 	s.logOp(ctx, "put", req.Key, req.ClientId, req.SequenceNumber)
@@ -120,7 +127,10 @@ func (s *Service) Delete(ctx context.Context, req *kv1.DeleteRequest) (*kv1.Dele
 	if err := validateKey(req.Key); err != nil {
 		return nil, err
 	}
-	if err := s.propose(ctx, kv.Delete(req.Key)); err != nil {
+	if err := validateSession(req.ClientId, req.SequenceNumber); err != nil {
+		return nil, err
+	}
+	if err := s.propose(ctx, kv.Delete(req.Key), req.ClientId, req.SequenceNumber); err != nil {
 		return nil, err
 	}
 	s.logOp(ctx, "delete", req.Key, req.ClientId, req.SequenceNumber)
@@ -142,6 +152,9 @@ func (s *Service) CAS(ctx context.Context, req *kv1.CASRequest) (*kv1.CASRespons
 	if err := validateKey(req.Key); err != nil {
 		return nil, err
 	}
+	if err := validateSession(req.ClientId, req.SequenceNumber); err != nil {
+		return nil, err
+	}
 	// Reconstruct the kv.Command precondition: proto3 bytes cannot express
 	// nil, so expected_exists carries presence and an empty-but-present
 	// expected value becomes a non-nil empty slice (codec keeps it intact).
@@ -152,7 +165,8 @@ func (s *Service) CAS(ctx context.Context, req *kv1.CASRequest) (*kv1.CASRespons
 			expected = []byte{}
 		}
 	}
-	res, rerr := s.proposeResult(ctx, kv.CAS(req.Key, expected, req.NewValue))
+	res, rerr := s.proposeResult(ctx, kv.CAS(req.Key, expected, req.NewValue),
+		req.ClientId, req.SequenceNumber)
 	if rerr != nil {
 		return nil, rerr
 	}
@@ -164,7 +178,11 @@ func (s *Service) Incr(ctx context.Context, req *kv1.IncrRequest) (*kv1.IncrResp
 	if err := validateKey(req.Key); err != nil {
 		return nil, err
 	}
-	res, rerr := s.proposeResult(ctx, kv.IncrBy(req.Key, req.Delta))
+	if err := validateSession(req.ClientId, req.SequenceNumber); err != nil {
+		return nil, err
+	}
+	res, rerr := s.proposeResult(ctx, kv.IncrBy(req.Key, req.Delta),
+		req.ClientId, req.SequenceNumber)
 	if rerr != nil {
 		return nil, rerr
 	}
@@ -176,16 +194,21 @@ func (s *Service) Incr(ctx context.Context, req *kv1.IncrRequest) (*kv1.IncrResp
 	return &kv1.IncrResponse{Value: n}, nil
 }
 
-// propose encodes cmd, replicates it, and maps any failure to a status.
-// Used by mutations whose engine result the response ignores.
-func (s *Service) propose(ctx context.Context, cmd kv.Command) error {
-	_, rerr := s.proposeResult(ctx, cmd)
+// propose encodes cmd (stamped with the client session), replicates it,
+// and maps any failure to a status. Used by mutations whose engine result
+// the response ignores.
+func (s *Service) propose(ctx context.Context, cmd kv.Command, clientID string, seq uint64) error {
+	_, rerr := s.proposeResult(ctx, cmd, clientID, seq)
 	return rerr
 }
 
-// proposeResult is the write path: encode -> Propose (replicate + apply)
-// -> extract the kv.Result the state machine produced for this entry.
-func (s *Service) proposeResult(ctx context.Context, cmd kv.Command) (kv.Result, error) {
+// proposeResult is the write path: stamp session -> encode -> Propose
+// (replicate + apply) -> extract the kv.Result the state machine produced
+// for this entry. The session fields ride the LOGGED command: dedup is
+// decided at apply time by the replicated session table, identical on
+// every replica.
+func (s *Service) proposeResult(ctx context.Context, cmd kv.Command, clientID string, seq uint64) (kv.Result, error) {
+	cmd.ClientID, cmd.Sequence = clientID, seq
 	payload, err := kv.EncodeCommand(cmd)
 	if err != nil {
 		// Constructors + key validation make this unreachable; if it
@@ -211,6 +234,17 @@ func (s *Service) proposeResult(ctx context.Context, cmd kv.Command) (kv.Result,
 func validateKey(key string) error {
 	if key == "" {
 		return statusInvalidKey()
+	}
+	return nil
+}
+
+// validateSession enforces the Phase-9 session contract at the edge: every
+// mutation must carry a client_id and sequence_number >= 1, or retry
+// deduplication has nothing to key on. The SDK always sends both; the
+// check exists so raw stubs cannot silently bypass dedup.
+func validateSession(clientID string, seq uint64) error {
+	if clientID == "" || seq == 0 {
+		return statusInvalidSession()
 	}
 	return nil
 }

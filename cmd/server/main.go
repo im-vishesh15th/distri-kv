@@ -4,8 +4,11 @@
 // KV state machine (kv.NewSM), mutations proposed by the gRPC service are
 // applied in log order on every replica, and GetStatus serves leader
 // routing (this node's status + the -peers addresses as the hint map).
-// Leader election over the gRPC transport, persistent term/vote in the
-// Raft log, in-memory engine, static cluster membership via -peers.
+// Phase 9: mutations require a client session (client_id +
+// sequence_number), replicated inside the command so the SM's session
+// table deduplicates retries. Leader election over the gRPC transport,
+// persistent term/vote in the Raft log, in-memory engine, static cluster
+// membership via -peers.
 package main
 
 import (

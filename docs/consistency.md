@@ -1,6 +1,6 @@
 # Consistency — DistriKV
 
-> Status: through Phase 6 (log replication). Implementations and their proofs
+> Status: through Phase 9 (client sessions). Implementations and their proofs
 > are added phase by phase; every claim below must eventually name the test that
 > demonstrates it. Vague phrases like "strong consistency" are forbidden in
 > this project unless immediately defined.
@@ -32,16 +32,39 @@
 | W2 | Writes commit only with majority agreement | Raft majority commit rule | `TestCommitRequiresMajority`; partition fault tests (Phase 14–15) | 6 |
 | W3 | No acknowledged write is lost across leader change | Raft safety + persisted hard state | `TestReplicationSurvivesLeaderKill` | 6 |
 | R1 | Reads are linearizable | ReadIndex: confirm leadership in current term → wait for `lastApplied ≥ readIndex` → serve | stale-follower & leader-change read tests | 11 (planned) |
-| S1 | A retried mutation applies at most once | replicated session table `(client_id, seq) → cached response` | lost-response retry tests | 9 (planned) |
-| S2 | Session/dedup state survives restart and snapshots | session table is part of state-machine snapshot | restart & snapshot tests | 9/12 (planned) |
+| S1 | A retried mutation applies at most once, and its original response is replayed | replicated session table in the SM: `(client_id → last seq, response)` decided from the logged command at apply time | `TestDedupReplaysCachedResult`, `TestDedupRejectsSupersededSequence`, `TestDedupReplaysCachedError`, `TestDedupReplaysCachedCASFailure`; `TestDuplicateRetryAppliesOnce` (full stack); failover INCR in `TestClientRoutesWritesToLeader` | 9 |
+| S2 | Session/dedup state survives replication and restart | session table is deterministic SM state: replicated via the log, rebuilt by replay (`TestSessionStateSurvivesReplay`); snapshot serialization still owed | `TestSessionStateSurvivesReplay`; snapshot tests 12 (planned) | 9/12 (planned) |
 | D1 | All replicas converge to identical state | deterministic in-order apply | `TestStateMachinesConverge` (byte-identical state + restart replay), `TestFollowerAppliesOnlyCommitted` | 7 |
 | P1 | Committed state survives the defined crash model | persistent log recovery (torn tail truncated, corruption loud) | byte-level truncation fuzz | 3 (planned) |
 
-**On "exactly once":** DistriKV provides *effectively-once application of
-mutating operations within a client session* — duplicates are detected and the
-original response is replayed. The precise bounds (session-table growth, key
-scoping, what happens if a client loses its `client_id`) are documented when
-Phase 9 lands. We never write "exactly once" without those bounds.
+**On "exactly once":** DistriKV provides *at-most-once application of
+mutating operations within a client session, with response replay*. The
+precise contract (S1):
+
+- **A session is one SDK `Client`**: a random `client_id` plus one
+  `sequence_number` per logical operation — retries of that operation
+  reuse its number, and the SDK serializes its mutations so a session's
+  sequences reach the server strictly in order.
+- **The replicated session table** records `client_id → (last sequence,
+  response)` at apply time, from the logged command itself:
+  - `sequence == last` → duplicate: the recorded response (including
+    domain errors and CAS `applied=false`) is replayed; the engine is not
+    touched.
+  - `sequence < last` → superseded: refused with `ErrStaleSequence`,
+    never applied (re-applying would rewind state written by newer
+    requests).
+  - `sequence > last` → applied (gaps are legal: an abandoned attempt
+    consumes its sequence number).
+- **Bounds:** dedup is scoped to `client_id` — a client that loses its
+  identity starts a fresh session, and retries across that boundary are
+  not recognized. A request the client gives up on without retrying is
+  lost; dedup cannot resurrect it. Session entries are kept per client
+  seen (growth ∝ distinct clients) until snapshot GC bounds them in
+  Phase 12.
+- **Why the SDK may auto-retry `Unavailable` mutations (Phase 9):** the
+  retry carries the same sequence, so a committed original and its retry
+  can never both apply — but an *unretried* lost request is simply lost,
+  which is why this is never called "exactly once".
 
 ## Behavior under quorum loss
 

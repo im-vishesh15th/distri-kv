@@ -28,6 +28,10 @@ func TestCommandCodecRoundTrip(t *testing.T) {
 		{"cas expected value", CAS("k", []byte("old"), []byte("new"))},
 		{"incr positive", IncrBy("n", 7)},
 		{"incr negative", IncrBy("n", -7)},
+		// Phase 9: session identity rides the LOGGED command — dedup reads
+		// it from the entry itself.
+		{"set with session", sessioned(Set("k", []byte("v")), "client-A", 42)},
+		{"incr with session", sessioned(IncrBy("n", 1), "client-B", 1)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -41,6 +45,10 @@ func TestCommandCodecRoundTrip(t *testing.T) {
 			}
 			if got.Op != tc.cmd.Op || got.Key != tc.cmd.Key || got.Delta != tc.cmd.Delta {
 				t.Fatalf("decoded %+v, want %+v", got, tc.cmd)
+			}
+			if got.ClientID != tc.cmd.ClientID || got.Sequence != tc.cmd.Sequence {
+				t.Fatalf("session = (%q, %d), want (%q, %d)",
+					got.ClientID, got.Sequence, tc.cmd.ClientID, tc.cmd.Sequence)
 			}
 			if !bytes.Equal(got.Value, tc.cmd.Value) && !(len(got.Value) == 0 && len(tc.cmd.Value) == 0) {
 				t.Fatalf("value = %q, want %q", got.Value, tc.cmd.Value)

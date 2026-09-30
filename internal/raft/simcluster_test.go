@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,11 @@ import (
 // versus the integration harness.
 
 type simNode struct {
+	// mu guards the fields below across kill/restart: restartSimNode
+	// replaces the raft loop, log, and engine while client goroutines may
+	// be reading them. Readers take a view() snapshot (never hold the
+	// lock across a blocking call like Status()).
+	mu     sync.RWMutex
 	id     transport.NodeID
 	rnode  *raft.Node
 	rlog   *raftlog.Log
@@ -33,11 +39,24 @@ type simNode struct {
 	dead   bool
 }
 
-// bootSimNode builds one node — log, engine, sim transport, Raft core —
-// registers it with the shared network, and starts its loop + ticker.
-// Shared by startSimCluster and restartSimNode (a reboot is "new process,
-// same directory").
-func bootSimNode(t *testing.T, network *sim.Network, id transport.NodeID, dir string, ids []transport.NodeID) *simNode {
+// view returns a snapshot of the mutable harness fields.
+func (sn *simNode) view() (dead bool, rnode *raft.Node, rlog *raftlog.Log, engine kv.Engine, cancel context.CancelFunc, runErr chan error) {
+	sn.mu.RLock()
+	defer sn.mu.RUnlock()
+	return sn.dead, sn.rnode, sn.rlog, sn.engine, sn.cancel, sn.runErr
+}
+
+// markDead sets the dead flag (killSim, disk-failure halt).
+func (sn *simNode) markDead() {
+	sn.mu.Lock()
+	sn.dead = true
+	sn.mu.Unlock()
+}
+
+// bootComponents builds the durable + raft pieces for one node: open the
+// log, build the engine + Raft core, register with the network, start the
+// loop and ticker. Shared by bootSimNode and restartSimNode.
+func bootComponents(t *testing.T, network *sim.Network, id transport.NodeID, dir string, ids []transport.NodeID) (*raft.Node, *raftlog.Log, kv.Engine, context.CancelFunc, chan error) {
 	t.Helper()
 
 	rlog, _, err := raftlog.Open(dir)
@@ -75,6 +94,16 @@ func bootSimNode(t *testing.T, network *sim.Network, id transport.NodeID, dir st
 	}()
 	raft.StartTicker(ctx, rnode, tickPeriod)
 
+	return rnode, rlog, engine, cancel, runErr
+}
+
+// bootSimNode builds one node — log, engine, sim transport, Raft core —
+// registers it with the shared network, and starts its loop + ticker.
+// Shared by startSimCluster and restartSimNode (a reboot is "new process,
+// same directory").
+func bootSimNode(t *testing.T, network *sim.Network, id transport.NodeID, dir string, ids []transport.NodeID) *simNode {
+	t.Helper()
+	rnode, rlog, engine, cancel, runErr := bootComponents(t, network, id, dir, ids)
 	return &simNode{
 		id: id, rnode: rnode, rlog: rlog, engine: engine,
 		dir: dir, ids: ids, cancel: cancel, runErr: runErr,
@@ -88,7 +117,7 @@ func (sn *simNode) killSim(t *testing.T, network *sim.Network) {
 	if sn.dead {
 		return
 	}
-	sn.dead = true
+	sn.markDead()
 	network.SetHandler(sn.id, nil)
 	sn.cancel()
 	select {
@@ -103,11 +132,15 @@ func (sn *simNode) killSim(t *testing.T, network *sim.Network) {
 
 // restartSimNode reboots the same directory as a fresh process would: a
 // brand-new empty engine (recovery = replay of the recovered log), a new
-// Raft core, the same sim identity re-registered.
+// Raft core, the same sim identity re-registered. The struct fields are
+// swapped under the lock so concurrent readers never see a torn state.
 func restartSimNode(t *testing.T, network *sim.Network, sn *simNode) {
 	t.Helper()
-	fresh := bootSimNode(t, network, sn.id, sn.dir, sn.ids)
-	*sn = *fresh
+	rnode, rlog, engine, cancel, runErr := bootComponents(t, network, sn.id, sn.dir, sn.ids)
+	sn.mu.Lock()
+	sn.rnode, sn.rlog, sn.engine = rnode, rlog, engine
+	sn.cancel, sn.runErr, sn.dead = cancel, runErr, false
+	sn.mu.Unlock()
 }
 
 // startSimCluster boots n nodes whose RPCs all cross one shared
@@ -146,17 +179,18 @@ func startSimClusterFaults(t *testing.T, n int, seed int64, faults sim.Faults) (
 // shutdown stops the node's loop, waits for Run to exit, and closes the
 // log. Idempotent (teardown may overlap a failed test's early return).
 func (sn *simNode) shutdown(t *testing.T) {
-	if sn.dead {
+	dead, _, rlog, _, cancel, runErr := sn.view()
+	if dead {
 		return
 	}
-	sn.dead = true
-	sn.cancel()
+	sn.markDead()
+	cancel()
 	select {
-	case <-sn.runErr:
+	case <-runErr:
 	case <-time.After(2 * time.Second):
 		t.Errorf("%s: sim raft Run did not exit", sn.id)
 	}
-	if err := sn.rlog.Close(); err != nil {
+	if err := rlog.Close(); err != nil {
 		t.Errorf("%s: close log: %v", sn.id, err)
 	}
 }
@@ -164,10 +198,11 @@ func (sn *simNode) shutdown(t *testing.T) {
 func simLeadersOf(nodes []*simNode) []*simNode {
 	var out []*simNode
 	for _, n := range nodes {
-		if n.dead {
+		dead, rnode, _, _, _, _ := n.view()
+		if dead {
 			continue
 		}
-		if n.rnode.Status().Role == raft.RoleLeader {
+		if rnode.Status().Role == raft.RoleLeader {
 			out = append(out, n)
 		}
 	}
@@ -187,10 +222,11 @@ func waitForSimLeadership(t *testing.T, d time.Duration, what string, nodes []*s
 		}
 		lead := ls[0]
 		for _, n := range nodes {
-			if n.dead || n == lead {
+			dead, rnode, _, _, _, _ := n.view()
+			if dead || n == lead {
 				continue
 			}
-			if s := n.rnode.Status(); s.LeaderID != lead.id {
+			if s := rnode.Status(); s.LeaderID != lead.id {
 				return false
 			}
 		}

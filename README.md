@@ -43,7 +43,7 @@ make proto                           # regenerate gen/ from proto/kv.proto
 | **M2 Durable consensus** | 3–7 | Persistent log, election, replication, state machine | ✅ done |
 | **M3 Hardening** | 8–11 | Leader routing, dedup, atomics, linearizable reads | ✅ done |
 | **M4 Lifecycle** | 12–13 | Snapshots, log compaction, InstallSnapshot | ✅ done |
-| **M5 Proof** | 14–16 | Simulated network, fault tests, linearizability checking | ✅ Phases 14–15 done (Phase 16 next) |
+| **M5 Proof** | 14–16 | Simulated network, fault tests, linearizability checking | ✅ done — **Tier 1 complete** |
 | **M6 Scale** | 17–21 | Multi-Raft, fixed-slot sharding, cluster router | ⬜ |
 | **M7 Measure** | 22–24 | Consistency spec, benchmarks, pprof | ⬜ |
 | **M8 Product** | P1–P5 | API keys, tenancy, quotas, gateway, onboarding, deploy | ⬜ |
@@ -62,6 +62,7 @@ half-finished extra.
 - [Concurrency](docs/concurrency.md) — three levels (clients / event loop / shards) and who owns what
 - [Simulation](docs/simulation.md) — deterministic in-process network: seeded faults, clock modes, reproducibility boundary
 - [Faults](docs/faults.md) — spec §19 scenarios, seeded chaos, disk failure, and the no-pre-vote limitation
+- [Linearizability](docs/linearizability.md) — operation histories, the checker, and the end-to-end proof
 
 ## Non-goals
 

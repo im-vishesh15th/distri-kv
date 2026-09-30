@@ -28,6 +28,7 @@ import (
 
 	"distrikv/internal/kv"
 	"distrikv/internal/raft"
+	"distrikv/internal/raftlog"
 	"distrikv/internal/transport"
 	"distrikv/internal/transport/sim"
 )
@@ -54,10 +55,11 @@ func requireConverged(t *testing.T, nodes []*simNode, want map[string]string) {
 
 	waitFor(t, 10*time.Second, fmt.Sprintf("live replicas reach applied=%d", target), func() bool {
 		for _, n := range nodes {
-			if n.dead {
+			dead, rnode, _, _, _, _ := n.view()
+			if dead {
 				continue
 			}
-			s := n.rnode.Status()
+			s := rnode.Status()
 			if s.LastApplied < target || s.LastLogIndex < target {
 				return false
 			}
@@ -67,22 +69,26 @@ func requireConverged(t *testing.T, nodes []*simNode, want map[string]string) {
 
 	// Committed logs byte-identical (term + payload) for 1..target.
 	var ref *simNode
+	var refRlog *raftlog.Log
 	for _, n := range nodes {
-		if !n.dead {
+		dead, _, rlog, _, _, _ := n.view()
+		if !dead {
 			ref = n
+			refRlog = rlog
 			break
 		}
 	}
 	for i := uint64(1); i <= target; i++ {
-		re, rerr := ref.rlog.Get(i)
+		re, rerr := refRlog.Get(i)
 		if rerr != nil {
 			t.Fatalf("%s: log get %d: %v", ref.id, i, rerr)
 		}
 		for _, n := range nodes {
-			if n.dead || n == ref {
+			dead, _, rlog, _, _, _ := n.view()
+			if dead || n == ref {
 				continue
 			}
-			ne, nerr := n.rlog.Get(i)
+			ne, nerr := rlog.Get(i)
 			if nerr != nil || ne.Term != re.Term || string(ne.Payload) != string(re.Payload) {
 				t.Fatalf("log divergence at %d: %s=%+v(%v) %s=%+v(%v)",
 					i, ref.id, re, rerr, n.id, ne, nerr)
@@ -93,10 +99,11 @@ func requireConverged(t *testing.T, nodes []*simNode, want map[string]string) {
 	// Engine state: every expected key visible with the same value.
 	for k, wantV := range want {
 		for _, n := range nodes {
-			if n.dead {
+			dead, _, _, engine, _, _ := n.view()
+			if dead {
 				continue
 			}
-			got, err := n.engine.Get(k)
+			got, err := engine.Get(k)
 			if err != nil || string(got) != wantV {
 				t.Fatalf("%s: engine[%q] = (%q, %v), want %q (applied=%d)",
 					n.id, k, got, err, wantV, n.rnode.Status().LastApplied)
@@ -122,8 +129,9 @@ func tryPropose(d time.Duration, nodes []*simNode, payload []byte) bool {
 	deadline := time.Now().Add(d)
 	for {
 		if ls := simLeadersOf(nodes); len(ls) == 1 {
+			_, rnode, _, _, _, _ := ls[0].view()
 			ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
-			_, _, err := ls[0].rnode.Propose(ctx, payload)
+			_, _, err := rnode.Propose(ctx, payload)
 			cancel()
 			if err == nil {
 				return true
@@ -383,16 +391,24 @@ func TestSimMinorityLeaderCannotCommit(t *testing.T) {
 // chaosAction applies one seeded fault action. `dead` tracks the single
 // node that may be crashed at a time (with 3 nodes, two crashes would
 // remove the majority entirely — no progress is possible, so the
-// schedule keeps one crash max and revives it later).
-func chaosAction(t *testing.T, nodes []*simNode, network *sim.Network, rng *rand.Rand, dead **simNode) {
+// schedule keeps one crash max and revives it later). allowKill=false
+// restricts the schedule to network faults (the linearizability test,
+// where crashes would dominate the runtime without adding linearizability
+// signal — crash+convergence is covered by TestSimSeededChaosConverges).
+func chaosAction(t *testing.T, nodes []*simNode, network *sim.Network, rng *rand.Rand, dead **simNode, allowKill bool) {
 	t.Helper()
 	live := make([]*simNode, 0, len(nodes))
 	for _, n := range nodes {
-		if !n.dead {
+		dead, _, _, _, _, _ := n.view()
+		if !dead {
 			live = append(live, n)
 		}
 	}
-	switch rng.Intn(6) {
+	faultCases := 5
+	if allowKill {
+		faultCases = 6
+	}
+	switch rng.Intn(faultCases) {
 	case 0:
 		network.Heal()
 	case 1: // random split: one node vs the rest
@@ -480,7 +496,7 @@ func TestSimSeededChaosConverges(t *testing.T) {
 					DropRate: 0.08, DupRate: 0.04,
 					MinDelay: 5 * time.Millisecond, MaxDelay: 25 * time.Millisecond,
 				})
-				chaosAction(t, nodes, network, rng, &dead)
+				chaosAction(t, nodes, network, rng, &dead, true)
 
 				var wg sync.WaitGroup
 				for w := 0; w < 3; w++ {
@@ -501,11 +517,12 @@ func TestSimSeededChaosConverges(t *testing.T) {
 				// Invariant: no disk or logic failure may have halted a
 				// live node mid-chaos (runErr is only written on exit).
 				for _, n := range nodes {
-					if n.dead {
+					dead, _, _, _, _, runErr := n.view()
+					if dead {
 						continue // killSim consumed its exit
 					}
 					select {
-					case err := <-n.runErr:
+					case err := <-runErr:
 						t.Fatalf("%s: node halted during chaos: %v", n.id, err)
 					default:
 					}
@@ -574,7 +591,7 @@ func TestSimDiskFailureHaltsNode(t *testing.T) {
 	}
 	// It leaves the electorate: mark dead (ticker cancelled) so
 	// leadership checks and teardown treat it as gone.
-	victim.dead = true
+	victim.markDead()
 	victim.cancel()
 
 	// State proof: the victim has the pre-failure write (applied while

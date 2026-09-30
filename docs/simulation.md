@@ -125,6 +125,8 @@ The fault-scenario suite (spec §19) lives in
 `internal/raft/faults_test.go` and is documented in
 [docs/faults.md](faults.md): the three §19 scenarios (kill/restart,
 partition, minority-cannot-commit), a seeded chaos schedule exercising
-§17's message failures end-to-end, and a simulated disk failure. Phase 16
-records operation histories over the same Network for linearizability
-checking.
+§17's message failures end-to-end, and a simulated disk failure.
+
+Phase 16 then recorded operation histories over the same Network and
+checked them for linearizability (docs/linearizability.md) — Tier 1's
+finish line.

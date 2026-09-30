@@ -126,7 +126,9 @@ all injected deterministically through the simulated transport
 (`internal/transport/sim`, mechanism delivered in Phase 14, see
 docs/simulation.md) with reproducible seeds (scenario suite delivered in
 Phase 15, see docs/faults.md), then verified for linearizability
-(Phase 16).
+(Phase 16, see docs/linearizability.md) — operation histories recorded
+through the real client path during those faults are checked for a
+real-time-consistent total order explaining every observed output.
 
 ## 9. Consistency guarantees (normative definitions in docs/consistency.md)
 

@@ -31,6 +31,7 @@ go run ./cmd/client get hello        # read -> world
 make test                            # unit + integration
 make test-race                       # race detector (required before merge)
 make vet && make fmt
+make lint                            # gofmt -l check + go vet; fails if anything is unformatted
 make proto                           # regenerate gen/ from proto/kv.proto
 ```
 

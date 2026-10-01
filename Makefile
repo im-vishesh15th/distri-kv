@@ -1,4 +1,4 @@
-.PHONY: test test-race vet fmt build run tidy proto
+.PHONY: test test-race vet fmt lint build run tidy proto
 
 test:
 	go test ./...
@@ -11,6 +11,16 @@ vet:
 
 fmt:
 	go fmt ./...
+
+# lint checks without rewriting: fail if any file needs gofmt, then vet.
+lint:
+	@unformatted=$$(gofmt -l .); \
+	if [ -n "$$unformatted" ]; then \
+		echo "gofmt -l reported (run 'make fmt'):"; \
+		echo "$$unformatted"; \
+		exit 1; \
+	fi
+	go vet ./...
 
 proto:
 	protoc \

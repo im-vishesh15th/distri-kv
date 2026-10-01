@@ -8,6 +8,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"log"
@@ -53,6 +54,20 @@ type Config struct {
 	MaxBodyBytes   int64         // max request body (default 1 MiB)
 	MaxValueBytes  int           // max value size (default 256 KiB)
 	RequestTimeout time.Duration // per-request deadline toward the cluster (default 5s)
+
+	// MaxConcurrentPerTenant caps in-flight requests per tenant; extra
+	// requests get 429 immediately (never queued). Default 128.
+	MaxConcurrentPerTenant int
+
+	// TLSCertFile and TLSKeyFile enable HTTPS when both are set. Setting
+	// only one is an error. Empty = plain HTTP (dev/demo, or behind a
+	// TLS-terminating proxy).
+	TLSCertFile string
+	TLSKeyFile  string
+
+	// MetricsAddr, if set, serves /metrics on a separate listener. Keep it
+	// on a private network: it exposes tenant IDs.
+	MetricsAddr string
 }
 
 func (c *Config) applyDefaults() {
@@ -71,6 +86,9 @@ func (c *Config) applyDefaults() {
 	if c.RequestTimeout <= 0 {
 		c.RequestTimeout = 5 * time.Second
 	}
+	if c.MaxConcurrentPerTenant <= 0 {
+		c.MaxConcurrentPerTenant = 128
+	}
 }
 
 // Gateway implements http.Handler.
@@ -80,8 +98,11 @@ type Gateway struct {
 	kv    KV
 	now   func() time.Time // injectable for tests
 
+	metrics *Metrics
+
 	mu       sync.Mutex
 	limiters map[string]*rateLimiter
+	sems     map[string]chan struct{} // per-tenant concurrency slots
 }
 
 // New builds a gateway over a Store (accounts and keys) and a KV (data plane).
@@ -93,7 +114,24 @@ func New(cfg Config, store Store, kv KV) *Gateway {
 		kv:       kv,
 		now:      time.Now,
 		limiters: make(map[string]*rateLimiter),
+		sems:     make(map[string]chan struct{}),
+		metrics:  NewMetrics(time.Now()),
 	}
+}
+
+// Metrics returns the gateway's counters (for tests and embedding).
+func (g *Gateway) Metrics() *Metrics { return g.metrics }
+
+// semFor returns the tenant's concurrency semaphore.
+func (g *Gateway) semFor(tenantID string) chan struct{} {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	s, ok := g.sems[tenantID]
+	if !ok {
+		s = make(chan struct{}, g.cfg.MaxConcurrentPerTenant)
+		g.sems[tenantID] = s
+	}
+	return s
 }
 
 // Close closes the data-plane client. The caller owns the Store.
@@ -211,13 +249,22 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, b)
 }
 
-// ServeHTTP: health check, then auth, then rate limit, then route.
+// ServeHTTP: health check, then auth, then rate limit, then concurrency
+// cap, then route. Every non-health request is counted in the metrics.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/healthz" {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 		return
 	}
+
+	start := time.Now()
+	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK, op: routeOp(r)}
+	w = rec
+	tenantLabel := "none" // unauthenticated requests
+	defer func() {
+		g.metrics.observe(tenantLabel, rec.op, rec.status, time.Since(start))
+	}()
 
 	ctx, cancel := context.WithTimeout(r.Context(), g.cfg.RequestTimeout)
 	defer cancel()
@@ -234,8 +281,10 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "auth_unavailable", "authentication temporarily unavailable")
 		return
 	}
+	tenantLabel = tenant.ID
 
 	if ok, wait := g.limiterFor(tenant).allow(g.now()); !ok {
+		g.metrics.incRateLimited(tenant.ID)
 		secs := int(math.Ceil(wait.Seconds()))
 		if secs < 1 {
 			secs = 1
@@ -245,7 +294,23 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Concurrency cap: non-blocking, so one tenant can never pile up
+	// goroutines waiting for a slot.
+	sem := g.semFor(tenant.ID)
+	select {
+	case sem <- struct{}{}:
+		defer func() { <-sem }()
+	default:
+		g.metrics.incConcLimited(tenant.ID)
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "too_many_concurrent_requests",
+			"too many in-flight requests for this tenant")
+		return
+	}
+
 	switch {
+	case r.URL.Path == "/v1/usage" && r.Method == http.MethodGet:
+		writeJSON(w, http.StatusOK, g.metrics.Usage(tenant.ID))
 	case r.URL.Path == "/kv" && r.Method == http.MethodPost:
 		g.handleOp(w, r, tenant.ID)
 	case strings.HasPrefix(r.URL.Path, "/kv/"):
@@ -364,6 +429,10 @@ func (g *Gateway) handleOp(w http.ResponseWriter, r *http.Request, tenantID stri
 	if !g.readJSON(w, r, &req) {
 		return
 	}
+	switch req.Op {
+	case "set", "cas", "incr", "decr":
+		setOp(w, req.Op)
+	}
 	ns, ok := storageKey(w, tenantID, req.Key)
 	if !ok {
 		return
@@ -446,8 +515,13 @@ func (g *Gateway) kvError(w http.ResponseWriter, err error) {
 	}
 }
 
-// Run serves HTTP until ctx is cancelled.
+// Run serves HTTP (or HTTPS) until ctx is cancelled.
 func (g *Gateway) Run(ctx context.Context) error {
+	tlsOn := g.cfg.TLSCertFile != "" || g.cfg.TLSKeyFile != ""
+	if tlsOn && (g.cfg.TLSCertFile == "" || g.cfg.TLSKeyFile == "") {
+		return errors.New("gateway: TLS needs both a certificate and a key file")
+	}
+
 	srv := &http.Server{
 		Addr:              g.cfg.BindAddr,
 		Handler:           g,
@@ -457,12 +531,37 @@ func (g *Gateway) Run(ctx context.Context) error {
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 	}
+	if tlsOn {
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+
+	var msrv *http.Server
+	if g.cfg.MetricsAddr != "" {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", g.metrics.Handler())
+		msrv = &http.Server{Addr: g.cfg.MetricsAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			log.Printf("gateway metrics listening on %s", g.cfg.MetricsAddr)
+			if err := msrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("gateway: metrics server: %v", err)
+			}
+		}()
+	}
+
 	go func() {
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(sctx)
+		if msrv != nil {
+			_ = msrv.Shutdown(sctx)
+		}
 	}()
-	log.Printf("gateway listening on %s", g.cfg.BindAddr)
+
+	if tlsOn {
+		log.Printf("gateway listening on %s (TLS)", g.cfg.BindAddr)
+		return srv.ListenAndServeTLS(g.cfg.TLSCertFile, g.cfg.TLSKeyFile)
+	}
+	log.Printf("gateway listening on %s (plain HTTP)", g.cfg.BindAddr)
 	return srv.ListenAndServe()
 }

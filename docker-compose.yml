@@ -1,78 +1,96 @@
+# DistriKV stack.
+#
+#   data plane   distrikv-1..3   Raft cluster, private network only
+#   edge         gateway         the ONLY service published to the host (:8080)
+#   monitoring   prometheus, grafana   opt-in:  --profile monitoring
+#
+# Raft/gRPC ports and the /metrics ports are never published.
+x-node: &node
+  build: .
+  image: distrikv:latest
+  networks: [distrikv-net]
+  healthcheck:
+    test: ["CMD", "nc", "-z", "localhost", "8080"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+    start_period: 20s
+
 services:
   distrikv-1:
-    build: .
-    image: distrikv:latest
+    <<: *node
     container_name: distrikv-1
-    environment:
-      - DISTRIKV_DATA_DIR=/var/lib/distrikv
-    ports:
-      - "8081:8080"
-    volumes:
-      - distrikv-data-1:/var/lib/distrikv
-    networks:
-      - distrikv-net
+    environment: [DISTRIKV_DATA_DIR=/var/lib/distrikv]
+    volumes: [distrikv-data-1:/var/lib/distrikv]
     command: >
-      -id=node1
-      -addr=:8080
+      -id=node1 -addr=:8080 -metrics-addr=:9101
       -peers=node1@distrikv-1:8080,node2@distrikv-2:8080,node3@distrikv-3:8080
-      -data-dir=/var/lib/distrikv
-      -snapshot-every=1024
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "8080"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
+      -data-dir=/var/lib/distrikv -snapshot-every=1024
 
   distrikv-2:
-    build: .
-    image: distrikv:latest
+    <<: *node
     container_name: distrikv-2
-    environment:
-      - DISTRIKV_DATA_DIR=/var/lib/distrikv
-    ports:
-      - "8082:8080"
-    volumes:
-      - distrikv-data-2:/var/lib/distrikv
-    networks:
-      - distrikv-net
+    environment: [DISTRIKV_DATA_DIR=/var/lib/distrikv]
+    volumes: [distrikv-data-2:/var/lib/distrikv]
     command: >
-      -id=node2
-      -addr=:8080
+      -id=node2 -addr=:8080 -metrics-addr=:9101
       -peers=node1@distrikv-1:8080,node2@distrikv-2:8080,node3@distrikv-3:8080
-      -data-dir=/var/lib/distrikv
-      -snapshot-every=1024
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "8080"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
+      -data-dir=/var/lib/distrikv -snapshot-every=1024
 
   distrikv-3:
-    build: .
-    image: distrikv:latest
+    <<: *node
     container_name: distrikv-3
-    environment:
-      - DISTRIKV_DATA_DIR=/var/lib/distrikv
-    ports:
-      - "8083:8080"
-    volumes:
-      - distrikv-data-3:/var/lib/distrikv
-    networks:
-      - distrikv-net
+    environment: [DISTRIKV_DATA_DIR=/var/lib/distrikv]
+    volumes: [distrikv-data-3:/var/lib/distrikv]
     command: >
-      -id=node3
-      -addr=:8080
+      -id=node3 -addr=:8080 -metrics-addr=:9101
       -peers=node1@distrikv-1:8080,node2@distrikv-2:8080,node3@distrikv-3:8080
-      -data-dir=/var/lib/distrikv
-      -snapshot-every=1024
+      -data-dir=/var/lib/distrikv -snapshot-every=1024
+
+  gateway:
+    image: distrikv:latest
+    container_name: distrikv-gateway
+    depends_on:
+      distrikv-1: {condition: service_healthy}
+      distrikv-2: {condition: service_healthy}
+      distrikv-3: {condition: service_healthy}
+    restart: unless-stopped
+    entrypoint: ["gateway"]
+    command: >
+      -db=/var/lib/gateway/gateway.db
+      -bind=:8080 -metrics-addr=:9100
+      -kv-addrs=distrikv-1:8080,distrikv-2:8080,distrikv-3:8080
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"   # the only published port
+    volumes: [gateway-data:/var/lib/gateway]   # SQLite: tenants + hashed keys. BACK THIS UP.
+    networks: [distrikv-net]
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "8080"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    profiles: [monitoring]
+    volumes:
+      - ./deployments/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks: [distrikv-net]
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    profiles: [monitoring]
+    depends_on: [prometheus]
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./deployments/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deployments/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks: [distrikv-net]
 
 networks:
   distrikv-net:
@@ -82,3 +100,4 @@ volumes:
   distrikv-data-1:
   distrikv-data-2:
   distrikv-data-3:
+  gateway-data:

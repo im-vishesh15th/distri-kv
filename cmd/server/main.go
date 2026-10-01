@@ -29,12 +29,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
 	kv1 "distrikv/gen/kv/v1"
 	"distrikv/internal/kv"
 	"distrikv/internal/multiraft"
+	"distrikv/internal/nodemetrics"
 	"distrikv/internal/raft"
 	"distrikv/internal/raftlog"
 	"distrikv/internal/server"
@@ -62,6 +64,7 @@ func main() {
 		id          = flag.String("id", "node1", "node identity")
 		addr        = flag.String("addr", ":8080", "gRPC listen address")
 		pprofAddr   = flag.String("pprof-addr", "", "pprof HTTP listen address (e.g. :6060); empty disables")
+		metricsAddr = flag.String("metrics-addr", "", "Prometheus /metrics listen address (e.g. :9101); empty disables. Keep it private.")
 		dataDir     = flag.String("data-dir", "data", "directory for persistent state (persistent Raft log)")
 		peersSpec   = flag.String("peers", "", "static cluster membership: id@host:port,id@host:port,... (must include this node; empty = standalone)")
 		shardConfig = flag.String("shard-config", "", "path to shard configuration JSON (optional; enables multi-group mode)")
@@ -76,13 +79,13 @@ func main() {
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 
-	if err := run(*id, *addr, *pprofAddr, *dataDir, *peersSpec, *shardConfig, *snapEvery, log); err != nil {
+	if err := run(*id, *addr, *pprofAddr, *metricsAddr, *dataDir, *peersSpec, *shardConfig, *snapEvery, log); err != nil {
 		log.Error("server_exit", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 }
 
-func run(id, addr, pprofAddr, dataDir, peersSpec, shardConfigPath string, snapEvery uint64, log *slog.Logger) error {
+func run(id, addr, pprofAddr, metricsAddr, dataDir, peersSpec, shardConfigPath string, snapEvery uint64, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -362,6 +365,39 @@ func run(id, addr, pprofAddr, dataDir, peersSpec, shardConfigPath string, snapEv
 			slog.Uint64("term", s.Term),
 			slog.String("group", "metadata"),
 		)
+	}
+
+	// Raft gauges for Prometheus (term, leadership, commit/apply, leader
+	// changes). Sampled from Status(); the engine itself is not touched.
+	if metricsAddr != "" {
+		collector := nodemetrics.New(id, func() []nodemetrics.GroupStatus {
+			var out []nodemetrics.GroupStatus
+			for _, gid := range host.GroupIDs() {
+				st := host.Group(gid).Status()
+				name := strconv.FormatUint(uint64(gid), 10)
+				if gid == metadataGroupID {
+					name = "metadata"
+				}
+				out = append(out, nodemetrics.GroupStatus{
+					Group:       name,
+					Role:        string(st.Role),
+					LeaderID:    string(st.LeaderID),
+					Term:        st.Term,
+					CommitIndex: st.CommitIndex,
+					LastApplied: st.LastApplied,
+				})
+			}
+			return out
+		})
+		go collector.Run(ctx, 200*time.Millisecond)
+		msrv := &http.Server{Addr: metricsAddr, Handler: collector.Handler(), ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			log.Info("metrics_http_started", slog.String("addr", metricsAddr))
+			if err := msrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("metrics_http_error", slog.String("error", err.Error()))
+			}
+		}()
+		defer msrv.Close()
 	}
 
 	select {

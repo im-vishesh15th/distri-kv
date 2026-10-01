@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 RUN apk add --no-cache git make gcc musl-dev
 
@@ -10,7 +10,10 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o /distrikv ./cmd/server
+# Three binaries in one image: the node, the HTTP gateway, and the tenant CLI.
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/distrikv   ./cmd/server \
+ && CGO_ENABLED=0 GOOS=linux go build -o /out/gateway    ./cmd/gateway \
+ && CGO_ENABLED=0 GOOS=linux go build -o /out/gatewayctl ./cmd/gatewayctl
 
 # Runtime stage
 FROM alpine:3.20 AS runtime
@@ -21,10 +24,10 @@ RUN apk add --no-cache ca-certificates tzdata \
 
 WORKDIR /app
 
-COPY --from=builder /distrikv /usr/local/bin/distrikv
+COPY --from=builder /out/ /usr/local/bin/
 
-RUN mkdir -p /var/lib/distrikv \
-    && chown -R distrikv:distrikv /var/lib/distrikv
+RUN mkdir -p /var/lib/distrikv /var/lib/gateway \
+    && chown -R distrikv:distrikv /var/lib/distrikv /var/lib/gateway
 
 USER distrikv
 

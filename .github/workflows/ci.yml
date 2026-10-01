@@ -115,3 +115,52 @@ jobs:
       - name: Tear down compose
         if: always()
         run: docker compose down -v
+
+  e2e:
+    name: Product E2E (gateway + cluster)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: lint-and-test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start stack, create demo tenant and key
+        run: ./scripts/demo_up.sh
+
+      - name: Run end-to-end checks
+        run: ./scripts/e2e_signup.sh
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail=200
+
+      - name: Tear down
+        if: always()
+        run: docker compose --profile monitoring down -v
+
+  e2e-multigroup:
+    name: Product E2E Multigroup (gateway + 3-group cluster)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: lint-and-test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start multigroup stack
+        run: docker compose -f docker-compose.yml -f docker-compose.multigroup.yml up -d --wait
+
+      - name: Run multigroup end-to-end checks
+        run: ./scripts/e2e_multigroup.sh
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.yml -f docker-compose.multigroup.yml logs --no-color --tail=200
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.multigroup.yml down -v
+

@@ -35,6 +35,22 @@ make lint                            # gofmt -l check + go vet; fails if anythin
 make proto                           # regenerate gen/ from proto/kv.proto
 ```
 
+## Use it as a service (Docker)
+
+```bash
+make demo-up      # 3-node cluster + gateway; prints an API key and a curl example
+make e2e          # end-to-end checks (tenant isolation, 429, revoked key -> 401, ...)
+```
+
+```bash
+curl -X PUT localhost:8080/kv/hello -H "Authorization: Bearer $DKV_KEY" -d '{"value":"world"}'
+curl localhost:8080/kv/hello        -H "Authorization: Bearer $DKV_KEY"
+curl localhost:8080/v1/usage        -H "Authorization: Bearer $DKV_KEY"
+```
+
+Only the gateway port is published. See [Deployment](docs/deploy.md) and
+[Gateway](docs/gateway.md).
+
 ## Roadmap
 
 | Milestone | Phases | What you get | Status |
@@ -47,7 +63,7 @@ make proto                           # regenerate gen/ from proto/kv.proto
 | **M5 Proof** | 14–16 | Simulated network, fault tests, linearizability checking | ✅ done — **Tier 1 complete** |
 | **M6 Scale** | 17–21 | Multi-Raft, fixed-slot sharding, cluster router | ✅ Phases 17–21 done |
 | **M7 Measure** | 22–24 | Consistency spec, benchmarks, pprof | ✅ done |
-| **M8 Product** | P1–P5 | API keys, tenancy, quotas, gateway, onboarding, deploy | ⬜ |
+| **M8 Product** | P1–P5 | API keys, tenancy, quotas, gateway, deploy, metrics | ✅ lean: keys, tenancy, rate + concurrency limits, TLS flags, usage endpoint, compose stack, Prometheus/Grafana, e2e in CI. Not done: web signup page, daily budgets, idempotency keys |
 | **M9 Launch** | 25–30 | Docker, observability, CI, full test suite, docs | ⬜ |
 
 **Tier 1 (must-have) ends at M5.** Rebalancing, metadata Raft, and cloud
@@ -70,6 +86,8 @@ half-finished extra.
 - [Sharding](docs/shard.md) — fixed-slot key→group mapping, the shard map, and the routing chain
 - [Cluster Router](docs/router.md) — key→slot→group→leader→node, per-group client state, `-shard-config`
 - [Rebalancing](docs/rebalancing.md) — metadata Raft group, MoveSlots, data migration, client config sync
+- [Gateway](docs/gateway.md) — HTTP API, API keys, tenant isolation, rate/concurrency limits, TLS, usage, metrics
+- [Deployment](docs/deploy.md) — compose topology, demo, e2e, VM outline, backups
 - [Benchmarks](docs/benchmarks.md) — real end-to-end results: 3-node cluster over gRPC, matrix + node scaling (1/3/5) + failover + snapshot recovery, with environment and exact commands
 
 ## Non-goals

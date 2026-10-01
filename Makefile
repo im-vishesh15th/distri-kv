@@ -1,4 +1,4 @@
-.PHONY: test test-race vet fmt lint build run tidy proto
+.PHONY: test test-race vet fmt lint build run tidy proto demo-up demo-down demo-monitoring e2e
 
 test:
 	go test ./...
@@ -36,3 +36,20 @@ run:
 
 tidy:
 	go mod tidy
+
+# --- product demo (needs Docker) ------------------------------------------
+# demo-up: 3 nodes + gateway, creates a tenant + API key, prints a curl example.
+demo-up:
+	./scripts/demo_up.sh
+
+# demo-monitoring: adds Prometheus + Grafana (http://localhost:3000).
+demo-monitoring:
+	docker compose --profile monitoring up -d --wait
+
+# demo-down: stop everything and DELETE all data volumes.
+demo-down:
+	docker compose --profile monitoring down -v
+
+# e2e: end-to-end product checks against a running stack (run demo-up first).
+e2e:
+	./scripts/e2e_signup.sh

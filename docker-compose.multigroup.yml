@@ -1,0 +1,29 @@
+services:
+  distrikv-1:
+    command: >
+      -id=node1 -addr=:8080 -metrics-addr=:9101
+      -peers=node1@distrikv-1:8080,node2@distrikv-2:8080,node3@distrikv-3:8080
+      -data-dir=/var/lib/distrikv -snapshot-every=1024
+      -shard-config=/etc/distrikv/shard.json
+    volumes: ["./deployments/shard.json:/etc/distrikv/shard.json:ro"]
+  distrikv-2:
+    command: >
+      -id=node2 -addr=:8080 -metrics-addr=:9101
+      -peers=node1@distrikv-1:8080,node2@distrikv-2:8080,node3@distrikv-3:8080
+      -data-dir=/var/lib/distrikv -snapshot-every=1024
+      -shard-config=/etc/distrikv/shard.json
+    volumes: ["./deployments/shard.json:/etc/distrikv/shard.json:ro"]
+  distrikv-3:
+    command: >
+      -id=node3 -addr=:8080 -metrics-addr=:9101
+      -peers=node1@distrikv-1:8080,node2@distrikv-2:8080,node3@distrikv-3:8080
+      -data-dir=/var/lib/distrikv -snapshot-every=1024
+      -shard-config=/etc/distrikv/shard.json
+    volumes: ["./deployments/shard.json:/etc/distrikv/shard.json:ro"]
+  gateway:
+    command: >
+      -db=/var/lib/gateway/gateway.db
+      -bind=:8080 -metrics-addr=:9100
+      -kv-addrs=distrikv-1:8080,distrikv-2:8080,distrikv-3:8080
+      -shard-config=/etc/distrikv/shard.json
+    volumes: ["./deployments/shard.json:/etc/distrikv/shard.json:ro"]

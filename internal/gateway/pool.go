@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"distrikv/internal/shard"
 	"distrikv/pkg/client"
 )
 
@@ -29,7 +30,9 @@ type Pool struct {
 var _ KV = (*Pool)(nil)
 
 // NewPool dials size clients, spreading their first connection across addrs.
-func NewPool(ctx context.Context, addrs []string, size int) (*Pool, error) {
+// If shardCfg is non-nil, it is set on every client so the SDK routes keys
+// to the correct Raft group in a multi-group cluster.
+func NewPool(ctx context.Context, addrs []string, size int, shardCfg *shard.Config) (*Pool, error) {
 	if len(addrs) == 0 {
 		return nil, errors.New("gateway: no KV addresses given")
 	}
@@ -42,6 +45,9 @@ func NewPool(ctx context.Context, addrs []string, size int) (*Pool, error) {
 		if err != nil {
 			_ = p.Close()
 			return nil, fmt.Errorf("gateway: dial %s: %w", addrs[i%len(addrs)], err)
+		}
+		if shardCfg != nil {
+			c.SetShardMap(shardCfg)
 		}
 		for _, a := range addrs {
 			if err := c.AddEndpoint(a); err != nil {

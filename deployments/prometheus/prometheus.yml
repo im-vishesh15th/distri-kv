@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: distrikv-nodes
+    static_configs:
+      - targets: ["distrikv-1:9101", "distrikv-2:9101", "distrikv-3:9101"]
+  - job_name: distrikv-gateway
+    static_configs:
+      - targets: ["gateway:9100"]

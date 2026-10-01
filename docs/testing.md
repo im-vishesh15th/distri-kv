@@ -199,15 +199,12 @@ Run with: `go test -race -count=1 ./internal/gateway/...`
 
 ## Node Metrics Tests (`internal/nodemetrics`)
 
-The nodemetrics package tests the Prometheus metrics collector:
+The nodemetrics package has 2 tests for the Prometheus metrics collector:
 
-- **Usage counts**: `/v1/usage` endpoint returns correct request counts per tenant
-- **Per-tenant isolation**: usage counters don't leak across tenants
-- **Auth on `/v1/usage`**: requires valid API key
-- **Prometheus output**: `/metrics` returns valid text-format exposition
-- **`/metrics` not on public handler**: separate listener on `MetricsAddr`
-- **Concurrency cap**: 429 with `too_many_concurrent_requests` code, slot freed after release
-- **TLS half-configuration**: errors if only one of cert/key provided
-- **Per-tenant isolation of concurrency limit**: one tenant's cap doesn't affect another
+- **`TestLeaderChangesAndGauges`**: verifies leader-change counting and gauge values
+- **`TestGroupsAreIndependent`**: verifies metrics are independent per Raft group
 
 Run with: `go test -race -count=1 ./internal/nodemetrics/...`
+
+The concurrency-cap, TLS, and auth tests described in the Gateway section
+above live in `internal/gateway` and are run there.

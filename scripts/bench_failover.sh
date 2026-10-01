@@ -99,24 +99,31 @@ KILL_TS=$(date +%s)
 echo "leader killed at $(date +%H:%M:%S) (pid ${PIDS[$LEADER_IDX]})"
 PIDS[$LEADER_IDX]=0
 
+# Poll the survivors CONCURRENTLY with the bench: election time must be
+# measured from the kill, not from when the measurement window ends.
+RECOVERED_FILE="$DATA_ROOT/recovered.txt"
+: > "$RECOVERED_FILE"
+(
+    for _ in $(seq 1 120); do
+        for i in 0 1 2; do
+            [[ "${PIDS[$i]}" == "0" ]] && continue
+            out=$(/tmp/distrikv-bench-cli -addr="127.0.0.1:${PEER_PORTS[i]}" -timeout=2s status 2>/dev/null || true)
+            if echo "$out" | grep -q 'role=leader'; then
+                echo "node$((i+1)):$(( $(date +%s) - KILL_TS ))s" > "$RECOVERED_FILE"
+                exit 0
+            fi
+        done
+        sleep 0.5
+    done
+) &
+POLL_PID=$!
+
 BENCH_RC=0
 wait "$BENCH_PID" || BENCH_RC=$?
 echo "bench exited rc=$BENCH_RC"
 
-# Recovery observation: how long until a NEW leader answers?
-RECOVERED=""
-for i in 0 1 2; do
-    [[ "${PIDS[$i]}" == "0" ]] && continue
-    for _ in $(seq 1 60); do
-        out=$(/tmp/distrikv-bench-cli -addr="127.0.0.1:${PEER_PORTS[i]}" -timeout=2s status 2>/dev/null || true)
-        if echo "$out" | grep -q 'role=leader'; then
-            RECOVERED="node$((i+1)):$(($(date +%s)-KILL_TS))s"
-            break
-        fi
-        sleep 1
-    done
-    [[ -n "$RECOVERED" ]] && break
-done
+wait "$POLL_PID" || true
+RECOVERED=$(cat "$RECOVERED_FILE")
 echo "new leader after kill: ${RECOVERED:-NONE within 60s}"
 
 # Data-loss check: read every preloaded key (no preload, no writes).

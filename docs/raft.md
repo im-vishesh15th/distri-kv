@@ -30,12 +30,20 @@ timeout is counted in ticks:
 
 | Setting | Value (production) | Meaning |
 |---|---|---|
-| `ElectionTicks` | 10 | base election timeout; randomized to **[10, 19] ticks = 100–190 ms** per term |
-| `HeartbeatTicks` | 3 | leader heartbeat period = 30 ms |
+| `ElectionTicks` | 50 | base election timeout; randomized to **[50, 99] ticks = 500–990 ms** per term |
+| `HeartbeatTicks` | 5 | leader heartbeat period = 50 ms |
 
 Randomization matters: if all followers shared one deadline, a split vote
 would repeat forever. A fresh random deadline each term guarantees some
 candidate wins the next round.
+
+The production values were 10/3 (100–190 ms) until the benchmark runs in
+`docs/benchmarks.md` showed them to sit *inside* the single event loop's
+fsync jitter: with ≥32 concurrent writers the loop can go >200 ms between
+processing control events, so followers campaigned constantly (measured:
+75 elections in 30 s and 25% failed ops at concurrency 128). At 500–990 ms
+the same load runs with zero elections and zero errors. The tighter values
+remain correct in tests, which drive `Tick()` themselves and control time.
 
 ## State
 
@@ -115,7 +123,7 @@ across terms:
 | `inflight` | one AppendEntries RPC outstanding to this peer (responses can't reorder against each other) |
 | `pending` | a trigger (proposal/heartbeat) arrived while busy — resend as soon as the response lands |
 
-Sends are triggered by proposals, by the heartbeat tick (30 ms), and by
+Sends are triggered by proposals, by the heartbeat tick (50 ms), and by
 responses (remainder after the batch cap, or rejection backoff). Entries are
 capped at 64 per RPC; a leader farther ahead continues on the response.
 Heartbeats ride the same path: empty `Entries` when caught up, with
@@ -129,7 +137,7 @@ trip — are deliberately deferred: correctness first, and the cost of the
 baseline only shows up in measurement phases.)
 
 Outbound RPC failures never spin: the slot is cleared and the next
-heartbeat retries (~30 ms), which is also how transport recovery plays out.
+heartbeat retries (~50 ms), which is also how transport recovery plays out.
 
 ## Commit rule (Raft §5.4.2, Figure 8)
 

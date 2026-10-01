@@ -24,6 +24,8 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -59,6 +61,7 @@ func main() {
 	var (
 		id          = flag.String("id", "node1", "node identity")
 		addr        = flag.String("addr", ":8080", "gRPC listen address")
+		pprofAddr   = flag.String("pprof-addr", "", "pprof HTTP listen address (e.g. :6060); empty disables")
 		dataDir     = flag.String("data-dir", "data", "directory for persistent state (persistent Raft log)")
 		peersSpec   = flag.String("peers", "", "static cluster membership: id@host:port,id@host:port,... (must include this node; empty = standalone)")
 		shardConfig = flag.String("shard-config", "", "path to shard configuration JSON (optional; enables multi-group mode)")
@@ -73,15 +76,25 @@ func main() {
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 
-	if err := run(*id, *addr, *dataDir, *peersSpec, *shardConfig, *snapEvery, log); err != nil {
+	if err := run(*id, *addr, *pprofAddr, *dataDir, *peersSpec, *shardConfig, *snapEvery, log); err != nil {
 		log.Error("server_exit", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 }
 
-func run(id, addr, dataDir, peersSpec, shardConfigPath string, snapEvery uint64, log *slog.Logger) error {
+func run(id, addr, pprofAddr, dataDir, peersSpec, shardConfigPath string, snapEvery uint64, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Start pprof HTTP server if requested.
+	if pprofAddr != "" {
+		go func() {
+			log.Info("pprof_http_started", slog.String("addr", pprofAddr))
+			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+				log.Error("pprof_http_error", slog.String("error", err.Error()))
+			}
+		}()
+	}
 
 	// Load initial shard config if provided.
 	var initialShardCfg *shard.Config

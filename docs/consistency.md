@@ -85,6 +85,10 @@ precise contract (S1):
   can never both apply — but an *unretried* lost request is simply lost,
   which is why this is never called "exactly once".
 
+The full mechanism — SDK side, server-side table, error contract, and
+the same limits stated from the code's point of view — is documented in
+[client-sessions.md](client-sessions.md).
+
 ## Behavior under quorum loss (per group)
 
 If a majority of a Raft group is unavailable, that group **stops committing**

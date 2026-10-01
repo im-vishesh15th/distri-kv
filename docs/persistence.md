@@ -53,6 +53,10 @@ always holds either the previous or the new hard state, never a mixture.
 
 ## 4. Snapshot sidecar format (Phase 12)
 
+The mechanism around this file — capture trigger, compaction, restart
+restore, and the leader-shipped `InstallSnapshot` path — is documented
+in [snapshots.md](snapshots.md); this section is the byte layout.
+
 ```
 0        4          8                16               24          24+N
 +--------+----------+----------------+----------------+------------+

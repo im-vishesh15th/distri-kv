@@ -57,8 +57,10 @@ half-finished extra.
 
 - [Architecture](docs/architecture.md) — layers, invariants, persistence, failure model
 - [Persistence](docs/persistence.md) — on-disk format, fsync policy, recovery decision table
+- [Snapshots](docs/snapshots.md) — applied-state capture, single-file sidecar, log compaction, InstallSnapshot catch-up
 - [Raft](docs/raft.md) — election core: event-loop model, tick time, vote rules, tests
 - [Consistency](docs/consistency.md) — precise guarantees and the tests that prove them
+- [Client sessions](docs/client-sessions.md) — effectively-once mutations: session identity, sequence dedup, error contract, honest limits
 - [Concurrency](docs/concurrency.md) — three levels (clients / event loop / shards) and who owns what
 - [Simulation](docs/simulation.md) — deterministic in-process network: seeded faults, clock modes, reproducibility boundary
 - [Faults](docs/faults.md) — spec §19 scenarios, seeded chaos, disk failure, and the pre-vote protections

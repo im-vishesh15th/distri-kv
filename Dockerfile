@@ -10,7 +10,7 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o /distrikv ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -o /distrikv ./cmd/server
 
 # Runtime stage
 FROM alpine:3.20 AS runtime

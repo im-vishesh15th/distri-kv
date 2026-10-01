@@ -49,7 +49,7 @@ jobs:
         run: go build -o /tmp/distrikv-client ./cmd/client
 
   docker:
-    name: Docker Build
+    name: Docker Build + Cluster Smoke
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: lint-and-test
@@ -58,21 +58,60 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build Docker image
-        uses: docker/build-push-action@v5
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          context: .
-          push: false
-          tags: distrikv:test
-          load: true
+          go-version: '1.25'
+          cache: true
 
-      - name: Test Docker image runs
-        run: |
-          docker run --rm --entrypoint distrikv distrikv:test -version 2>&1 || true
+      - name: Validate compose file (docker compose v2)
+        run: docker compose config --quiet
 
-      - name: Test docker-compose
+      - name: Build image via compose
+        run: docker compose build
+
+      - name: Cluster smoke test (up --wait, write/read, kill node, verify)
         run: |
-          docker-compose config --quiet
+          set -euo pipefail
+          docker compose up -d --wait
+
+          CGO_ENABLED=0 go build -o /tmp/dkv-client ./cmd/client
+          NET=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' distrikv-1)
+
+          # The client must run INSIDE the compose network: peer addresses
+          # are container hostnames, so leader hints are unresolvable from
+          # the host. Alpine can run the statically-linked client binary.
+          cli() {
+            docker run --rm --network "$NET" \
+              -v /tmp/dkv-client:/dkv:ro alpine:3.20 \
+              /dkv -addr="$1" "${@:2}"
+          }
+          retry() { # retry <tries> <cmd...>
+            local tries=$1 i; shift
+            for i in $(seq 1 "$tries"); do
+              if "$@"; then return 0; fi
+              sleep 1
+            done
+            echo "FAILED after $tries tries: $*" >&2
+            return 1
+          }
+          expect() { # expect <addr> <cmd> <key> <want>
+            local got
+            got=$(cli "$1" "$2" "$3") || return 1
+            test "$got" = "$4"
+          }
+
+          # Healthcheck only proves the port is open; wait for a leader.
+          retry 30 cli distrikv-1:8080 set smokekey smokevalue
+          retry 30 expect distrikv-2:8080 get smokekey smokevalue
+
+          # Kill one node: 2/3 quorum must keep serving and accepting writes.
+          docker kill distrikv-1 > /dev/null
+          retry 30 expect distrikv-3:8080 get smokekey smokevalue
+          retry 30 cli distrikv-3:8080 set smokekey smokevalue2
+          retry 30 expect distrikv-2:8080 get smokekey smokevalue2
+          echo "cluster smoke test passed"
+
+      - name: Tear down compose
+        if: always()
+        run: docker compose down -v

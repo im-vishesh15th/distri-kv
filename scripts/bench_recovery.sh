@@ -38,6 +38,7 @@ go build -o /tmp/distrikv-bench-cli ./cmd/client
 go build -o /tmp/distrikv-bench ./cmd/bench
 
 mkdir -p "$RESULTS_DIR"
+: > "$JSONL"
 
 PIDS=()
 CLEANED=0

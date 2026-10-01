@@ -54,7 +54,9 @@ Load generator: `cmd/bench` using the real `pkg/client` over real gRPC.
 
 ```bash
 scripts/bench_matrix.sh 10s 2s      # full matrix: 48 runs, ~15 min
+scripts/bench_scaling.sh 10s 2s     # node scaling 1/3/5: 27 runs, ~7 min
 scripts/bench_failover.sh 30s 10s   # leader kill mid-run + data sweep
+scripts/bench_recovery.sh           # snapshot restore after node + leader loss
 ```
 
 Raw machine-readable results: `bench-results/matrix.jsonl`,
@@ -259,6 +261,78 @@ sides).
 - **Mixed 0.8 at conc=32 is flat across shard counts**
   (1347.0 / 1312.2 / 1350.4 ops/s).
 
+## Node scaling: 1 / 3 / 5 nodes
+
+`scripts/bench_scaling.sh 10s 2s`, run at `e2d8de3` (identical code to
+`33d6666` — that commit differs only in docs): one Raft group, the same
+keyspace/payload/warmup as the matrix cells, ports 9091–9095, fresh
+cluster per node count. 27 runs = nodes {1, 3, 5} × read ratio
+{0, 0.5, 1.0} × concurrency {1, 32, 128}.
+
+The extra processes matter here: the 5-node runs put **6 processes on
+8 cores** (5 servers + load generator), so the 5-column mixes
+replication cost with CPU contention — there is no way to separate them
+on this machine, and the numbers are reported that way.
+
+Throughput (ops/s):
+
+| read ratio | conc | 1 node | 3 nodes | 5 nodes |
+|---:|---:|---:|---:|---:|
+| 0 | 1 | 372.5 | 169.7 | 107.1 |
+| 0 | 32 | 5222.0 | 1390.2 | 1140.4 |
+| 0 | 128 | 16702.0 | 4629.5 | 3500.6 |
+| 0.5 | 1 | 793.4 | 301.4 | 223.6 |
+| 0.5 | 32 | 1408.0 | 947.9 | 784.3 |
+| 0.5 | 128 | 1440.3 | 1333.2 | 1211.8 |
+| 1 | 1 | 19620.7 | 6450.2 | 4260.2 |
+| 1 | 32 | 79754.9 | 46711.0 | 37793.4 |
+| 1 | 128 | 85263.8 | 61156.7 | 55470.6 |
+
+Write latency (read=0), p50 / p99:
+
+| conc | 1 node | 3 nodes | 5 nodes |
+|---:|---:|---:|---:|
+| 1 | 3.0 ms / 5.5 ms | 6.0 ms / 9.6 ms | 9.2 ms / 16.2 ms |
+| 32 | 5.9 ms / 19.8 ms | 21.9 ms / 60.4 ms | 26.8 ms / 83.0 ms |
+| 128 | 6.1 ms / 22.0 ms | 23.4 ms / 67.5 ms | 29.4 ms / 98.4 ms |
+
+**All 27 runs: 0 errors, 4,381,624 attempts.**
+
+Cross-script check: the 3-node column reproduces the matrix's shards=1
+cells within run variance (read=0 conc=128: 4629.5 vs 4586.7; read=1.0
+conc=128: 61156.7 vs 60494.4; read=0.5 conc=128: 1333.2 vs 1251.1), so
+the two scripts measure the same thing.
+
+What the numbers say:
+
+- **Quorum cost, per op (conc=1, read=0):** 3.0 ms → 6.0 ms → 9.2 ms.
+  1 node is one local F_FULLFSYNC (2.7 ms, measured probe above) and no
+  network. 3 nodes ≈ leader fsync + the acking follower's fsync chained
+  by the ack (every replica is durable before a write completes:
+  fsync-before-ack) ≈ 2× one fsync plus two loopback hops. 5 nodes
+  ≈ 3× — consistent with three F_FULLFSYNCs queueing serially on the
+  one volume (leader + two acking followers), plus the six-process
+  contention noted above; the split between those two is not isolated
+  here.
+- **Saturation (conc=128, read=0):** 16702 → 4629 → 3500 ops/s. The
+  1-node leader batches all 128 writers' proposals into deep fsync
+  batches; adding replicas adds a durable ack chain per batch and more
+  processes competing for the same cores.
+- **Reads pay the ReadIndex quorum, not fsyncs** (read=1.0, conc=128:
+  85264 → 61157 → 55471 ops/s; conc=1 p50 48 µs → 145 µs → 226 µs):
+  self-only vs 2-of-3 vs 3-of-5 confirmations over loopback, no disk
+  write on this path.
+- **Mixed traffic (read=0.5) barely gains from added concurrency and
+  lands at a similar level for every node count** — 1-node
+  1408 → 1440 ops/s from conc 32 → 128, 3-node 948 → 1333, 5-node
+  784 → 1212 (pure writes gain 3–4× over the same step). Since the
+  1-node column has no replication at all and still flattens, the
+  binding constraint is not replication. Hypothesis, not verified: a
+  read event between queued proposals ends the propose batch, so fsync
+  batches collapse to ~1–2 writes and this disk's fsync ceiling
+  (~368/s, measured under *Before and after group commit* above) binds
+  again. Not separately profiled.
+
 ## Leader failover
 
 `scripts/bench_failover.sh 30s 10s`: 3-node cluster, 1000 keys preloaded,
@@ -309,9 +383,59 @@ leader was killed mid-run, no preloaded key was lost (prior runs:
 16,409 reads at 8,203.7 ops/s, then 20,488 at 10,103.8 ops/s, also
 0 missing).
 
+## Snapshot recovery (node restart after log compaction)
+
+`scripts/bench_recovery.sh` (default 8 s write phases), run at `e2d8de3`:
+3 nodes with `-snapshot-every=100`. Raw stdout of the sequence:
+
+```
+=== starting 3 nodes (-snapshot-every=100) ===
+leader: node1
+
+=== write phase 1: 8s (read-ratio=0) ===
+attempts: 2926 (reads 0, writes 2926)  errors: 0
+throughput: 365.7 ops/s   latency all: p50=19.45ms p99=60.478ms
+
+killing follower node2 (pid 45881)
+
+=== write phase 2 with node down: 8s (forces compaction past it) ===
+attempts: 3727 (reads 0, writes 3727)  errors: 0
+throughput: 465.9 ops/s   latency all: p50=15.667ms p99=42.285ms
+
+=== restarting node2 on its old data dir ===
+recovery markers for node2 after restart:
+  snapshot_restored (local snapshot load): 0.2s
+  snapshot_installed (leader-shipped):     3.1s
+  GetStatus shows a leader (rejoined):     3.1s
+
+=== killing current leader to force election incl. restarted node ===
+new leader: node2 (the restarted node)
+
+=== post-recovery sweep (all 1000 keys must be present) ===
+attempts: 28221 (reads 28221, writes 0)  errors: 0
+throughput: 14110.4 ops/s
+sweep: 1000/1000 keys present, 0 missing
+```
+
+- Both write phases ran with **0 errors while a follower was dead** —
+  the surviving 2-node majority kept committing (phase 2 even ran
+  faster, 465.9 vs 365.7 ops/s), and the leader snapshotted and
+  compacted during phase 2, past node2's log position.
+- After restart on its old data dir: **local snapshot load in 0.2 s**
+  (`snapshot_restored`), then **3.1 s until the leader-shipped snapshot
+  was installed** (`snapshot_installed` — observed in node2's log, so a
+  plain log catch-up genuinely did not suffice) and the node rejoined
+  (`GetStatus` answers with a known leader). Times are wall-clock from
+  process start, polled at 0.1 s granularity per the script header.
+- Killing the current leader next elected **the restarted node itself**
+  (node2): an out-of-date node cannot win an election (§5.4.1), so this
+  doubles as proof node2 had fully caught up.
+- Post-recovery sweep: 1000/1000 keys present, 0 missing, 0 errors
+  (28,221 read attempts at 14,110.4 ops/s) — snapshot recovery lost
+  nothing.
+- Raw results: `bench-results/recovery.jsonl` (3 records).
+
 ## Not covered (yet)
 
-- **`scripts/bench_recovery.sh` (snapshot restore after node loss) has
-  NOT been run — unverified.**
 - Multi-machine (real network RTT), payload sizes other than 100 B,
   machine-crash durability, sustained runs longer than 30 s.

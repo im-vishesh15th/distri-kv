@@ -67,7 +67,7 @@ half-finished extra.
 - [Sharding](docs/shard.md) — fixed-slot key→group mapping, the shard map, and the routing chain
 - [Cluster Router](docs/router.md) — key→slot→group→leader→node, per-group client state, `-shard-config`
 - [Rebalancing](docs/rebalancing.md) — metadata Raft group, MoveSlots, data migration, client config sync
-- [Benchmarks](docs/benchmarks.md) — real end-to-end results: 3-node cluster over gRPC, matrix + failover, with environment and exact commands
+- [Benchmarks](docs/benchmarks.md) — real end-to-end results: 3-node cluster over gRPC, matrix + node scaling (1/3/5) + failover + snapshot recovery, with environment and exact commands
 
 ## Non-goals
 

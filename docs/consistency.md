@@ -1,6 +1,6 @@
 # Consistency — DistriKV
 
-> Status: through Phase 13 (InstallSnapshot + snapshot recovery).
+> Status: **complete through Phase 21 (M6 Scale)**.
 > Implementations and their proofs are added phase by phase; every claim below
 > must eventually name the test that demonstrates it. Vague phrases like
 > "strong consistency" are forbidden in this project unless immediately
@@ -41,6 +41,14 @@
 | S2 | Session/dedup state survives replication and restart | session table is deterministic SM state: replicated via the log, rebuilt by replay (`TestSessionStateSurvivesReplay`); serialized into snapshots together with the engine key space and restored before tail-log replay (Phase 12); a far-behind follower receives the same bytes as a leader-shipped snapshot and reconstructs sessions from them (Phase 13) | `TestSessionStateSurvivesReplay`; `TestSMSnapshotRestoreRoundTrip` (session table + cached error identity across restore), `TestRestartFromSnapshot` (dedup works after snapshot restart); install restore in `TestInstallSnapshotFollowerHandler`, end-to-end in `TestInstallSnapshotCatchesFarBehindFollower` | 9/12/13 |
 | D1 | All replicas converge to identical state | deterministic in-order apply | `TestStateMachinesConverge` (byte-identical state + restart replay), `TestFollowerAppliesOnlyCommitted` | 7 |
 | P1 | Committed state survives the defined crash model | persistent log recovery (torn tail truncated, corruption loud) | byte-level truncation fuzz | 3 (planned) |
+| G1 | Keys map to exactly one Raft group (fixed-slot sharding) | `shard.Slot(key) = FNV-1a(key) % 16384`; `shard.Config.Group(slot)` assigns contiguous balanced ranges; pure function, identical on every node | `TestSlotDeterministic`, `TestMapBalanced`, `TestMapTotal`, `TestMapContiguous`, `TestShardRoutingIntegration` | 18 |
+| G2 | The same key always routes to the same group on every node | deterministic slot function + pure shard map; no coordination, no metadata lookup | `TestSlotDeterministic`, `TestShardRoutingIsDeterministic` | 18 |
+| G3 | Each Raft group has independent leadership, terms, and logs | `multiraft.Host` runs one `raft.Group` per group ID; per-group election RNG seeded from (nodeID, groupID) | `TestMultiGroupElection`, `TestMultiGroupIndependence`, `TestMultiGroupGroupLevelFault` | 17 |
+| G4 | Client per-group session sequences prevent false `ErrStaleSequence` under interleaved writes | SDK keeps one monotonic counter per `(client_id, group_id)`; each group's session table sees `1, 2, 3, ...` independently | `TestPerGroupSequenceCounters`, `TestPerGroupSequencesStartAtOne`, `TestE2EMultiGroupRouter` (interleaved writes) | 19, 20 |
+| G5 | Versioned shard config enables safe config evolution | `shard.Config` with `Version`, `Groups`, optional `Ranges`; `LoadConfig` validates total/non-overlapping/in-range; `MoveSlots` via metadata Raft | `TestLoadConfigValid`, `TestLoadConfigExplicitRanges`, `TestLoadConfigInvalid`, `TestE2EMultiGroupRouter` | 19, 21 |
+| G6 | Config change (MoveSlots) is atomic and consistent | metadata Raft group replicates `MoveSlots` command; all nodes atomically swap to new config on commit; clients detect version bump via `GetStatus.config_version` and sync | `TestE2EMultiGroupRouter` (metadata group), `TestPerGroupSequenceCounters` (config sync) | 21 |
+| G7 | Data migration for moved slots is idempotent and consistent | moved keys streamed from old group to new via `CAS` with `expected_exists=false`; progress tracked; survives restarts | (planned) | 21 |
+| P1 | Committed state survives the defined crash model | persistent log recovery (torn tail truncated, corruption loud) | byte-level truncation fuzz | 3 (planned) |
 
 **On "exactly once":** DistriKV provides *at-most-once application of
 mutating operations within a client session, with response replay*. The
@@ -77,15 +85,20 @@ precise contract (S1):
   can never both apply — but an *unretried* lost request is simply lost,
   which is why this is never called "exactly once".
 
-## Behavior under quorum loss
+## Behavior under quorum loss (per group)
 
-If a majority is unavailable, the system **stops committing** and refuses to
-serve unsafe reads. It does not fail over to a minority, and it does not serve
-values from a possibly-stale replica. Availability is sacrificed before
-consistency on the primary path.
+If a majority of a Raft group is unavailable, that group **stops committing**
+and refuses to serve unsafe reads. It does not fail over to a minority, and it
+does not serve values from a possibly-stale replica. Availability is sacrificed
+before consistency on the primary path.
+
+Other groups in the cluster are unaffected — each group is an independent Raft
+cluster with its own quorum. A node-level crash takes down all groups on that
+node; surviving nodes re-elect independently per group.
 
 ## Explicitly out of scope (current)
 
 Follower/stale reads as a configurable option, cross-shard transactions,
-multi-region guarantees. If ever added, each becomes its own documented
-guarantee with its own tests.
+multi-region guarantees, dynamic rebalancing with automatic migration (Phase 21
+provides manual `MoveSlots` only). If ever added, each becomes its own
+documented guarantee with its own tests.

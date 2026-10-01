@@ -37,6 +37,10 @@ message MoveSlotsRequest {
   uint64 from_group = 3;
   uint64 to_group = 4;
   uint64 new_version = 5;  // must be > current version
+  // If true, allows moving a range that contains keys without migrating them.
+  // WARNING: This will make existing keys in the range appear lost until
+  // manually migrated. Use only for emergency recovery or testing.
+  bool unsafe_no_migration = 6;
 }
 ```
 
@@ -52,6 +56,15 @@ message MoveSlotsRequest {
 - `from_group` currently owns the range
 - `to_group` exists in current config
 - Range is contiguous (single range per move)
+
+### Safety Check
+
+Before applying a `MoveSlots` command, the metadata state machine checks whether the source range contains any keys in the source group's engine:
+
+- **Without `--unsafe-no-migration`**: If any keys exist in the slot range `[start_slot, end_slot)` within `from_group`, the move is **rejected** with an error. This prevents accidental data loss.
+- **With `--unsafe-no-migration`**: The move proceeds without checking for keys. The operator assumes responsibility for manually migrating data afterward. Keys in the moved range will become inaccessible until manually copied to the new group.
+
+This safety check is only performed when the metadata state machine has access to the data plane engines (i.e., when running as part of a server). In tests or configurations without engines, the check is skipped for backward compatibility.
 
 ---
 
@@ -103,7 +116,7 @@ When a range moves from group A → B:
 
 ## Tests
 
-- `internal/kv/sm_test.go`: `MetadataSM` apply/move/snapshot/restore
+- `internal/kv/metadata_sm_test.go`: `MetadataSM` MoveSlots safety checks
 - `internal/server/group_routing_test.go`: Dynamic config via `MetadataSM`
 - `internal/raft/e2e_router_test.go`: 3×2 cluster with metadata group
 - `cmd/client`: `shard-config` / `move-slots` commands

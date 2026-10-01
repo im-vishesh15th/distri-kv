@@ -65,7 +65,7 @@ func DecodeCommand(payload []byte) (Command, error) {
 	}
 	op := Op(m.Op)
 	switch op {
-	case OpSet, OpDelete, OpCAS, OpIncr:
+	case OpSet, OpDelete, OpCAS, OpIncr, OpMoveSlots:
 	default:
 		return Command{}, fmt.Errorf("kv: decode command: op %d: %w", m.Op, ErrUnknownOp)
 	}

@@ -14,6 +14,8 @@
 //	incr <key> [delta]       add delta (default 1) to int64 value
 //	decr <key>               subtract 1 from int64 value
 //	status                   print this node's routing view (role/leader)
+//	shard-config             print server's shard configuration
+//	move-slots <start> <end> <from> <to> <version>  propose slot range move
 package main
 
 import (
@@ -65,16 +67,16 @@ func main() {
 
 func dispatch(ctx context.Context, c *client.Client, args []string) error {
 	cmd, rest := args[0], args[1:]
-	need := func(n int) error {
-		if len(rest) != n {
-			return fmt.Errorf("%s: want %d arg(s), got %d", cmd, n, len(rest))
+	need := func(n int, a []string) error {
+		if len(a) != n {
+			return fmt.Errorf("%s: want %d arg(s), got %d", cmd, n, len(a))
 		}
 		return nil
 	}
 
 	switch cmd {
 	case "get":
-		if err := need(1); err != nil {
+		if err := need(1, rest); err != nil {
 			return err
 		}
 		v, err := c.Get(ctx, rest[0])
@@ -84,19 +86,19 @@ func dispatch(ctx context.Context, c *client.Client, args []string) error {
 		fmt.Println(string(v))
 
 	case "set":
-		if err := need(2); err != nil {
+		if err := need(2, rest); err != nil {
 			return err
 		}
 		return c.Put(ctx, rest[0], []byte(rest[1]))
 
 	case "del":
-		if err := need(1); err != nil {
+		if err := need(1, rest); err != nil {
 			return err
 		}
 		return c.Delete(ctx, rest[0])
 
 	case "exists":
-		if err := need(1); err != nil {
+		if err := need(1, rest); err != nil {
 			return err
 		}
 		ok, err := c.Exists(ctx, rest[0])
@@ -106,7 +108,7 @@ func dispatch(ctx context.Context, c *client.Client, args []string) error {
 		fmt.Println(strconv.FormatBool(ok))
 
 	case "cas":
-		if err := need(3); err != nil {
+		if err := need(3, rest); err != nil {
 			return err
 		}
 		var expected []byte
@@ -139,7 +141,7 @@ func dispatch(ctx context.Context, c *client.Client, args []string) error {
 		fmt.Println(v)
 
 	case "decr":
-		if err := need(1); err != nil {
+		if err := need(1, rest); err != nil {
 			return err
 		}
 		v, err := c.Decr(ctx, rest[0])
@@ -149,7 +151,7 @@ func dispatch(ctx context.Context, c *client.Client, args []string) error {
 		fmt.Println(v)
 
 	case "status":
-		if err := need(0); err != nil {
+		if err := need(0, rest); err != nil {
 			return err
 		}
 		st, err := c.Status(ctx)
@@ -163,7 +165,7 @@ func dispatch(ctx context.Context, c *client.Client, args []string) error {
 		fmt.Println()
 
 	case "shard-config":
-		if err := need(0); err != nil {
+		if err := need(0, rest); err != nil {
 			return err
 		}
 		resp, err := c.GetShardConfig(ctx)
@@ -186,15 +188,22 @@ func dispatch(ctx context.Context, c *client.Client, args []string) error {
 		}
 
 	case "move-slots":
-		if err := need(5); err != nil {
+		// Parse optional --unsafe-no-migration flag
+		unsafe := false
+		args := rest
+		if len(args) > 0 && args[0] == "--unsafe-no-migration" {
+			unsafe = true
+			args = args[1:]
+		}
+		if err := need(5, args); err != nil {
 			return err
 		}
-		start, _ := strconv.ParseUint(rest[0], 10, 64)
-		end, _ := strconv.ParseUint(rest[1], 10, 64)
-		from, _ := strconv.ParseUint(rest[2], 10, 64)
-		to, _ := strconv.ParseUint(rest[3], 10, 64)
-		version, _ := strconv.ParseUint(rest[4], 10, 64)
-		resp, err := c.MoveSlots(ctx, start, end, from, to, version)
+		start, _ := strconv.ParseUint(args[0], 10, 64)
+		end, _ := strconv.ParseUint(args[1], 10, 64)
+		from, _ := strconv.ParseUint(args[2], 10, 64)
+		to, _ := strconv.ParseUint(args[3], 10, 64)
+		version, _ := strconv.ParseUint(args[4], 10, 64)
+		resp, err := c.MoveSlots(ctx, start, end, from, to, version, unsafe)
 		if err != nil {
 			return err
 		}
@@ -211,7 +220,7 @@ func dispatch(ctx context.Context, c *client.Client, args []string) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: client [flags] <command> [args]
+	fmt.Fprint(os.Stderr, `usage: client [flags] <command> [args]
 
 commands:
   get <key>
@@ -223,7 +232,9 @@ commands:
   decr <key>
   status
   shard-config                    print server's shard configuration
-  move-slots <start> <end> <from> <to> <version>  propose slot range move`)
+  move-slots <start> <end> <from> <to> <version>  propose slot range move
+  move-slots --unsafe-no-migration <start> <end> <from> <to> <version>  allow moving non-empty ranges
+`)
 	flag.PrintDefaults()
 }
 

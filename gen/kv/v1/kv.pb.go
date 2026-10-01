@@ -1085,9 +1085,13 @@ type MoveSlotsRequest struct {
 	// Destination group ID (must exist in current config).
 	ToGroup uint64 `protobuf:"varint,4,opt,name=to_group,json=toGroup,proto3" json:"to_group,omitempty"`
 	// New config version (must be > current version).
-	NewVersion    uint64 `protobuf:"varint,5,opt,name=new_version,json=newVersion,proto3" json:"new_version,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	NewVersion uint64 `protobuf:"varint,5,opt,name=new_version,json=newVersion,proto3" json:"new_version,omitempty"`
+	// If true, allows moving a range that contains keys without migrating them.
+	// WARNING: This will make existing keys in the range appear lost until
+	// manually migrated. Use only for emergency recovery or testing.
+	UnsafeNoMigration bool `protobuf:"varint,6,opt,name=unsafe_no_migration,json=unsafeNoMigration,proto3" json:"unsafe_no_migration,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *MoveSlotsRequest) Reset() {
@@ -1153,6 +1157,13 @@ func (x *MoveSlotsRequest) GetNewVersion() uint64 {
 		return x.NewVersion
 	}
 	return 0
+}
+
+func (x *MoveSlotsRequest) GetUnsafeNoMigration() bool {
+	if x != nil {
+		return x.UnsafeNoMigration
+	}
+	return false
 }
 
 type MoveSlotsResponse struct {
@@ -1432,7 +1443,7 @@ const file_proto_kv_proto_rawDesc = "" +
 	"\x16GetShardConfigResponse\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x04R\aversion\x12\x1f\n" +
 	"\vconfig_json\x18\x02 \x01(\tR\n" +
-	"configJson\"\xa7\x01\n" +
+	"configJson\"\xd7\x01\n" +
 	"\x10MoveSlotsRequest\x12\x1d\n" +
 	"\n" +
 	"start_slot\x18\x01 \x01(\x04R\tstartSlot\x12\x19\n" +
@@ -1441,7 +1452,8 @@ const file_proto_kv_proto_rawDesc = "" +
 	"from_group\x18\x03 \x01(\x04R\tfromGroup\x12\x19\n" +
 	"\bto_group\x18\x04 \x01(\x04R\atoGroup\x12\x1f\n" +
 	"\vnew_version\x18\x05 \x01(\x04R\n" +
-	"newVersion\"J\n" +
+	"newVersion\x12.\n" +
+	"\x13unsafe_no_migration\x18\x06 \x01(\bR\x11unsafeNoMigration\"J\n" +
 	"\x11MoveSlotsResponse\x12\x1f\n" +
 	"\vnew_version\x18\x01 \x01(\x04R\n" +
 	"newVersion\x12\x14\n" +

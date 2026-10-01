@@ -226,6 +226,10 @@ message MoveSlotsRequest {
   uint64 to_group = 4;
   // New config version (must be > current version).
   uint64 new_version = 5;
+  // If true, allows moving a range that contains keys without migrating them.
+  // WARNING: This will make existing keys in the range appear lost until
+  // manually migrated. Use only for emergency recovery or testing.
+  bool unsafe_no_migration = 6;
 }
 
 message MoveSlotsResponse {

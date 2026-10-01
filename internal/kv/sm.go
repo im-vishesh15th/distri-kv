@@ -23,12 +23,14 @@ package kv
 // hot-swaps in the data-plane services and clients.
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
 
 	kv1 "distrikv/gen/kv/v1"
+	"distrikv/internal/raft"
 	"distrikv/internal/shard"
 	"google.golang.org/protobuf/proto"
 )
@@ -280,6 +282,10 @@ type MetadataSMConfig struct {
 	// The callback receives the new config version.
 	// Must not block; if slow work is needed, spawn a goroutine.
 	OnConfigChange func(version uint64)
+
+	// Engines provides access to the data plane engines for checking
+	// if a slot range contains keys. If nil, the unsafe check is skipped.
+	Engines map[raft.GroupID]Engine
 }
 
 // MetadataSM is the state machine for the metadata Raft group.
@@ -289,11 +295,12 @@ type MetadataSM struct {
 	mu       sync.RWMutex
 	config   *shard.Config
 	onChange func(version uint64)
+	engines  map[raft.GroupID]Engine
 }
 
 // NewMetadataSM creates the metadata state machine.
 func NewMetadataSM(cfg MetadataSMConfig) *MetadataSM {
-	m := &MetadataSM{onChange: cfg.OnConfigChange}
+	m := &MetadataSM{onChange: cfg.OnConfigChange, engines: cfg.Engines}
 	if cfg.InitialConfig != nil {
 		m.config = cfg.InitialConfig
 	} else {
@@ -369,6 +376,25 @@ func (m *MetadataSM) Apply(payload []byte) (any, error) {
 		}
 	}
 
+	// Check if the source range contains any keys, unless unsafe_no_migration is set.
+	// This prevents accidental data loss when moving ranges that contain data.
+	if !req.UnsafeNoMigration && m.engines != nil {
+		if fromEngine, ok := m.engines[raft.GroupID(req.FromGroup)]; ok {
+			// Scan for keys in the slot range. We iterate over all keys in the engine
+			// and check if their slot falls within the move range.
+			// Note: This is O(N) in the number of keys; for large engines, a more
+			// efficient index would be needed.
+			hasKeys, err := m.rangeHasKeys(fromEngine, req.StartSlot, req.EndSlot)
+			if err != nil {
+				return Result{}, fmt.Errorf("metadata: failed to check range for keys: %w", err)
+			}
+			if hasKeys {
+				return Result{}, fmt.Errorf("metadata: move range [%d,%d) in group %d contains keys; use --unsafe-no-migration to override",
+					req.StartSlot, req.EndSlot, req.FromGroup)
+			}
+		}
+	}
+
 	// Apply the move: create new ranges.
 	newRanges := m.applyMoveToRanges(req)
 	newConfig := &shard.Config{
@@ -393,11 +419,12 @@ func (m *MetadataSM) Apply(payload []byte) (any, error) {
 
 // MoveSlotsRequest is the JSON payload for a slot move.
 type MoveSlotsRequest struct {
-	StartSlot  uint64 `json:"start_slot"`
-	EndSlot    uint64 `json:"end_slot"`
-	FromGroup  uint64 `json:"from_group"`
-	ToGroup    uint64 `json:"to_group"`
-	NewVersion uint64 `json:"new_version"`
+	StartSlot       uint64 `json:"start_slot"`
+	EndSlot         uint64 `json:"end_slot"`
+	FromGroup       uint64 `json:"from_group"`
+	ToGroup         uint64 `json:"to_group"`
+	NewVersion      uint64 `json:"new_version"`
+	UnsafeNoMigration bool   `json:"unsafe_no_migration"`
 }
 
 // applyMoveToRanges updates the ranges by moving [start,end) from from_group to to_group.
@@ -468,6 +495,46 @@ func (m *MetadataSM) applyMoveToRanges(req MoveSlotsRequest) []shard.Range {
 		}
 	}
 	return merged
+}
+
+// rangeHasKeys checks if the given engine has any keys in the slot range
+// [startSlot, endSlot). Returns true if at least one key exists in the range.
+func (m *MetadataSM) rangeHasKeys(engine Engine, startSlot, endSlot uint64) (bool, error) {
+	data, err := engine.Snapshot()
+	if err != nil {
+		return false, err
+	}
+	// Parse MemEngine snapshot format:
+	// [8 bytes: key count] [for each key: 4 bytes key len] [key bytes] [4 bytes value len] [value bytes]
+	if len(data) < 8 {
+		return false, nil
+	}
+	count := binary.LittleEndian.Uint64(data[:8])
+	offset := uint64(8)
+	for i := uint64(0); i < count; i++ {
+		if offset+4 > uint64(len(data)) {
+			break // corrupted snapshot, assume no keys in range
+		}
+		keyLen := binary.LittleEndian.Uint32(data[offset : offset+4])
+		offset += 4
+		if offset+uint64(keyLen) > uint64(len(data)) {
+			break
+		}
+		key := string(data[offset : offset+uint64(keyLen)])
+		offset += uint64(keyLen)
+		// Check slot
+		slot := shard.Slot(key)
+		if slot >= startSlot && slot < endSlot {
+			return true, nil
+		}
+		// Skip value
+		if offset+4 > uint64(len(data)) {
+			break
+		}
+		valueLen := binary.LittleEndian.Uint32(data[offset : offset+4])
+		offset += 4 + uint64(valueLen)
+	}
+	return false, nil
 }
 
 // Snapshot serializes the metadata state (just the config).

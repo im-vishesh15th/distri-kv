@@ -684,14 +684,15 @@ func (c *Client) GetShardConfig(ctx context.Context) (*kv1.GetShardConfigRespons
 }
 
 // MoveSlots proposes a slot range move via the metadata Raft group.
-func (c *Client) MoveSlots(ctx context.Context, startSlot, endSlot, fromGroup, toGroup, newVersion uint64) (*kv1.MoveSlotsResponse, error) {
+func (c *Client) MoveSlots(ctx context.Context, startSlot, endSlot, fromGroup, toGroup, newVersion uint64, unsafeNoMigration bool) (*kv1.MoveSlotsResponse, error) {
 	stub, _ := c.endpoint(0) // metadata group is global, use group 0 endpoint
 	return stub.MoveSlots(ctx, &kv1.MoveSlotsRequest{
-		StartSlot:  startSlot,
-		EndSlot:    endSlot,
-		FromGroup:  fromGroup,
-		ToGroup:    toGroup,
-		NewVersion: newVersion,
+		StartSlot:        startSlot,
+		EndSlot:          endSlot,
+		FromGroup:        fromGroup,
+		ToGroup:          toGroup,
+		NewVersion:       newVersion,
+		UnsafeNoMigration: unsafeNoMigration,
 	})
 }
 

@@ -30,28 +30,55 @@ type peerProgress struct {
 	gen      uint64 // send generation: bumps per request (ReadIndex freshness)
 }
 
-// onPropose appends a leader proposal to its own log (synced before it can
-// count toward commit), registers the caller as a commit waiter, and
-// replicates. The reply is written later — on commit advance, or by
-// failWaiters if leadership is lost.
-func (n *Group) onPropose(e proposeEvent) error {
-	if n.role != RoleLeader {
-		e.reply <- proposeReply{err: ErrNotLeader}
+// handleProposeBatch appends a run of leader proposals to the leader's own
+// log as ONE write + ONE fsync (group commit), registers a commit waiter
+// per entry, and replicates once. Replies are written later — on commit
+// advance, or by failWaiters if leadership is lost.
+//
+// Batching is a performance change only: durability is one F_FULLFSYNC per
+// Sync on darwin (~2.7 ms measured), and paying it per proposal serialized
+// a group at ~365 writes/s at any offered concurrency (docs/benchmarks.md).
+// The batch is a run of consecutive proposeEvents taken from the channel
+// head, so indices (first..first+n-1), terms, and channel order are exactly
+// what per-proposal handling would have produced, and fsync-before-ack is
+// preserved — nothing in the batch is acknowledged or counted toward a
+// majority before the single Sync returns.
+func (n *Group) handleProposeBatch(batch []proposeEvent) error {
+	if len(batch) == 0 {
 		return nil
 	}
-	idx := n.rlog.LastIndex() + 1
-	if err := n.rlog.Append([]raftlog.Entry{{Index: idx, Term: n.term, Payload: e.payload}}); err != nil {
-		e.reply <- proposeReply{err: err}
+	if n.role != RoleLeader {
+		for _, e := range batch {
+			e.reply <- proposeReply{err: ErrNotLeader}
+		}
+		return nil
+	}
+	first := n.rlog.LastIndex() + 1
+	entries := make([]raftlog.Entry, len(batch))
+	payload := 0
+	for i, e := range batch {
+		entries[i] = raftlog.Entry{Index: first + uint64(i), Term: n.term, Payload: e.payload}
+		payload += len(e.payload)
+	}
+	if err := n.rlog.Append(entries); err != nil {
+		for _, e := range batch {
+			e.reply <- proposeReply{err: err}
+		}
 		return fmt.Errorf("append proposal: %w", err) // disk/structure failure: halt
 	}
-	// fsync-before-ack: the leader's own replica must be durable before it
+	// fsync-before-ack: the whole batch must be durable before any of it
 	// may count itself toward the majority.
 	if err := n.rlog.Sync(); err != nil {
-		e.reply <- proposeReply{err: err}
+		for _, e := range batch {
+			e.reply <- proposeReply{err: err}
+		}
 		return fmt.Errorf("sync proposal: %w", err)
 	}
-	n.waiters[idx] = append(n.waiters[idx], e.reply)
-	n.logf("proposal_appended", "index", idx, "term", n.term, "bytes", len(e.payload))
+	for i, e := range batch {
+		n.waiters[entries[i].Index] = append(n.waiters[entries[i].Index], e.reply)
+	}
+	n.logf("proposals_appended", "first_index", first, "count", len(batch),
+		"term", n.term, "bytes", payload)
 
 	n.broadcastAppend()
 	// A single-node cluster (or a majority already satisfied by earlier

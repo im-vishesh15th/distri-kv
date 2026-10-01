@@ -547,11 +547,49 @@ func (n *Group) Run(ctx context.Context) error {
 	defer close(n.done)
 	defer n.rpcCancel()
 
+	// Group commit: a run of consecutive proposeEvents at the channel head
+	// is appended as one batch — one log write, one fsync, one broadcast —
+	// instead of paying a full F_FULLFSYNC (~2.7 ms measured) per proposal.
+	// A non-proposal event that ends a drain is held: it arrived after
+	// every batch member, so handling it after the batch preserves exact
+	// channel order (nothing is reordered, only coalesced).
+	var held event
+
 	for {
+		if held != nil {
+			ev := held
+			held = nil
+			if err := n.handle(ev); err != nil {
+				return fmt.Errorf("raft: %s halted: %w", n.id, err)
+			}
+			continue
+		}
 		select {
 		case <-ctx.Done():
 			return nil
 		case ev := <-n.events:
+			if pe, ok := ev.(proposeEvent); ok {
+				batch := []proposeEvent{pe}
+			drain:
+				for {
+					select {
+					case next := <-n.events:
+						if npe, ok := next.(proposeEvent); ok {
+							batch = append(batch, npe)
+							continue
+						}
+						held = next
+						break drain
+					default:
+						break drain
+					}
+				}
+				if err := n.handleProposeBatch(batch); err != nil {
+					return fmt.Errorf("raft: %s halted: %w", n.id, err)
+				}
+				n.checkReads()
+				continue
+			}
 			if err := n.handle(ev); err != nil {
 				return fmt.Errorf("raft: %s halted: %w", n.id, err)
 			}
@@ -758,7 +796,7 @@ func (n *Group) dispatch(ev event) error {
 		return nil
 
 	case proposeEvent:
-		return n.onPropose(e)
+		return n.handleProposeBatch([]proposeEvent{e})
 
 	case readIndexEvent:
 		return n.onReadIndex(e)

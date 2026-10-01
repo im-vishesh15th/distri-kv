@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+
+	"distrikv/internal/shard"
 )
 
 // MemEngine is the initial in-memory Engine implementation: a map[string][]byte
@@ -250,4 +252,19 @@ func (e *MemEngine) Restore(data []byte) error {
 	defer e.mu.Unlock()
 	e.data = next
 	return nil
+}
+
+// HasKeyInSlotRange returns true if the engine has any key whose slot
+// falls within [startSlot, endSlot). Used for safe MoveSlots checks.
+// Must be deterministic and not modify state.
+func (e *MemEngine) HasKeyInSlotRange(startSlot, endSlot uint64) (bool, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for k := range e.data {
+		slot := shard.Slot(k)
+		if slot >= startSlot && slot < endSlot {
+			return true, nil
+		}
+	}
+	return false, nil
 }

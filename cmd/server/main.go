@@ -182,7 +182,6 @@ func run(id, addr, pprofAddr, dataDir, peersSpec, shardConfigPath string, snapEv
 			log.Info("metadata_config_changed", slog.Uint64("version", version))
 			// GroupedService will pick up the new config on next request via metadataSM.Config()
 		},
-		Engines: engines, // Pass engines for MoveSlots key-range check
 	})
 	metaEngine := kv.NewMemEngine()
 	engines[metadataGroupID] = metaEngine

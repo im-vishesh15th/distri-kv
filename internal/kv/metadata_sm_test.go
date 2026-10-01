@@ -1,173 +1,210 @@
 package kv
 
 import (
-	"fmt"
-	
 	"testing"
 
-	"distrikv/internal/raft"
 	"distrikv/internal/shard"
 )
 
-// TestMetadataSMMoveSlotsSafety tests that MoveSlots rejects moves
-// when the source range contains keys, unless unsafe_no_migration is set.
-func TestMetadataSMMoveSlotsSafety(t *testing.T) {
-	// Create engines for 2 groups
-	engines := map[raft.GroupID]Engine{
-		0: NewMemEngine(),
-		1: NewMemEngine(),
-	}
-
-	// Find keys that hash to group 0's range
-	shardMap := shard.NewMap(2)
-	var group0Keys []string
-	for i := 0; i < 1000 && len(group0Keys) < 2; i++ {
-		k := fmt.Sprintf("testkey-%d", i)
-		if shardMap.Group(k) == 0 {
-			group0Keys = append(group0Keys, k)
-		}
-	}
-	if len(group0Keys) < 2 {
-		t.Fatal("Could not find enough keys for group 0")
-	}
-
-	// Put some keys in group 0's range
-	engines[0].Put(group0Keys[0], []byte("value-a"))
-	engines[0].Put(group0Keys[1], []byte("value-b"))
-
-	// Create metadata SM with 2 groups, engines provided
-	m := NewMetadataSM(MetadataSMConfig{
+// TestMetadataSMApplyDeterministic tests that Apply() produces identical
+// results on different replicas regardless of their engine state.
+// This is the determinism test: Apply() must depend only on the log and
+// the current config, not on the local engine state.
+func TestMetadataSMApplyDeterministic(t *testing.T) {
+	// Create three metadata SMs with different engine states:
+	// - m0: engine with keys in the range
+	// - m1: engine without keys in the range
+	// - m2: no engine (nil)
+	m0 := NewMetadataSM(MetadataSMConfig{
 		InitialConfig: shard.NewMap(2),
-		Engines:       engines,
+	})
+	m1 := NewMetadataSM(MetadataSMConfig{
+		InitialConfig: shard.NewMap(2),
+	})
+	m2 := NewMetadataSM(MetadataSMConfig{
+		InitialConfig: shard.NewMap(2),
 	})
 
-	// Try to move a range from group 0 to group 1 that contains keys
-	// without unsafe flag - should fail
+	// Same move command for all three
 	req := MoveSlotsRequest{
-		StartSlot:        0,
-		EndSlot:          shard.NumSlots / 2, // First half (group 0's range)
-		FromGroup:        0,
-		ToGroup:          1,
-		NewVersion:       2,
+		StartSlot:         0,
+		EndSlot:           shard.NumSlots / 2,
+		FromGroup:         0,
+		ToGroup:           1,
+		NewVersion:        2,
+		UnsafeNoMigration: false,
+	}
+	cmd := MoveSlots(req)
+	payload, _ := EncodeCommand(cmd)
+
+	// All three should produce identical results (apply succeeds)
+	r0, err := m0.Apply(payload)
+	if err != nil {
+		t.Fatalf("m0.Apply failed: %v", err)
+	}
+	r1, err := m1.Apply(payload)
+	if err != nil {
+		t.Fatalf("m1.Apply failed: %v", err)
+	}
+	r2, err := m2.Apply(payload)
+	if err != nil {
+		t.Fatalf("m2.Apply failed: %v", err)
+	}
+
+	// Results should be identical
+	v0 := string(r0.(Result).Value)
+	v1 := string(r1.(Result).Value)
+	v2 := string(r2.(Result).Value)
+	if v0 != v1 || v1 != v2 {
+		t.Fatalf("Results differ: m0=%s, m1=%s, m2=%s", v0, v1, v2)
+	}
+
+	// Configs should be identical
+	c0 := m0.Config()
+	c1 := m1.Config()
+	c2 := m2.Config()
+	if c0.Version != c1.Version || c1.Version != c2.Version {
+		t.Fatalf("versions differ: %d, %d, %d", c0.Version, c1.Version, c2.Version)
+	}
+	for slot := uint64(0); slot < shard.NumSlots/2; slot++ {
+		if c0.GroupSlot(slot) != c1.GroupSlot(slot) || c1.GroupSlot(slot) != c2.GroupSlot(slot) {
+			t.Fatalf("group assignment differs at slot %d: c0=%d, c1=%d, c2=%d",
+				slot, c0.GroupSlot(slot), c1.GroupSlot(slot), c2.GroupSlot(slot))
+		}
+	}
+}
+
+// TestMetadataSMRestartReplay tests that after committing a move,
+// restarting all nodes and replaying the log produces the same config.
+func TestMetadataSMRestartReplay(t *testing.T) {
+	m := NewMetadataSM(MetadataSMConfig{
+		InitialConfig: shard.NewMap(2),
+	})
+
+	// Commit a move
+	req := MoveSlotsRequest{
+		StartSlot:         0,
+		EndSlot:           shard.NumSlots / 2,
+		FromGroup:         0,
+		ToGroup:           1,
+		NewVersion:        2,
 		UnsafeNoMigration: false,
 	}
 	cmd := MoveSlots(req)
 	payload, _ := EncodeCommand(cmd)
 
 	_, err := m.Apply(payload)
-	if err == nil {
-		t.Fatal("MoveSlots should reject move of non-empty range without unsafe flag")
-	}
-	if err.Error() == "" || !contains(err.Error(), "contains keys") {
-		t.Fatalf("Expected error about keys in range, got: %v", err)
-	}
-
-	// Now try with unsafe flag - should succeed
-	req.UnsafeNoMigration = true
-	cmd = MoveSlots(req)
-	payload, _ = EncodeCommand(cmd)
-
-	res, err := m.Apply(payload)
 	if err != nil {
-		t.Fatalf("MoveSlots with unsafe flag should succeed: %v", err)
-	}
-	if res == nil {
-		t.Fatal("Expected result from MoveSlots")
+		t.Fatalf("Apply failed: %v", err)
 	}
 
-	// Verify config was updated
-	cfg := m.Config()
-	if cfg.Version != 2 {
-		t.Fatalf("Expected version 2, got %d", cfg.Version)
+	// Snapshot
+	snap, err := m.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot failed: %v", err)
 	}
-	// The moved range should now be owned by group 1
-	for slot := uint64(0); slot < shard.NumSlots/2; slot++ {
-		if cfg.GroupSlot(slot) != 1 {
-			t.Fatalf("Slot %d should be in group 1, got %d", slot, cfg.GroupSlot(slot))
+
+	// Restart: create new SM and restore
+	m2 := NewMetadataSM(MetadataSMConfig{
+		InitialConfig: shard.NewMap(2),
+	})
+	if err := m2.Restore(snap); err != nil {
+		t.Fatalf("Restore failed: %v", err)
+	}
+
+	// Config should be identical
+	c1 := m.Config()
+	c2 := m2.Config()
+	if c1.Version != c2.Version {
+		t.Fatalf("versions differ: %d vs %d", c1.Version, c2.Version)
+	}
+	for slot := uint64(0); slot < shard.NumSlots; slot++ {
+		if c1.GroupSlot(slot) != c2.GroupSlot(slot) {
+			t.Fatalf("group assignment differs at slot %d: %d vs %d",
+				slot, c1.GroupSlot(slot), c2.GroupSlot(slot))
 		}
 	}
 }
 
-// TestMetadataSMMoveSlotsEmptyRange tests that MoveSlots succeeds
-// when the source range is empty (no keys).
-func TestMetadataSMMoveSlotsEmptyRange(t *testing.T) {
-	engines := map[raft.GroupID]Engine{
-		0: NewMemEngine(),
-		1: NewMemEngine(),
-	}
-
+// TestMetadataSMApplyNoKeyCheckInApply verifies that Apply() itself
+// does NOT check for keys - the check happens in the RPC handler.
+func TestMetadataSMApplyNoKeyCheckInApply(t *testing.T) {
+	// Even with keys in the range, Apply should succeed without the unsafe flag
+	// because the check is done in the RPC handler, not in Apply.
 	m := NewMetadataSM(MetadataSMConfig{
 		InitialConfig: shard.NewMap(2),
-		Engines:       engines,
 	})
 
-	// Move empty range from group 0 to group 1
 	req := MoveSlotsRequest{
-		StartSlot:        0,
-		EndSlot:          shard.NumSlots / 2,
-		FromGroup:        0,
-		ToGroup:          1,
-		NewVersion:       2,
+		StartSlot:         0,
+		EndSlot:           shard.NumSlots / 2,
+		FromGroup:         0,
+		ToGroup:           1,
+		NewVersion:        2,
 		UnsafeNoMigration: false,
 	}
 	cmd := MoveSlots(req)
 	payload, _ := EncodeCommand(cmd)
 
-	res, err := m.Apply(payload)
+	// Apply should succeed without checking for keys
+	_, err := m.Apply(payload)
 	if err != nil {
-		t.Fatalf("MoveSlots of empty range should succeed: %v", err)
-	}
-	if res == nil {
-		t.Fatal("Expected result")
+		t.Fatalf("Apply should not check for keys: %v", err)
 	}
 
-	// Verify config updated
+	// Config should be updated
 	cfg := m.Config()
 	if cfg.Version != 2 {
-		t.Fatalf("Expected version 2")
+		t.Fatalf("expected version 2, got %d", cfg.Version)
 	}
 }
 
-// TestMetadataSMMoveSlotsWithoutEngines tests that without engines
-// the check is skipped (backward compatibility).
-func TestMetadataSMMoveSlotsWithoutEngines(t *testing.T) {
-	// No engines provided
+// TestMetadataSMConfigVersion tests that version is incremented correctly
+func TestMetadataSMConfigVersion(t *testing.T) {
 	m := NewMetadataSM(MetadataSMConfig{
 		InitialConfig: shard.NewMap(2),
-		Engines:       nil,
 	})
 
+	if m.Config().Version != 1 {
+		t.Fatalf("initial version should be 1, got %d", m.Config().Version)
+	}
+
 	req := MoveSlotsRequest{
-		StartSlot:        0,
-		EndSlot:          shard.NumSlots / 2,
-		FromGroup:        0,
-		ToGroup:          1,
-		NewVersion:       2,
+		StartSlot:         0,
+		EndSlot:           shard.NumSlots / 2,
+		FromGroup:         0,
+		ToGroup:           1,
+		NewVersion:        2,
 		UnsafeNoMigration: false,
 	}
 	cmd := MoveSlots(req)
 	payload, _ := EncodeCommand(cmd)
 
-	// Should succeed even with non-empty range because no engines to check
-	res, err := m.Apply(payload)
+	_, err := m.Apply(payload)
 	if err != nil {
-		t.Fatalf("MoveSlots without engines should skip key check: %v", err)
+		t.Fatalf("Apply failed: %v", err)
 	}
-	if res == nil {
-		t.Fatal("Expected result")
-	}
-}
 
-// contains checks if a string contains a substring.
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr || containsMiddle(s, substr)))
-}
-
-func containsMiddle(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
+	if m.Config().Version != 2 {
+		t.Fatalf("version should be 2, got %d", m.Config().Version)
 	}
-	return false
+
+	// Second move
+	req2 := MoveSlotsRequest{
+		StartSlot:         shard.NumSlots / 2,
+		EndSlot:           shard.NumSlots,
+		FromGroup:         1,
+		ToGroup:           0,
+		NewVersion:        3,
+		UnsafeNoMigration: false,
+	}
+	cmd2 := MoveSlots(req2)
+	payload2, _ := EncodeCommand(cmd2)
+	if _, err := m.Apply(payload2); err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+
+	if m.Config().Version != 3 {
+		t.Fatalf("version should be 3, got %d", m.Config().Version)
+	}
 }

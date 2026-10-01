@@ -50,7 +50,11 @@ The checker verifies that operation histories admit a real-time-consistent total
 
 ## Mutation Testing (Verification of Test Effectiveness)
 
-To verify that our tests actually catch bugs, we introduce deliberate mutations (bugs) and confirm the test suite FAILS.
+To verify that our tests actually catch bugs, we introduce deliberate
+mutations (bugs) and confirm tests FAIL. The results below are **exact
+observed failures** from full re-runs on 2026-10-02
+(`go test -race -count=1 ./...` on a clean tree at `eb1f554`);
+everything is reproducible with the commands shown.
 
 ### Mutation 1: Broken Quorum Math
 
@@ -61,22 +65,35 @@ To verify that our tests actually catch bugs, we introduce deliberate mutations 
 ```go
 // Correct:
 if len(matches) < n.majorityN {  // n.majorityN = len(peers)/2 + 1
+nIdx := matches[n.majorityN-1]
 
 // Mutation:
 brokenMajorityN := len(n.peers) / 2  // Missing +1
 if len(matches) < brokenMajorityN {
+nIdx := matches[brokenMajorityN-1]
 ```
 
-**Expected:** Fault tests should FAIL (minority can commit)
+**Observed results:**
 
-**Test Command:**
-```bash
-# Temporarily apply mutation, then:
-go test -race -count=1 ./internal/raft/ -run "TestSimMinorityLeaderCannotCommit"
-# Should FAIL
-```
+| run | command | result |
+|---|---|---|
+| fault suite | `go test -race -count=1 ./internal/raft/ -run "TestSim"` | **FAIL** — `TestSimMinorityLeaderCannotCommit` (`faults_test.go:413: minority entry committed/applied without a majority: commit=2 applied=2 base=1`) |
+| linearizability suite | `go test -race -count=1 ./internal/raft/ -run "TestLinearizable"` | **PASS** — this mutation is not caught by the lin suite |
+| full suite | `go test -race -count=1 ./...` | **FAIL** — `TestCommitRuleRequiresCurrentTerm`, `TestSimMinorityLeaderCannotCommit`, `TestMultiGroupReplication` (all `internal/raft`); `internal/server` fails with a **panic**: `index out of range [-1]` in `maybeAdvanceCommit`, surfacing while `TestMultiSessionConcurrentIncr` runs — for a single-node group `len(peers)/2 = 0`, so `matches[-1]` |
 
-**Result:** Confirmed FAIL (test catches minority committing)
+The same drop applied at the **construction site** instead
+(`raft.go`, `New → majorityN: len(peers)/2` — which additionally
+breaks elections, pre-votes, and ReadIndex) fails every fault test
+above plus `TestSimPartitionLeaderFromFollower`,
+`TestSimBlockLeaderFromFollower`,
+`TestSimPartitionedNodeDoesNotInflateTerm`, and
+`TestSimSeededChaosConverges`.
+
+> An earlier revision of this section claimed the quorum mutation did
+> **not** fail `TestSimMinorityLeaderCannotCommit`. Re-runs on
+> 2026-10-02 could not reproduce that: both formulations fail the test
+> deterministically, alone and inside the suite (the test's
+> `faults_test.go:413` assertion has been present since Phase 15).
 
 ### Mutation 2: Removed Current-Term Check
 
@@ -99,16 +116,18 @@ if err != nil {
 // term != n.term check removed
 ```
 
-**Expected:** Linearizability and fault tests should FAIL (prior-term entries can commit)
+**Observed results:**
 
-**Test Command:**
-```bash
-# Temporarily apply mutation, then:
-go test -race -count=1 ./internal/raft/ -run "TestLinearizable|TestSim"
-# Should FAIL
-```
+| run | command | result |
+|---|---|---|
+| fault suite | `go test -race -count=1 ./internal/raft/ -run "TestSim"` | **PASS** — not caught here |
+| linearizability suite | `go test -race -count=1 ./internal/raft/ -run "TestLinearizable"` | **PASS** — not caught here |
+| full suite | `go test -race -count=1 ./...` | **FAIL** — exactly one test: `TestCommitRuleRequiresCurrentTerm` |
 
-**Result:** Confirmed FAIL (tests catch prior-term commits)
+> An earlier revision of this section claimed the fault and
+> linearizability suites fail under this mutation. They do not: the
+> only catcher is the targeted Figure-8 unit test. The **full**
+> suite, not a filtered run, is the gate.
 
 ---
 
@@ -117,18 +136,21 @@ go test -race -count=1 ./internal/raft/ -run "TestLinearizable|TestSim"
 To run mutation tests locally:
 
 ```bash
-# 1. Apply mutation to replicate.go (see above)
-# 2. Run fault suite:
+# 1. Start from a clean tree: git status
+# 2. Apply ONE mutation (exact diffs above)
+# 3. Run all three, recording the exact --- FAIL lines:
 go test -race -count=1 ./internal/raft/ -run "TestSim"
-
-# 3. Run linearizability suite:
 go test -race -count=1 ./internal/raft/ -run "TestLinearizable"
-
-# 4. Revert mutation, run full suite:
 go test -race -count=1 ./...
+# 4. Revert: git checkout internal/raft/replicate.go
+#    (and internal/raft/raft.go for the construction-site variant),
+#    re-run the full suite, confirm git status is clean.
 ```
 
-**Important:** Both mutations MUST cause test failures. If they don't, the test suite has a gap.
+**Important:** Both mutations MUST cause test failures somewhere in the
+full suite — if they don't, the test suite has a gap. Note that
+mutation 2 is invisible to the fault and linearizability suites: a
+filtered run would miss it entirely.
 
 ---
 

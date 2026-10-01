@@ -11,10 +11,14 @@ PORTS=(8081 8082 8083)
 DATA_DIRS=("/tmp/distrikv-demo/node1" "/tmp/distrikv-demo/node2" "/tmp/distrikv-demo/node3")
 PEERS="node1@127.0.0.1:8081,node2@127.0.0.1:8082,node3@127.0.0.1:8083"
 
+# PIDS must exist before the trap fires (set -u: cleanup reads it even on early exits)
+PIDS=()
+
 # Cleanup function
 cleanup() {
     echo "=== Cleaning up ==="
     for pid in "${PIDS[@]}"; do
+        [[ "$pid" != "0" ]] || continue # 0 would signal our own process group
         kill "$pid" 2>/dev/null || true
     done
     wait 2>/dev/null || true

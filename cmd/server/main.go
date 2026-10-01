@@ -11,6 +11,9 @@
 // clients redirect. Leader election over the gRPC transport,
 // persistent term/vote in the Raft log, in-memory engine, static cluster
 // membership via -peers.
+// Phase 21: metadata Raft group (GroupID = MaxUint64) owns the versioned
+// shard config and replicates MoveSlots commands; its commits trigger
+// config hot-swaps in the data-plane services and clients.
 package main
 
 import (
@@ -19,6 +22,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"os/signal"
@@ -46,6 +50,10 @@ import (
 // entries after the newest snapshot plus what has applied since. 0 disables
 // compaction (legal for tests, never what a server wants).
 const snapshotEveryDefault = 1024
+
+// metadataGroupID is the reserved GroupID for the metadata Raft group.
+// It uses MaxUint64 to avoid collision with user data groups [0, 16383].
+const metadataGroupID = raft.GroupID(math.MaxUint64)
 
 func main() {
 	var (
@@ -75,19 +83,22 @@ func run(id, addr, dataDir, peersSpec, shardConfigPath string, snapEvery uint64,
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Load shard config if provided.
-	var shardCfg *shard.Config
+	// Load initial shard config if provided.
+	var initialShardCfg *shard.Config
 	if shardConfigPath != "" {
 		cfg, err := shard.LoadConfig(shardConfigPath)
 		if err != nil {
 			return fmt.Errorf("load shard config: %w", err)
 		}
-		shardCfg = cfg
+		initialShardCfg = cfg
 		log.Info("shard_config_loaded",
 			slog.String("path", shardConfigPath),
 			slog.Uint64("version", cfg.Version),
 			slog.Uint64("groups", cfg.Groups),
 		)
+	} else {
+		// Default single-group config.
+		initialShardCfg = shard.NewMap(1)
 	}
 
 	// Static cluster membership + transport (Phase 4).
@@ -121,26 +132,67 @@ func run(id, addr, dataDir, peersSpec, shardConfigPath string, snapEvery uint64,
 		raftPeers[i] = p.ID
 	}
 
-	// Determine groups to host.
-	var groups []raft.GroupID
-	if shardCfg != nil {
-		for g := uint64(0); g < shardCfg.Groups; g++ {
-			groups = append(groups, raft.GroupID(g))
+	// Determine data groups to host (non-metadata groups).
+	var dataGroups []raft.GroupID
+	if initialShardCfg != nil {
+		for g := uint64(0); g < initialShardCfg.Groups; g++ {
+			dataGroups = append(dataGroups, raft.GroupID(g))
 		}
 	} else {
-		groups = []raft.GroupID{0}
+		dataGroups = []raft.GroupID{0}
 	}
 
 	// Build per-group engines, logs, and raft groups.
 	engines := make(map[raft.GroupID]kv.Engine)
-	var host *multiraft.Host
+	host := multiraft.NewHost(transport.NodeID(id))
 	var singleRaft *raft.Group // for backward compat when no shard config
 
-	if shardCfg != nil {
-		// Multi-group mode: create one Host with all groups.
-		host = multiraft.NewHost(transport.NodeID(id))
-		for _, gid := range groups {
-			// Per-group directory: data/g<g>/<node>/raft
+	// 1) Create metadata state machine and group (always).
+	metaDir := filepath.Join(dataDir, "metadata", id, "raft")
+	metaRlog, metaRec, err := raftlog.Open(metaDir)
+	if err != nil {
+		return fmt.Errorf("metadata group: open raft log: %w", err)
+	}
+	log.Info("raft_log_opened",
+		slog.String("node_id", id),
+		slog.String("group", "metadata"),
+		slog.Int64("records", metaRec.Records),
+		slog.Bool("torn_tail_discarded", metaRec.TornTail),
+		slog.Int64("truncated_bytes", metaRec.TruncatedBytes),
+	)
+
+	// Create metadata SM with initial config and a callback to hot-swap.
+	// We'll create the GroupedService after this and pass the metadataSM to it.
+	metadataSM := kv.NewMetadataSM(kv.MetadataSMConfig{
+		InitialConfig: initialShardCfg,
+		OnConfigChange: func(version uint64) {
+			log.Info("metadata_config_changed", slog.Uint64("version", version))
+			// GroupedService will pick up the new config on next request via metadataSM.Config()
+		},
+	})
+	metaEngine := kv.NewMemEngine()
+	engines[metadataGroupID] = metaEngine
+	metaGroup, err := raft.New(raft.Config{
+		ID:             transport.NodeID(id),
+		GroupID:        metadataGroupID,
+		Peers:          raftPeers,
+		Transport:      rt,
+		Log:            metaRlog,
+		ElectionTicks:  10,
+		HeartbeatTicks: 3,
+		Logger:         log,
+		StateMachine:   metadataSM,
+		SnapshotEvery:  snapEvery,
+	})
+	if err != nil {
+		return fmt.Errorf("metadata group: raft.New: %w", err)
+	}
+	host.AddGroup(metaGroup)
+
+	// 2) Create data groups.
+	if len(dataGroups) > 1 || (len(dataGroups) == 1 && dataGroups[0] != 0) {
+		// Multi-group mode: create data groups in the same host.
+		for _, gid := range dataGroups {
 			dir := filepath.Join(dataDir, fmt.Sprintf("g%d", gid), id, "raft")
 			rlog, rec, err := raftlog.Open(dir)
 			if err != nil {
@@ -174,7 +226,8 @@ func run(id, addr, dataDir, peersSpec, shardConfigPath string, snapEvery uint64,
 		}
 		rt.SetHandler(host)
 	} else {
-		// Single-group mode (backward compatible).
+		// Single-group mode (backward compatible): group 0 only, no metadata group in host.
+		// But we still have the metadata group in the host above.
 		engine := kv.NewMemEngine()
 		engines[0] = engine
 		rlog, rec, err := raftlog.Open(filepath.Join(dataDir, "raft"))
@@ -208,7 +261,11 @@ func run(id, addr, dataDir, peersSpec, shardConfigPath string, snapEvery uint64,
 			return fmt.Errorf("raft core: %w", err)
 		}
 		singleRaft = rn
-		rt.SetHandler(rn)
+		// Note: in single-group mode, we still have the metadata group in host.
+		// But the legacy Service doesn't use it. We'll set handler to singleRaft
+		// for backward compat, but that means metadata group won't receive RPCs.
+		// For now, we need a combined handler. Let's use the host always.
+		rt.SetHandler(host)
 	}
 
 	lis, err := net.Listen("tcp", addr)
@@ -220,10 +277,10 @@ func run(id, addr, dataDir, peersSpec, shardConfigPath string, snapEvery uint64,
 
 	// Create the appropriate KV service.
 	var kvService kv1.KVServiceServer
-	if shardCfg != nil {
-		// Multi-group: use GroupedService with per-group engines.
+	if len(dataGroups) > 1 || (len(dataGroups) == 1 && dataGroups[0] != 0) {
+		// Multi-group: use GroupedService with metadataSM for dynamic config.
 		kvService = server.NewGroupedService(
-			shardCfg,
+			metadataSM,  // provides dynamic config via Config()
 			host,        // implements GroupProposer
 			host.Status, // implements GroupStatusFunc
 			leaderAddrs,
@@ -250,40 +307,14 @@ func run(id, addr, dataDir, peersSpec, shardConfigPath string, snapEvery uint64,
 		}
 	}()
 
-	// Start Raft event loops.
-	if shardCfg != nil {
-		// Multi-group: start each group's loop + ticker.
-		for _, gid := range groups {
-			g := host.Group(gid)
-			go func(group *raft.Group) {
-				if raftErr := group.Run(ctx); raftErr != nil {
-					log.Error("raft_halted",
-						slog.String("node_id", id),
-						slog.Uint64("group", uint64(group.GroupID())),
-						slog.String("error", raftErr.Error()),
-					)
-					select {
-					case errCh <- raftErr:
-					default:
-					}
-				}
-			}(g)
-			raft.StartTicker(ctx, g, 10*time.Millisecond)
-		}
-		if s := host.Group(0).Status(); s.Role != "" {
-			log.Info("raft_started",
-				slog.String("node_id", id),
-				slog.String("role", string(s.Role)),
-				slog.Uint64("term", s.Term),
-				slog.Uint64("group", 0),
-			)
-		}
-	} else {
-		// Single-group.
-		go func() {
-			if raftErr := singleRaft.Run(ctx); raftErr != nil {
+	// Start Raft event loops for all groups in the host.
+	for _, gid := range host.GroupIDs() {
+		g := host.Group(gid)
+		go func(group *raft.Group) {
+			if raftErr := group.Run(ctx); raftErr != nil {
 				log.Error("raft_halted",
 					slog.String("node_id", id),
+					slog.Uint64("group", uint64(group.GroupID())),
 					slog.String("error", raftErr.Error()),
 				)
 				select {
@@ -291,15 +322,24 @@ func run(id, addr, dataDir, peersSpec, shardConfigPath string, snapEvery uint64,
 				default:
 				}
 			}
-		}()
-		raft.StartTicker(ctx, singleRaft, 10*time.Millisecond)
-		if s := singleRaft.Status(); s.Role != "" {
-			log.Info("raft_started",
-				slog.String("node_id", id),
-				slog.String("role", string(s.Role)),
-				slog.Uint64("term", s.Term),
-			)
-		}
+		}(g)
+		raft.StartTicker(ctx, g, 10*time.Millisecond)
+	}
+	if s := host.Group(0).Status(); s.Role != "" {
+		log.Info("raft_started",
+			slog.String("node_id", id),
+			slog.String("role", string(s.Role)),
+			slog.Uint64("term", s.Term),
+			slog.Uint64("group", 0),
+		)
+	}
+	if s := host.Group(metadataGroupID).Status(); s.Role != "" {
+		log.Info("raft_started",
+			slog.String("node_id", id),
+			slog.String("role", string(s.Role)),
+			slog.Uint64("term", s.Term),
+			slog.String("group", "metadata"),
+		)
 	}
 
 	select {

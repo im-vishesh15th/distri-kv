@@ -95,28 +95,19 @@ Fields returned (same as before, now group-scoped):
 
 ---
 
-## Why No Rebalancing Yet
+## Rebalancing (Phase 21)
 
-Phase 20 uses the **static versioned config only**. The metadata Raft group
-(which would ship new configs and move slot ranges atomically) is deferred to
-Phase 21 / Tier 3. Until then:
+Phase 21 is complete. The metadata Raft group (GroupID = MaxUint64) now owns
+the authoritative shard config and replicates `MoveSlots` commands.
+Key features:
 
-- The assignment is fixed at startup.
-- All nodes and clients load the same static file.
-- `Version` field lets operators detect drift (manually or via future tooling).
+- **Metadata Raft group** runs on all nodes, stores `shard.Config` as its SM
+- **MoveSlots** RPC proposes contiguous range moves; replicated via metadata group
+- **Config hot-swap**: `GroupedService` reads config from `MetadataSM.Config()` on every request
+- **Client sync**: `config_version` in `GetStatus` + `GetShardConfig` RPC for clients
+- **Data migration**: Idempotent `CAS` streaming of moved keys (see [Rebalancing](rebalancing.md))
 
----
-
-## Why Metadata Raft Is Deferred
-
-The architecture explicitly marks metadata Raft and rebalancing as **Tier 3
-(optional)**. A finished, correct core (single-group + multi-group router)
-beats a half-finished metadata layer. Phase 21 will add:
-
-- Metadata Raft group (owns the authoritative shard config)
-- Config change proposals (move slot ranges)
-- Data migration (stream moved keys to new group)
-- Coordinator to orchestrate the move safely
+See [Rebalancing](rebalancing.md) for full details.
 
 ---
 

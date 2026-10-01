@@ -117,5 +117,9 @@ multi-group writes (see docs/multiraft.md's resolved follow-up).
 
 ## What's next
 
-- **Phase 21** (optional): rebalancing — moving slot ranges between groups
-  via the metadata Raft group (Tier 3).
+Phase 21 (rebalancing via metadata Raft group) is complete. See [Rebalancing](rebalancing.md).
+
+Next milestones:
+- **M7 Measure** (Phases 22–24): Consistency spec, benchmarks, pprof
+- **M8 Product** (P1–P5): API keys, tenancy, quotas, gateway, onboarding
+- **M9 Launch** (Phases 25–30): Docker, observability, CI, full test suite, docs

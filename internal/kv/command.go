@@ -1,6 +1,7 @@
 package kv
 
 import (
+	"encoding/json"
 	"errors"
 	"strconv"
 )
@@ -22,6 +23,8 @@ const (
 	OpCAS
 	// OpIncr adds cmd.Delta (signed; negative = decrement) to an int64 value.
 	OpIncr
+	// OpMoveSlots moves a slot range between groups (metadata command).
+	OpMoveSlots
 )
 
 // Command is a deterministic mutation to be applied to the KV state machine.
@@ -125,6 +128,14 @@ var (
 	// it — an SDK's in-flight retries always carry the newest sequence.
 	ErrStaleSequence = errors.New("kv: sequence_number superseded by a newer request from this session")
 )
+
+// MoveSlots returns a command that proposes a slot range move between groups.
+// This is a metadata command: the Value field carries a JSON-encoded
+// MoveSlotsRequest, and ClientID is empty (bypasses dedup).
+func MoveSlots(req MoveSlotsRequest) Command {
+	b, _ := json.Marshal(req)
+	return Command{Op: OpMoveSlots, Key: "_meta/move-slots", Value: b, ClientID: ""}
+}
 
 // parseInt64 parses a canonical base-10 int64 (the form formatInt64 writes).
 func parseInt64(b []byte) (int64, error) {

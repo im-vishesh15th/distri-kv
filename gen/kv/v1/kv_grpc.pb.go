@@ -38,13 +38,15 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	KVService_Get_FullMethodName       = "/distrikv.v1.KVService/Get"
-	KVService_Put_FullMethodName       = "/distrikv.v1.KVService/Put"
-	KVService_Delete_FullMethodName    = "/distrikv.v1.KVService/Delete"
-	KVService_Exists_FullMethodName    = "/distrikv.v1.KVService/Exists"
-	KVService_CAS_FullMethodName       = "/distrikv.v1.KVService/CAS"
-	KVService_Incr_FullMethodName      = "/distrikv.v1.KVService/Incr"
-	KVService_GetStatus_FullMethodName = "/distrikv.v1.KVService/GetStatus"
+	KVService_Get_FullMethodName            = "/distrikv.v1.KVService/Get"
+	KVService_Put_FullMethodName            = "/distrikv.v1.KVService/Put"
+	KVService_Delete_FullMethodName         = "/distrikv.v1.KVService/Delete"
+	KVService_Exists_FullMethodName         = "/distrikv.v1.KVService/Exists"
+	KVService_CAS_FullMethodName            = "/distrikv.v1.KVService/CAS"
+	KVService_Incr_FullMethodName           = "/distrikv.v1.KVService/Incr"
+	KVService_GetStatus_FullMethodName      = "/distrikv.v1.KVService/GetStatus"
+	KVService_GetShardConfig_FullMethodName = "/distrikv.v1.KVService/GetShardConfig"
+	KVService_MoveSlots_FullMethodName      = "/distrikv.v1.KVService/MoveSlots"
 )
 
 // KVServiceClient is the client API for KVService service.
@@ -71,6 +73,15 @@ type KVServiceClient interface {
 	// the current leader, so clients can route mutations (Phase 8). It is a
 	// read: any node answers, whatever its role.
 	GetStatus(ctx context.Context, in *GetStatusRequest, opts ...grpc.CallOption) (*GetStatusResponse, error)
+	// GetShardConfig returns the current versioned shard configuration.
+	// Used by clients to sync their local config when the version advances
+	// (Phase 21: metadata Raft group).
+	GetShardConfig(ctx context.Context, in *GetShardConfigRequest, opts ...grpc.CallOption) (*GetShardConfigResponse, error)
+	// MoveSlots proposes a slot-range move between Raft groups.
+	// This is an admin operation replicated through the metadata Raft group
+	// (Phase 21). The request is serialized as a Command and proposed to the
+	// metadata group; the response reflects the proposal outcome.
+	MoveSlots(ctx context.Context, in *MoveSlotsRequest, opts ...grpc.CallOption) (*MoveSlotsResponse, error)
 }
 
 type kVServiceClient struct {
@@ -151,6 +162,26 @@ func (c *kVServiceClient) GetStatus(ctx context.Context, in *GetStatusRequest, o
 	return out, nil
 }
 
+func (c *kVServiceClient) GetShardConfig(ctx context.Context, in *GetShardConfigRequest, opts ...grpc.CallOption) (*GetShardConfigResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetShardConfigResponse)
+	err := c.cc.Invoke(ctx, KVService_GetShardConfig_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kVServiceClient) MoveSlots(ctx context.Context, in *MoveSlotsRequest, opts ...grpc.CallOption) (*MoveSlotsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MoveSlotsResponse)
+	err := c.cc.Invoke(ctx, KVService_MoveSlots_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // KVServiceServer is the server API for KVService service.
 // All implementations must embed UnimplementedKVServiceServer
 // for forward compatibility.
@@ -175,6 +206,15 @@ type KVServiceServer interface {
 	// the current leader, so clients can route mutations (Phase 8). It is a
 	// read: any node answers, whatever its role.
 	GetStatus(context.Context, *GetStatusRequest) (*GetStatusResponse, error)
+	// GetShardConfig returns the current versioned shard configuration.
+	// Used by clients to sync their local config when the version advances
+	// (Phase 21: metadata Raft group).
+	GetShardConfig(context.Context, *GetShardConfigRequest) (*GetShardConfigResponse, error)
+	// MoveSlots proposes a slot-range move between Raft groups.
+	// This is an admin operation replicated through the metadata Raft group
+	// (Phase 21). The request is serialized as a Command and proposed to the
+	// metadata group; the response reflects the proposal outcome.
+	MoveSlots(context.Context, *MoveSlotsRequest) (*MoveSlotsResponse, error)
 	mustEmbedUnimplementedKVServiceServer()
 }
 
@@ -205,6 +245,12 @@ func (UnimplementedKVServiceServer) Incr(context.Context, *IncrRequest) (*IncrRe
 }
 func (UnimplementedKVServiceServer) GetStatus(context.Context, *GetStatusRequest) (*GetStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetStatus not implemented")
+}
+func (UnimplementedKVServiceServer) GetShardConfig(context.Context, *GetShardConfigRequest) (*GetShardConfigResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetShardConfig not implemented")
+}
+func (UnimplementedKVServiceServer) MoveSlots(context.Context, *MoveSlotsRequest) (*MoveSlotsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MoveSlots not implemented")
 }
 func (UnimplementedKVServiceServer) mustEmbedUnimplementedKVServiceServer() {}
 func (UnimplementedKVServiceServer) testEmbeddedByValue()                   {}
@@ -353,6 +399,42 @@ func _KVService_GetStatus_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _KVService_GetShardConfig_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetShardConfigRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KVServiceServer).GetShardConfig(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: KVService_GetShardConfig_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KVServiceServer).GetShardConfig(ctx, req.(*GetShardConfigRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _KVService_MoveSlots_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MoveSlotsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KVServiceServer).MoveSlots(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: KVService_MoveSlots_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KVServiceServer).MoveSlots(ctx, req.(*MoveSlotsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // KVService_ServiceDesc is the grpc.ServiceDesc for KVService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -387,6 +469,14 @@ var KVService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetStatus",
 			Handler:    _KVService_GetStatus_Handler,
+		},
+		{
+			MethodName: "GetShardConfig",
+			Handler:    _KVService_GetShardConfig_Handler,
+		},
+		{
+			MethodName: "MoveSlots",
+			Handler:    _KVService_MoveSlots_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

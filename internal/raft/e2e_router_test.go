@@ -73,8 +73,12 @@ func TestE2EMultiGroupRouter(t *testing.T) {
 		}
 
 		host := c.Host(i)
+		// Create MetadataSM with initial config for dynamic config support.
+		metadataSM := kv.NewMetadataSM(kv.MetadataSMConfig{
+			InitialConfig: m,
+		})
 		svc := server.NewGroupedService(
-			m,
+			metadataSM,
 			host,
 			host.Status,
 			leaderAddrs,

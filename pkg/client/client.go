@@ -55,6 +55,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -133,9 +134,10 @@ type Client struct {
 	// writes to multiple groups must keep a separate monotonic counter per
 	// group, not one global counter. shardMap (set via SetShardMap) tells
 	// the client which group a key routes to; seqs holds the counters.
-	shardMap *shard.Config // guarded by mu
-	seqMu    sync.Mutex
-	seqs     map[raft.GroupID]uint64
+	shardMap       *shard.Config // guarded by mu
+	configVersion_ uint64        // guarded by mu; cached shard config version
+	seqMu          sync.Mutex
+	seqs           map[raft.GroupID]uint64
 }
 
 // Dial connects to a DistriKV node at addr (host:port) — any node: leader
@@ -462,10 +464,18 @@ func (c *Client) read(ctx context.Context, key string, op readOp) error {
 // discover asks the node that just redirected us where the leader lives
 // for the given key's group. Returns false when routing is impossible
 // (no leader known, or the address is unusable).
+// Also checks if the server's config version is newer and triggers a sync.
 func (c *Client) discover(ctx context.Context, stub kv1.KVServiceClient, key string) (string, bool) {
 	resp, err := stub.GetStatus(ctx, &kv1.GetStatusRequest{Key: key})
 	if err != nil {
 		return "", false
+	}
+	// Check if server's config version is newer than ours.
+	if resp.ConfigVersion > c.configVersion_ {
+		// Trigger async config sync; don't block the redirect.
+		go func() {
+			_, _ = c.syncShardConfig(ctx)
+		}()
 	}
 	switch {
 	case resp.LeaderAddr != "":
@@ -482,6 +492,7 @@ func (c *Client) discover(ctx context.Context, stub kv1.KVServiceClient, key str
 // repair re-points routing for the given key's group at a live endpoint
 // after a transport failure on failedAddr — discovery is a read, always
 // safe, and never affects the error the current call returns.
+// Also checks config version.
 func (c *Client) repair(ctx context.Context, key, failedAddr string) {
 	alt, altStub, ok := c.otherConn(failedAddr)
 	if !ok {
@@ -493,6 +504,12 @@ func (c *Client) repair(ctx context.Context, key, failedAddr string) {
 		// endpoint that just failed (stale view of a dead leader).
 		if resp.LeaderAddr != "" && resp.LeaderAddr != failedAddr {
 			next = resp.LeaderAddr
+		}
+		// Check config version.
+		if resp.ConfigVersion > c.configVersion_ {
+			go func() {
+				_, _ = c.syncShardConfig(ctx)
+			}()
 		}
 	}
 	c.switchToGroup(c.groupFor(key), next)
@@ -584,7 +601,55 @@ func (c *Client) connLocked(addr string) (*grpc.ClientConn, error) {
 func (c *Client) SetShardMap(m *shard.Config) {
 	c.mu.Lock()
 	c.shardMap = m
+	if m != nil {
+		c.configVersion_ = m.Version
+	}
 	c.mu.Unlock()
+}
+
+// configVersion returns the current cached config version.
+func (c *Client) configVersion() uint64 {
+	c.mu.Lock()
+	v := c.configVersion_
+	c.mu.Unlock()
+	return v
+}
+
+// setConfigVersion updates the cached config version.
+func (c *Client) setConfigVersion(v uint64) {
+	c.mu.Lock()
+	c.configVersion_ = v
+	c.mu.Unlock()
+}
+
+// syncShardConfig fetches the latest shard config from the server and updates
+// the local config if the server's version is newer. Returns true if config was updated.
+func (c *Client) syncShardConfig(ctx context.Context) (bool, error) {
+	stub, _ := c.endpoint(0) // config is global, use group 0 endpoint
+	resp, err := stub.GetShardConfig(ctx, &kv1.GetShardConfigRequest{
+		IfVersionGt: c.configVersion(),
+	})
+	if err != nil {
+		return false, unwrap(err)
+	}
+	if resp.Version == 0 || resp.Version <= c.configVersion() {
+		return false, nil // no newer config
+	}
+	if resp.ConfigJson == "" {
+		return false, nil // server didn't send full config
+	}
+	var cfg shard.Config
+	if err := json.Unmarshal([]byte(resp.ConfigJson), &cfg); err != nil {
+		return false, fmt.Errorf("client: unmarshal shard config: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return false, fmt.Errorf("client: invalid shard config from server: %w", err)
+	}
+	c.mu.Lock()
+	c.shardMap = &cfg
+	c.configVersion_ = cfg.Version
+	c.mu.Unlock()
+	return true, nil
 }
 
 // groupFor returns the Raft group that owns key, per the loaded shard map
@@ -610,6 +675,24 @@ func (c *Client) nextSeq(gid raft.GroupID) uint64 {
 	defer c.seqMu.Unlock()
 	c.seqs[gid]++
 	return c.seqs[gid]
+}
+
+// GetShardConfig fetches the current shard configuration from the server.
+func (c *Client) GetShardConfig(ctx context.Context) (*kv1.GetShardConfigResponse, error) {
+	stub, _ := c.endpoint(0) // config is global, use group 0 endpoint
+	return stub.GetShardConfig(ctx, &kv1.GetShardConfigRequest{})
+}
+
+// MoveSlots proposes a slot range move via the metadata Raft group.
+func (c *Client) MoveSlots(ctx context.Context, startSlot, endSlot, fromGroup, toGroup, newVersion uint64) (*kv1.MoveSlotsResponse, error) {
+	stub, _ := c.endpoint(0) // metadata group is global, use group 0 endpoint
+	return stub.MoveSlots(ctx, &kv1.MoveSlotsRequest{
+		StartSlot:  startSlot,
+		EndSlot:    endSlot,
+		FromGroup:  fromGroup,
+		ToGroup:    toGroup,
+		NewVersion: newVersion,
+	})
 }
 
 // newClientID generates a random 128-bit client identity.

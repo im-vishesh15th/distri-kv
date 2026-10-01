@@ -49,6 +49,17 @@ service KVService {
   // the current leader, so clients can route mutations (Phase 8). It is a
   // read: any node answers, whatever its role.
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+
+  // GetShardConfig returns the current versioned shard configuration.
+  // Used by clients to sync their local config when the version advances
+  // (Phase 21: metadata Raft group).
+  rpc GetShardConfig(GetShardConfigRequest) returns (GetShardConfigResponse);
+
+  // MoveSlots proposes a slot-range move between Raft groups.
+  // This is an admin operation replicated through the metadata Raft group
+  // (Phase 21). The request is serialized as a Command and proposed to the
+  // metadata group; the response reflects the proposal outcome.
+  rpc MoveSlots(MoveSlotsRequest) returns (MoveSlotsResponse);
 }
 
 message GetRequest {
@@ -183,6 +194,45 @@ message GetStatusResponse {
   // "" when unknown to this node (including standalone deployments, where
   // leader_id == node_id means "you are already on the leader").
   string leader_addr = 4;
+  // The shard config version this node currently serves (Phase 21).
+  // Clients can compare this with their cached version to detect drift.
+  uint64 config_version = 5;
+}
+
+// GetShardConfig returns the current versioned shard configuration.
+message GetShardConfigRequest {
+  // Optional: if set, only return config if version > this value.
+  // Allows clients to avoid re-fetching unchanged config.
+  uint64 if_version_gt = 1;
+}
+
+message GetShardConfigResponse {
+  uint64 version = 1;
+  // JSON-encoded shard.Config (same format as the static config file).
+  string config_json = 2;
+}
+
+// MoveSlots proposes a contiguous slot range move from one Raft group to another.
+// The metadata Raft group replicates this as a config change.
+// If successful, the new config version is returned.
+message MoveSlotsRequest {
+  // Inclusive start slot.
+  uint64 start_slot = 1;
+  // Exclusive end slot.
+  uint64 end_slot = 2;
+  // Source group ID (must currently own the range).
+  uint64 from_group = 3;
+  // Destination group ID (must exist in current config).
+  uint64 to_group = 4;
+  // New config version (must be > current version).
+  uint64 new_version = 5;
+}
+
+message MoveSlotsResponse {
+  // The new config version if the move was accepted.
+  uint64 new_version = 1;
+  // If non-empty, the move was rejected with this error message.
+  string error = 2;
 }
 
 // ---------------------------------------------------------------------------

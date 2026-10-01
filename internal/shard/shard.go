@@ -59,7 +59,7 @@ type Map = Config
 // invalid config loudly.
 func NewMap(groups uint64) *Config {
 	c := &Config{Groups: groups}
-	if err := c.validate(); err != nil {
+	if err := c.Validate(); err != nil {
 		panic(err)
 	}
 	return c
@@ -83,15 +83,16 @@ func LoadConfig(path string) (*Config, error) {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("shard: parse config: %w", err)
 	}
-	if err := c.validate(); err != nil {
+	if err := c.Validate(); err != nil {
 		return nil, err
 	}
 	return &c, nil
 }
 
-// validate checks the assignment is total (every slot owned), non-overlapping,
+// Validate checks the assignment is total (every slot owned), non-overlapping,
 // and in range. The default (no Ranges) is always valid.
-func (c *Config) validate() error {
+// Exported so other packages can verify configs.
+func (c *Config) Validate() error {
 	if c.Groups == 0 {
 		return fmt.Errorf("shard: config has 0 groups")
 	}

@@ -37,8 +37,10 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"strconv"
 
 	kv1 "distrikv/gen/kv/v1"
@@ -47,6 +49,9 @@ import (
 	"distrikv/internal/shard"
 	"distrikv/internal/transport"
 )
+
+// metadataGroupID is the reserved GroupID for the metadata Raft group.
+const metadataGroupID = raft.GroupID(math.MaxUint64)
 
 // StatusFunc reports this node's Raft status (identity, role, leader) for
 // leader routing. *raft.Group.Status satisfies it.
@@ -105,16 +110,17 @@ func NewService(engine kv.Engine, proposer Proposer, status StatusFunc,
 }
 
 // GroupedService adapts multiple KV engines (one per Raft group) to the
-// gRPC KVService, using a shard map to route keys to groups. If shard is
-// nil, all keys map to group 0 (single-group compatibility).
+// gRPC KVService, using a shard map to route keys to groups.
+// The shard map is provided by a MetadataSM, allowing dynamic config updates
+// when the metadata Raft group commits a new version.
 type GroupedService struct {
 	kv1.UnimplementedKVServiceServer
 
-	shard    *shard.Config
-	proposer GroupProposer
-	status   GroupStatusFunc
-	addrs    map[transport.NodeID]string
-	log      *slog.Logger
+	metadataSM *kv.MetadataSM // provides dynamic config via Config()
+	proposer   GroupProposer
+	status     GroupStatusFunc
+	addrs      map[transport.NodeID]string
+	log        *slog.Logger
 
 	// engines maps groupID -> kv.Engine for reads. Writes go through
 	// proposer which routes to the correct group's SM.
@@ -122,27 +128,36 @@ type GroupedService struct {
 }
 
 // NewGroupedService returns a KVService that routes every operation to the
-// Raft group that owns its key (per the shard map). shard may be nil (all
-// keys -> group 0). proposer/status must be able to serve all groups in the
-// shard; an unknown group returns codes.Internal. addrs maps node ID ->
-// dialable address for leader hints. log may be nil.
-//
+// Raft group that owns its key (per the shard map from metadataSM).
+// metadataSM provides the current config via Config(); if nil, all keys map to group 0.
+// proposer/status must be able to serve all groups in the config; an unknown group returns codes.Internal.
+// addrs maps node ID -> dialable address for leader hints. log may be nil.
 // engines is the per-group engine map (required for reads).
-func NewGroupedService(shard *shard.Config, proposer GroupProposer, status GroupStatusFunc,
+func NewGroupedService(metadataSM *kv.MetadataSM, proposer GroupProposer, status GroupStatusFunc,
 	addrs map[transport.NodeID]string, log *slog.Logger, engines map[raft.GroupID]kv.Engine) *GroupedService {
 	return &GroupedService{
-		shard: shard, proposer: proposer, status: status, addrs: addrs, log: log, engines: engines,
+		metadataSM: metadataSM, proposer: proposer, status: status, addrs: addrs, log: log, engines: engines,
 	}
 }
 
-// groupFor returns the group that owns key. Nil shard -> group 0.
+// currentConfig returns the current shard config from metadataSM.
+// Returns nil if metadataSM is nil (falls back to group 0).
+func (s *GroupedService) currentConfig() *shard.Config {
+	if s.metadataSM == nil {
+		return nil
+	}
+	return s.metadataSM.Config()
+}
+
+// groupFor returns the group that owns key. Nil config -> group 0.
 // Empty key maps to group 0 (backward compatibility for GetStatus with
 // no key specified).
 func (s *GroupedService) groupFor(key string) raft.GroupID {
-	if s.shard == nil || key == "" {
+	cfg := s.currentConfig()
+	if cfg == nil || key == "" {
 		return 0
 	}
-	return s.shard.Group(key)
+	return cfg.Group(key)
 }
 
 // propose routes a mutation to the group that owns the key.
@@ -393,6 +408,7 @@ func (s *Service) logOp(ctx context.Context, op, key, clientID string, seq uint6
 
 // GetStatus answers "who am I, who leads, where is the leader" for the
 // Raft group that owns the requested key (Phase 20). Empty key -> group 0.
+// Also returns the current shard config version (Phase 21).
 func (s *GroupedService) GetStatus(ctx context.Context, req *kv1.GetStatusRequest) (*kv1.GetStatusResponse, error) {
 	gid := s.groupFor(req.Key)
 	if s.status == nil {
@@ -403,14 +419,73 @@ func (s *GroupedService) GetStatus(ctx context.Context, req *kv1.GetStatusReques
 		return nil, statusErrorInternal(fmt.Errorf("group %d status: %w", gid, err))
 	}
 	resp := &kv1.GetStatusResponse{
-		NodeId:   string(st.ID),
-		Role:     string(st.Role),
-		LeaderId: string(st.LeaderID),
+		NodeId:        string(st.ID),
+		Role:          string(st.Role),
+		LeaderId:      string(st.LeaderID),
+		ConfigVersion: s.currentConfigVersion(),
 	}
 	if st.LeaderID != "" {
 		resp.LeaderAddr = s.addrs[st.LeaderID]
 	}
 	return resp, nil
+}
+
+// currentConfigVersion returns the current shard config version (0 if none).
+func (s *GroupedService) currentConfigVersion() uint64 {
+	cfg := s.currentConfig()
+	if cfg == nil {
+		return 0
+	}
+	return cfg.Version
+}
+
+// GetShardConfig returns the current versioned shard configuration.
+func (s *GroupedService) GetShardConfig(ctx context.Context, req *kv1.GetShardConfigRequest) (*kv1.GetShardConfigResponse, error) {
+	cfg := s.currentConfig()
+	if cfg == nil {
+		return &kv1.GetShardConfigResponse{Version: 0, ConfigJson: ""}, nil
+	}
+	// Check if_version_gt to avoid sending unchanged config.
+	if req.IfVersionGt > 0 && cfg.Version <= req.IfVersionGt {
+		return &kv1.GetShardConfigResponse{Version: cfg.Version, ConfigJson: ""}, nil
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, statusErrorInternal(fmt.Errorf("marshal config: %w", err))
+	}
+	return &kv1.GetShardConfigResponse{Version: cfg.Version, ConfigJson: string(b)}, nil
+}
+
+// MoveSlots proposes a slot range move via the metadata Raft group.
+// The request is encoded as a metadata command and proposed to the metadata group.
+func (s *GroupedService) MoveSlots(ctx context.Context, req *kv1.MoveSlotsRequest) (*kv1.MoveSlotsResponse, error) {
+	// Build the metadata command payload.
+	moveReq := kv.MoveSlotsRequest{
+		StartSlot:  req.StartSlot,
+		EndSlot:    req.EndSlot,
+		FromGroup:  req.FromGroup,
+		ToGroup:    req.ToGroup,
+		NewVersion: req.NewVersion,
+	}
+	cmd := kv.MoveSlots(moveReq)
+	payload, err := kv.EncodeCommand(cmd)
+	if err != nil {
+		return nil, statusErrorInternal(fmt.Errorf("encode move-slots: %w", err))
+	}
+	// Propose to the metadata group.
+	_, result, err := s.proposer.Propose(ctx, metadataGroupID, payload)
+	if err != nil {
+		return &kv1.MoveSlotsResponse{Error: err.Error()}, nil
+	}
+	// Result contains the new version.
+	res, ok := result.(kv.Result)
+	if !ok {
+		return &kv1.MoveSlotsResponse{Error: "metadata group returned unexpected result"}, nil
+	}
+	versionStr := string(res.Value)
+	var newVersion uint64
+	fmt.Sscanf(versionStr, "%d", &newVersion)
+	return &kv1.MoveSlotsResponse{NewVersion: newVersion}, nil
 }
 
 // Get returns the value for key or codes.NotFound. The read is

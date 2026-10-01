@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -161,6 +162,47 @@ func dispatch(ctx context.Context, c *client.Client, args []string) error {
 		}
 		fmt.Println()
 
+	case "shard-config":
+		if err := need(0); err != nil {
+			return err
+		}
+		resp, err := c.GetShardConfig(ctx)
+		if err != nil {
+			return err
+		}
+		if resp.Version == 0 {
+			fmt.Println("no shard config loaded on server")
+			return nil
+		}
+		fmt.Printf("version=%d\n", resp.Version)
+		if resp.ConfigJson != "" {
+			var pretty map[string]interface{}
+			if err := json.Unmarshal([]byte(resp.ConfigJson), &pretty); err == nil {
+				b, _ := json.MarshalIndent(pretty, "", "  ")
+				fmt.Println(string(b))
+			} else {
+				fmt.Println(resp.ConfigJson)
+			}
+		}
+
+	case "move-slots":
+		if err := need(5); err != nil {
+			return err
+		}
+		start, _ := strconv.ParseUint(rest[0], 10, 64)
+		end, _ := strconv.ParseUint(rest[1], 10, 64)
+		from, _ := strconv.ParseUint(rest[2], 10, 64)
+		to, _ := strconv.ParseUint(rest[3], 10, 64)
+		version, _ := strconv.ParseUint(rest[4], 10, 64)
+		resp, err := c.MoveSlots(ctx, start, end, from, to, version)
+		if err != nil {
+			return err
+		}
+		if resp.Error != "" {
+			return fmt.Errorf("move-slots rejected: %s", resp.Error)
+		}
+		fmt.Printf("move-slots accepted, new version=%d\n", resp.NewVersion)
+
 	default:
 		usage()
 		return fmt.Errorf("unknown command %q", cmd)
@@ -179,7 +221,9 @@ commands:
   cas <key> <expected|-> <new>    ("-" = key must be absent)
   incr <key> [delta]
   decr <key>
-  status`)
+  status
+  shard-config                    print server's shard configuration
+  move-slots <start> <end> <from> <to> <version>  propose slot range move`)
 	flag.PrintDefaults()
 }
 

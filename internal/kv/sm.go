@@ -15,12 +15,21 @@ package kv
 // handled correctly with replication and snapshots) keeps dedup decisions
 // identical on a node that resumed from a snapshot and one that replayed
 // the full log.
+//
+// Phase 21 adds a MetadataSM: a separate state machine for the shard
+// config, replicated through the metadata Raft group. It stores the
+// versioned shard.Config and applies MoveSlots commands to evolve it.
+// The metadata group runs on all nodes; its commits trigger config
+// hot-swaps in the data-plane services and clients.
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
+	"sync"
 
 	kv1 "distrikv/gen/kv/v1"
+	"distrikv/internal/shard"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -259,4 +268,252 @@ func sessionError(s string) error {
 	default:
 		return fmt.Errorf("kv: restored session error: %s", s)
 	}
+}
+
+// MetadataSMConfig is the configuration for the metadata state machine.
+type MetadataSMConfig struct {
+	// InitialConfig is the shard config to start with (from static file).
+	// If nil, a default single-group config is used.
+	InitialConfig *shard.Config
+
+	// OnConfigChange is called when a new config is committed.
+	// The callback receives the new config version.
+	// Must not block; if slow work is needed, spawn a goroutine.
+	OnConfigChange func(version uint64)
+}
+
+// MetadataSM is the state machine for the metadata Raft group.
+// It stores the versioned shard config and applies MoveSlots commands.
+// It snapshots/restores the config and notifies when the config changes.
+type MetadataSM struct {
+	mu       sync.RWMutex
+	config   *shard.Config
+	onChange func(version uint64)
+}
+
+// NewMetadataSM creates the metadata state machine.
+func NewMetadataSM(cfg MetadataSMConfig) *MetadataSM {
+	m := &MetadataSM{onChange: cfg.OnConfigChange}
+	if cfg.InitialConfig != nil {
+		m.config = cfg.InitialConfig
+	} else {
+		m.config = shard.NewMap(1)
+	}
+	return m
+}
+
+// Apply decodes and executes a metadata command.
+// Currently supports MoveSlots (the only mutating metadata operation).
+// Returns the new config version on success.
+func (m *MetadataSM) Apply(payload []byte) (any, error) {
+	cmd, err := DecodeCommand(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	// Metadata commands use empty client_id to bypass dedup (internal op).
+	// The only mutating op is MoveSlots (COMMAND_OP_MOVE_SLOTS).
+	// We encode MoveSlotsRequest as a CAS-like command with special key.
+	// For simplicity, we use a dedicated command op type.
+
+	if cmd.Op != OpMoveSlots {
+		return nil, fmt.Errorf("metadata: unknown command op %d", cmd.Op)
+	}
+
+	// The payload is a JSON-encoded MoveSlotsRequest in cmd.Value
+	var req MoveSlotsRequest
+	if err := json.Unmarshal(cmd.Value, &req); err != nil {
+		return nil, fmt.Errorf("metadata: unmarshal MoveSlotsRequest: %w", err)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Validate the request against current config.
+	if req.NewVersion <= m.config.Version {
+		return Result{}, fmt.Errorf("metadata: new version %d must be > current %d",
+			req.NewVersion, m.config.Version)
+	}
+	if req.StartSlot >= req.EndSlot {
+		return Result{}, fmt.Errorf("metadata: start_slot >= end_slot")
+	}
+	if req.EndSlot > shard.NumSlots {
+		return Result{}, fmt.Errorf("metadata: end_slot out of range")
+	}
+	if req.FromGroup >= m.config.Groups {
+		return Result{}, fmt.Errorf("metadata: from_group out of range")
+	}
+	if req.ToGroup >= m.config.Groups {
+		return Result{}, fmt.Errorf("metadata: to_group out of range")
+	}
+
+	// Verify the range is currently owned by from_group.
+	if len(m.config.Ranges) == 0 {
+		// Default contiguous split: check if the range falls in from_group's range.
+		groupStart := req.FromGroup * shard.NumSlots / m.config.Groups
+		groupEnd := (req.FromGroup + 1) * shard.NumSlots / m.config.Groups
+		if req.StartSlot < groupStart || req.EndSlot > groupEnd {
+			return Result{}, fmt.Errorf("metadata: range not owned by from_group in default split")
+		}
+	} else {
+		// Explicit ranges: check each range.
+		owned := false
+		for _, r := range m.config.Ranges {
+			if r.Group == req.FromGroup && req.StartSlot >= r.Start && req.EndSlot <= r.End {
+				owned = true
+				break
+			}
+		}
+		if !owned {
+			return Result{}, fmt.Errorf("metadata: range not owned by from_group")
+		}
+	}
+
+	// Apply the move: create new ranges.
+	newRanges := m.applyMoveToRanges(req)
+	newConfig := &shard.Config{
+		Version: req.NewVersion,
+		Groups:  m.config.Groups,
+		Ranges:  newRanges,
+	}
+	if err := newConfig.Validate(); err != nil {
+		return Result{}, fmt.Errorf("metadata: new config invalid: %w", err)
+	}
+
+	m.config = newConfig
+	newVersion := m.config.Version
+
+	// Notify asynchronously (non-blocking).
+	if m.onChange != nil {
+		go m.onChange(newVersion)
+	}
+
+	return Result{Value: []byte(fmt.Sprintf("%d", newVersion))}, nil
+}
+
+// MoveSlotsRequest is the JSON payload for a slot move.
+type MoveSlotsRequest struct {
+	StartSlot  uint64 `json:"start_slot"`
+	EndSlot    uint64 `json:"end_slot"`
+	FromGroup  uint64 `json:"from_group"`
+	ToGroup    uint64 `json:"to_group"`
+	NewVersion uint64 `json:"new_version"`
+}
+
+// applyMoveToRanges updates the ranges by moving [start,end) from from_group to to_group.
+func (m *MetadataSM) applyMoveToRanges(req MoveSlotsRequest) []shard.Range {
+	// Start with a copy of current ranges.
+	var ranges []shard.Range
+	if len(m.config.Ranges) > 0 {
+		ranges = make([]shard.Range, len(m.config.Ranges))
+		copy(ranges, m.config.Ranges)
+	} else {
+		// Build default contiguous ranges from Groups.
+		ranges = make([]shard.Range, m.config.Groups)
+		for g := uint64(0); g < m.config.Groups; g++ {
+			ranges[g] = shard.Range{
+				Start: g * shard.NumSlots / m.config.Groups,
+				End:   (g + 1) * shard.NumSlots / m.config.Groups,
+				Group: g,
+			}
+		}
+	}
+
+	// Find and modify the affected ranges.
+	// Strategy: split any range that intersects the move range,
+	// then reassign the move range to to_group, then merge adjacent ranges.
+	var newRanges []shard.Range
+	for _, r := range ranges {
+		if r.End <= req.StartSlot || r.Start >= req.EndSlot {
+			// No overlap - keep as is.
+			newRanges = append(newRanges, r)
+			continue
+		}
+		// Overlap - split into up to 3 parts: before, middle, after.
+		if r.Start < req.StartSlot {
+			// Before part.
+			newRanges = append(newRanges, shard.Range{
+				Start: r.Start,
+				End:   req.StartSlot,
+				Group: r.Group,
+			})
+		}
+		if r.End > req.EndSlot {
+			// After part.
+			newRanges = append(newRanges, shard.Range{
+				Start: req.EndSlot,
+				End:   r.End,
+				Group: r.Group,
+			})
+		}
+		// Middle part - assign to to_group.
+		midStart := max(r.Start, req.StartSlot)
+		midEnd := min(r.End, req.EndSlot)
+		if midStart < midEnd {
+			newRanges = append(newRanges, shard.Range{
+				Start: midStart,
+				End:   midEnd,
+				Group: req.ToGroup,
+			})
+		}
+	}
+
+	// Merge adjacent ranges with same group.
+	merged := make([]shard.Range, 0, len(newRanges))
+	for _, r := range newRanges {
+		if len(merged) > 0 && merged[len(merged)-1].Group == r.Group && merged[len(merged)-1].End == r.Start {
+			merged[len(merged)-1].End = r.End
+		} else {
+			merged = append(merged, r)
+		}
+	}
+	return merged
+}
+
+// Snapshot serializes the metadata state (just the config).
+func (m *MetadataSM) Snapshot() ([]byte, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	msg := &MetadataSnapshot{
+		Config: m.config,
+	}
+	b, err := json.Marshal(msg)
+	if err != nil {
+		return nil, fmt.Errorf("metadata: snapshot marshal: %w", err)
+	}
+	return b, nil
+}
+
+// Restore replaces the metadata state with a snapshot.
+func (m *MetadataSM) Restore(data []byte) error {
+	var msg MetadataSnapshot
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return fmt.Errorf("metadata: restore unmarshal: %w", err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.config = msg.Config
+	return nil
+}
+
+// Config returns the current shard config (copy for safety).
+func (m *MetadataSM) Config() *shard.Config {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.config == nil {
+		return nil
+	}
+	// Return a copy to prevent external mutation.
+	cfg := *m.config
+	if m.config.Ranges != nil {
+		cfg.Ranges = make([]shard.Range, len(m.config.Ranges))
+		copy(cfg.Ranges, m.config.Ranges)
+	}
+	return &cfg
+}
+
+// MetadataSnapshot is the snapshot format for the metadata SM.
+type MetadataSnapshot struct {
+	Config *shard.Config `json:"config"`
 }

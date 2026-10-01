@@ -11,7 +11,7 @@ simulated, or copied from other systems.
 | **Hardware** | Apple M2, 8 cores, 8 GB RAM |
 | **OS** | macOS 27.0.1 (Darwin 27.0.0 arm64) |
 | **Go** | go1.25.5 darwin/arm64 |
-| **Commit** | `67002f1` (group commit; baseline data kept in `bench-results/*-before-groupcommit.jsonl`) |
+| **Commit** | `33d6666` (pre-vote; baselines kept in `bench-results/*-before-groupcommit.jsonl` and `bench-results/*-before-prevote.jsonl`) |
 | **Date** | 2026-10-01 |
 
 > **Everything ran on this one machine.** All three server processes *and*
@@ -29,6 +29,12 @@ Three `cmd/server` processes started fresh for each shard count
   (These were 10/3 = [100,190) ms until these benchmark runs showed that
   window to sit inside the event loop's fsync jitter and cause election
   storms under write concurrency — see `docs/raft.md`.)
+- Elections run the two-phase **pre-vote** protocol (Raft dissertation
+  §9.6, commit `33d6666`): an election-timeout node first asks a
+  majority whether it *could* win — nothing persisted, no term moved —
+  and only a pre-vote majority starts a real campaign. A node that
+  cannot win (partitioned, behind, or facing a majority that still hears
+  a leader) never changes a term.
 - `-snapshot-every=1024` (default): state-machine snapshot + log
   compaction every 1024 applied entries.
 - Single-machine gRPC over loopback for both client↔server and
@@ -52,9 +58,11 @@ scripts/bench_failover.sh 30s 10s   # leader kill mid-run + data sweep
 ```
 
 Raw machine-readable results: `bench-results/matrix.jsonl`,
-`bench-results/failover.jsonl` (one JSON object per run). The pre-group-commit
-baseline runs are kept as `bench-results/matrix-before-groupcommit.jsonl` and
-`bench-results/failover-before-groupcommit.jsonl`.
+`bench-results/failover.jsonl` (one JSON object per run). Baselines the
+tables below were compared against are kept alongside:
+`matrix-before-groupcommit.jsonl` / `failover-before-groupcommit.jsonl`
+(commit `1028d09`, before group commit) and `matrix-before-prevote.jsonl`
+/ `failover-before-prevote.jsonl` (commit `67002f1`, before pre-vote).
 
 ## Matrix: shards × read ratio × concurrency
 
@@ -67,75 +75,74 @@ successful ops only.
 
 | read ratio | conc | attempts | ops/s | errors | p50 | p95 | p99 | max |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 0.0 | 1 | 1313 | 131.3 | 0 | 7.9ms | 9.6ms | 11.8ms | 57.0ms |
-| 0.0 | 8 | 2798 | 279.8 | 0 | 19.1ms | 31.5ms | 92.5ms | 2.66s |
-| 0.0 | 32 | 12926 | 1292.5 | 0 | 23.3ms | 34.4ms | 61.2ms | 83.0ms |
-| 0.0 | 128 | 39452 | 3944.9 | 0 | 26.6ms | 68.3ms | 88.7ms | 110.1ms |
-| 0.5 | 1 | 2826 | 282.6 | 0 | 1.4ms | 9.0ms | 10.2ms | 215.9ms |
-| 0.5 | 8 | 4680 | 468.0 | 0 | 16.9ms | 25.0ms | 32.6ms | 215.6ms |
-| 0.5 | 32 | 9758 | 975.8 | 0 | 32.2ms | 44.1ms | 65.1ms | 78.1ms |
-| 0.5 | 128 | 12693 | 1269.3 | 0 | 101.3ms | 136.4ms | 156.2ms | 171.7ms |
-| 0.8 | 1 | 7196 | 719.6 | 0 | 187us | 7.0ms | 8.8ms | 15.6ms |
-| 0.8 | 8 | 7184 | 717.8 | 0 | 9.1ms | 19.9ms | 39.0ms | 518.5ms |
-| 0.8 | 32 | 11928 | 1192.7 | 0 | 25.3ms | 40.1ms | 57.2ms | 225.4ms |
-| 0.8 | 128 | 20149 | 2014.7 | 0 | 64.5ms | 86.1ms | 99.5ms | 123.5ms |
-| 1.0 | 1 | 46306 | 4630.6 | 0 | 175us | 360us | 600us | 130.2ms |
-| 1.0 | 8 | 145128 | 14512.7 | 0 | 406us | 1.1ms | 2.3ms | 181.5ms |
-| 1.0 | 32 | 411929 | 41192.7 | 0 | 664us | 1.5ms | 2.6ms | 27.2ms |
-| 1.0 | 128 | 394596 | 39458.9 | 0 | 2.3ms | 6.6ms | 17.1ms | 567.5ms |
+| 0 | 1 | 1319 | 131.9 | 0 | 8.0ms | 9.1ms | 10.3ms | 77.5ms |
+| 0 | 8 | 4065 | 406.5 | 0 | 19.1ms | 24.2ms | 53.5ms | 112.5ms |
+| 0 | 32 | 13612 | 1361.1 | 0 | 22.5ms | 29.1ms | 61.1ms | 72.0ms |
+| 0 | 128 | 45868 | 4586.7 | 0 | 23.3ms | 60.7ms | 68.8ms | 162.3ms |
+| 0.5 | 1 | 2737 | 273.7 | 0 | 3.6ms | 9.0ms | 10.2ms | 124.6ms |
+| 0.5 | 8 | 4356 | 435.6 | 0 | 17.0ms | 29.3ms | 74.9ms | 170.1ms |
+| 0.5 | 32 | 8529 | 852.9 | 0 | 36.6ms | 54.5ms | 79.3ms | 118.0ms |
+| 0.5 | 128 | 12512 | 1251.1 | 0 | 100.9ms | 139.1ms | 181.1ms | 250.7ms |
+| 0.8 | 1 | 6337 | 633.6 | 0 | 196µs | 7.2ms | 17.5ms | 65.3ms |
+| 0.8 | 8 | 9171 | 917.1 | 0 | 8.7ms | 18.0ms | 22.7ms | 35.9ms |
+| 0.8 | 32 | 13471 | 1347.0 | 0 | 23.8ms | 34.2ms | 41.0ms | 51.4ms |
+| 0.8 | 128 | 21183 | 2118.3 | 0 | 59.9ms | 83.9ms | 104.3ms | 130.9ms |
+| 1 | 1 | 64405 | 6440.5 | 0 | 146µs | 223µs | 300µs | 803µs |
+| 1 | 8 | 226235 | 22623.5 | 0 | 328µs | 574µs | 790µs | 19.2ms |
+| 1 | 32 | 461346 | 46134.6 | 0 | 622µs | 1.3ms | 1.8ms | 13.8ms |
+| 1 | 128 | 604948 | 60494.4 | 0 | 1.9ms | 3.7ms | 5.3ms | 29.9ms |
 
 ### shards=4
 
 | read ratio | conc | attempts | ops/s | errors | p50 | p95 | p99 | max |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 0.0 | 1 | 1451 | 145.1 | 0 | 6.6ms | 9.1ms | 10.3ms | 93.6ms |
-| 0.0 | 8 | 2437 | 243.7 | 0 | 31.8ms | 50.8ms | 62.0ms | 191.6ms |
-| 0.0 | 32 | 5610 | 561.0 | 0 | 53.5ms | 91.6ms | 166.1ms | 290.1ms |
-| 0.0 | 128 | 13998 | 1399.8 | 0 | 68.5ms | 261.5ms | 405.0ms | 876.9ms |
-| 0.5 | 1 | 2920 | 292.0 | 0 | 2.9ms | 8.7ms | 9.7ms | 14.0ms |
-| 0.5 | 8 | 4188 | 418.8 | 0 | 19.9ms | 39.6ms | 50.2ms | 153.4ms |
-| 0.5 | 32 | 7019 | 701.9 | 0 | 43.4ms | 84.1ms | 143.7ms | 255.7ms |
-| 0.5 | 128 | 10848 | 1084.7 | 0 | 90.2ms | 281.6ms | 341.2ms | 418.8ms |
-| 0.8 | 1 | 7081 | 708.1 | 0 | 216us | 7.0ms | 8.9ms | 16.8ms |
-| 0.8 | 8 | 8512 | 851.1 | 0 | 6.0ms | 27.6ms | 35.8ms | 109.4ms |
-| 0.8 | 32 | 12780 | 1277.9 | 0 | 25.1ms | 55.4ms | 70.9ms | 95.9ms |
-| 0.8 | 128 | 18826 | 1882.5 | 0 | 59.4ms | 155.6ms | 192.5ms | 246.0ms |
-| 1.0 | 1 | 58072 | 5807.2 | 0 | 157us | 249us | 342us | 77.1ms |
-| 1.0 | 8 | 193649 | 19364.8 | 0 | 330us | 864us | 1.6ms | 26.1ms |
-| 1.0 | 32 | 255273 | 25526.9 | 0 | 822us | 3.0ms | 6.6ms | 216.9ms |
-| 1.0 | 128 | 376107 | 37608.9 | 0 | 2.4ms | 9.3ms | 16.5ms | 133.8ms |
+| 0 | 1 | 1703 | 170.3 | 0 | 5.9ms | 9.0ms | 10.2ms | 14.9ms |
+| 0 | 8 | 2523 | 252.3 | 0 | 30.9ms | 48.0ms | 55.6ms | 116.2ms |
+| 0 | 32 | 5656 | 565.6 | 0 | 51.9ms | 91.8ms | 212.3ms | 318.5ms |
+| 0 | 128 | 15661 | 1566.1 | 0 | 61.4ms | 269.4ms | 391.0ms | 475.4ms |
+| 0.5 | 1 | 2952 | 295.2 | 0 | 1.1ms | 8.6ms | 9.6ms | 51.2ms |
+| 0.5 | 8 | 4095 | 409.5 | 0 | 20.7ms | 38.7ms | 49.0ms | 127.4ms |
+| 0.5 | 32 | 7091 | 709.1 | 0 | 44.0ms | 81.5ms | 123.3ms | 250.9ms |
+| 0.5 | 128 | 11190 | 1119.0 | 0 | 93.0ms | 264.6ms | 356.9ms | 490.7ms |
+| 0.8 | 1 | 7776 | 777.6 | 0 | 206µs | 6.7ms | 8.6ms | 14.2ms |
+| 0.8 | 8 | 8673 | 867.3 | 0 | 6.1ms | 27.3ms | 34.8ms | 66.5ms |
+| 0.8 | 32 | 13122 | 1312.2 | 0 | 24.1ms | 54.3ms | 72.1ms | 170.3ms |
+| 0.8 | 128 | 18834 | 1883.4 | 0 | 56.5ms | 163.2ms | 214.7ms | 364.3ms |
+| 1 | 1 | 57808 | 5780.8 | 0 | 163µs | 245µs | 332µs | 5.0ms |
+| 1 | 8 | 179279 | 17927.9 | 0 | 324µs | 849µs | 1.8ms | 304.3ms |
+| 1 | 32 | 362603 | 36260.3 | 0 | 699µs | 2.1ms | 3.5ms | 40.0ms |
+| 1 | 128 | 450869 | 45086.9 | 0 | 2.2ms | 7.1ms | 12.1ms | 86.5ms |
 
 ### shards=16
 
 | read ratio | conc | attempts | ops/s | errors | p50 | p95 | p99 | max |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 0.0 | 1 | 1392 | 139.2 | 0 | 7.2ms | 9.6ms | 11.0ms | 14.0ms |
-| 0.0 | 8 | 2309 | 230.9 | 0 | 32.2ms | 57.9ms | 72.0ms | 89.9ms |
-| 0.0 | 32 | 2981 | 298.1 | 0 | 92.7ms | 230.9ms | 311.1ms | 532.3ms |
-| 0.0 | 128 | 4109 | 405.6 | 53 | 190.4ms | 920.5ms | 2.04s | 3.16s |
-| 0.5 | 1 | 2735 | 273.5 | 0 | 4.2ms | 9.0ms | 10.3ms | 16.5ms |
-| 0.5 | 8 | 4373 | 437.3 | 0 | 20.8ms | 43.5ms | 56.0ms | 123.1ms |
-| 0.5 | 32 | 5473 | 547.3 | 0 | 52.8ms | 145.0ms | 215.0ms | 643.1ms |
-| 0.5 | 128 | 6648 | 655.2 | 96 | 113.0ms | 522.1ms | 1.60s | 3.11s |
-| 0.8 | 1 | 7153 | 715.3 | 0 | 219us | 7.0ms | 8.8ms | 33.6ms |
-| 0.8 | 8 | 10226 | 1022.6 | 0 | 399us | 29.7ms | 39.6ms | 150.5ms |
-| 0.8 | 32 | 12364 | 1236.3 | 0 | 13.8ms | 84.0ms | 129.3ms | 398.2ms |
-| 0.8 | 128 | 14757 | 1475.7 | 0 | 65.2ms | 243.4ms | 640.6ms | 1.03s |
-| 1.0 | 1 | 61055 | 6105.5 | 0 | 153us | 240us | 310us | 2.2ms |
-| 1.0 | 8 | 191023 | 19102.3 | 0 | 324us | 897us | 1.7ms | 42.4ms |
-| 1.0 | 32 | 286346 | 28634.6 | 0 | 824us | 2.9ms | 5.5ms | 47.6ms |
-| 1.0 | 128 | 342205 | 34219.4 | 0 | 2.7ms | 10.1ms | 18.7ms | 122.3ms |
+| 0 | 1 | 1401 | 140.1 | 0 | 7.0ms | 9.4ms | 11.9ms | 48.2ms |
+| 0 | 8 | 2347 | 234.7 | 0 | 32.8ms | 53.6ms | 66.9ms | 98.5ms |
+| 0 | 32 | 3232 | 323.2 | 0 | 88.4ms | 204.6ms | 273.7ms | 391.9ms |
+| 0 | 128 | 4344 | 434.4 | 0 | 169.0ms | 1.23s | 2.30s | 3.28s |
+| 0.5 | 1 | 2965 | 296.5 | 0 | 711µs | 8.4ms | 9.3ms | 19.1ms |
+| 0.5 | 8 | 4535 | 453.5 | 0 | 19.8ms | 42.6ms | 55.4ms | 246.2ms |
+| 0.5 | 32 | 5454 | 545.4 | 0 | 50.7ms | 151.0ms | 284.3ms | 606.7ms |
+| 0.5 | 128 | 7732 | 773.2 | 0 | 122.1ms | 442.5ms | 1.13s | 2.43s |
+| 0.8 | 1 | 7736 | 773.6 | 0 | 207µs | 6.6ms | 8.5ms | 20.6ms |
+| 0.8 | 8 | 10555 | 1055.5 | 0 | 436µs | 28.9ms | 37.5ms | 168.8ms |
+| 0.8 | 32 | 13505 | 1350.4 | 0 | 14.8ms | 75.4ms | 103.4ms | 176.7ms |
+| 0.8 | 128 | 15991 | 1599.0 | 0 | 61.3ms | 225.0ms | 463.7ms | 744.4ms |
+| 1 | 1 | 60572 | 6057.1 | 0 | 156µs | 233µs | 307µs | 1.1ms |
+| 1 | 8 | 218814 | 21881.2 | 0 | 294µs | 726µs | 1.4ms | 28.7ms |
+| 1 | 32 | 333445 | 33344.5 | 0 | 696µs | 2.6ms | 4.4ms | 45.1ms |
+| 1 | 128 | 421922 | 42191.0 | 0 | 2.3ms | 8.1ms | 13.4ms | 126.8ms |
 
 ### Totals and errors
 
-- **48 runs, 3,064,782 attempts, 149 errors (0.005%).**
-- Every error is in a `shards=16, conc=128` write-heavy run:
-  - `read=0, conc=128`: 53/4109 (1.3%)
-  - `read=0.5, conc=128`: 96/6648 (1.4%)
-  - all 149 are the same client-side error —
-    `not leader and no leader could be located` (JSONL key
-    `Unknown(client: not leader and no leader could be located: raft: not)`)
-  - the other 46 runs: **0 errors**.
+- **48 runs, 3,764,479 attempts, 0 errors.** Every cell clean.
+- The run this one is compared against (`matrix-before-prevote.jsonl`,
+  commit `67002f1`) had 149 errors (0.005%) — all client-side
+  `not leader and no leader could be located`, all in the two
+  `shards=16, conc=128` write-heavy cells (53/4109 and 96/6648), the
+  other 46 runs error-free. The before/after breakdown is under
+  [Before and after pre-vote](#before-and-after-pre-vote) below.
 
 ### Before and after group commit
 
@@ -151,7 +158,8 @@ post-election-timeout code before and after):
 | 32 | 302.2 ops/s | 924.0 ops/s | 3.1× | 101.9 ms → 26.7 ms |
 | 128 | 347.3 ops/s | 1246.2 ops/s | 3.6× | 370.7 ms → 68.0 ms |
 
-Baseline matrix vs this run, write cells (read=0):
+Baseline matrix vs the group-commit run (that run is now kept as
+`matrix-before-prevote.jsonl`), write cells (read=0):
 
 | shards | conc | before ops/s | after ops/s | speedup | before p50 | after p50 |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -183,28 +191,73 @@ Why it was flat (measured, not assumed):
   one batch — one log write, one fsync, one broadcast. fsync-before-ack
   is unchanged.
 
+### Before and after pre-vote
+
+The pre-pre-vote baseline is `bench-results/matrix-before-prevote.jsonl`
+(commit `67002f1`). Its 149 errors were all client-side
+`not leader and no leader could be located`, and its retained server
+logs — correlated against each cell's `started_at` — show elections in
+exactly the two failing cells and nowhere else in the run, with one
+group's term inflating to **10** (nine failed rounds in under 10 s).
+After pre-vote (`33d6666`):
+
+| cell | before (`67002f1`) | after (`33d6666`) |
+|---|---|---|
+| shards=16, read=0, conc=128 | 405.6 ops/s, **53 errors**, in-window elections, terms to 6 | 434.4 ops/s, **0 errors**, in-window elections, terms bounded to 3 |
+| shards=16, read=0.5, conc=128 | 655.2 ops/s, **96 errors**, in-window elections incl. term 10 | 773.2 ops/s, **0 errors**, one in-window election, term 5 |
+| all other 46 cells | 0 errors | 0 errors |
+| **matrix total** | 3,064,782 attempts, 149 errors | **3,764,479 attempts, 0 errors** |
+
+What pre-vote changed, stated precisely:
+
+- It did **not** remove the transient stalls. This run's server logs
+  show elections still starting inside both target cells (4 and 1
+  in-window `became_leader` events): 17 groups × 128 writers on 8 cores
+  still occasionally starves a group's leader past its heartbeat
+  budget.
+- What it removed is the **cascade**. Before, those elections inflated
+  terms to 6 and 10 and produced 149 client failures across the two
+  cells; after, the first refused pre-vote round ends the attempt (a
+  majority that still hears its leader grants nothing), terms stay at
+  ≤3 / ≤5, elections stay inside their cell window, and no client
+  operation fails.
+- A separate fresh-cluster probe of the same two cells (identical
+  parameters, ports 8991–8993) saw **zero** elections inside both
+  windows and zero errors, plus a 30 s run of the same cell at zero
+  errors — when no stall occurs, pre-vote is invisible.
+
+`campaign` events are countable in these logs because campaigning was
+promoted from debug to info level in the pre-vote commit; it was
+invisible in the before-run's logs (`became_leader` was always info, so
+the before/after election comparison above uses `became_leader` on both
+sides).
+
 ### Observations (facts read off the tables)
 
-- **Write throughput now scales with offered load**: shards=1, read=0
-  goes 131.3 → 279.8 → 1292.5 → 3944.9 ops/s at conc 1/8/32/128, and
-  p50 barely moves from conc=32 to conc=128 (23.3 ms → 26.6 ms).
-  At conc=1 there is nothing to batch, so the gain is only 1.1× —
-  expected for a batching fix.
-- **Read throughput is in the same band as the baseline run**
-  (34,219–39,459 ops/s at conc=128 vs 29,849–44,766 before; run-to-run
-  variance ±15%). ReadIndex never writes to the log, so group commit
-  does not touch this path.
-- **Aggregate write throughput falls as shard count rises**: at conc=128,
-  3944.9 (shards=1) → 1399.8 (shards=4) → 405.6 (shards=16); at conc=32,
-  1292.5 → 561.0 → 298.1. More groups means fewer writers per group and
-  shallower queues (smaller fsync batches), plus 17 groups per node on
-  8 shared cores. The shards=16 deficit and its conc=128 failures are
-  under investigation.
+- **Write throughput scales with offered load**: shards=1, read=0 goes
+  131.9 → 406.5 → 1361.1 → 4586.7 ops/s at conc 1/8/32/128, and p50
+  barely moves from conc=32 to conc=128 (22.5 → 23.3 ms). At conc=1
+  there is nothing to batch — that cell is raw per-op cost.
+- **Read throughput varies a lot between runs on this laptop**
+  (shards=1, read=1.0, conc=128: 44,766 → 39,459 → 60,494 ops/s across
+  the three documented runs). ReadIndex never writes to the log and
+  neither fix touches this path, so run-to-run machine state dominates —
+  treat read numbers as ±30%, not as trends.
+- **Aggregate write throughput still falls as shard count rises**: at
+  conc=128, 4586.7 (shards=1) → 1566.1 (shards=4) → 434.4 (shards=16);
+  at conc=32, 1361.1 → 565.6 → 323.2. More groups means fewer writers
+  per group and shallower queues — smaller fsync batches, so the fixed
+  per-fsync cost (~2.7 ms) amortizes over fewer writes — plus 17 groups
+  per node competing for 8 cores. Mechanism labeled as hypothesis: not
+  separately profiled in this run.
+- **The `shards=16, conc=128` p99 (2.30 s) is queueing, not
+  instability**: with 128 closed-loop workers at 434.4 ops/s, Little's
+  law pins mean latency at 128/434.4 = 295 ms — the measured mean is
+  305.8 ms (within 4%), and p99 ≈ 8× the mean is the queue-drain tail
+  of a saturated cell. The instability (errors) is gone; the tail is
+  the cost of saturating the cell described by the row above.
 - **Mixed 0.8 at conc=32 is flat across shard counts**
-  (1192.7 / 1277.9 / 1236.3 ops/s).
-- **The only failures remain the two `shards=16, conc=128` write-heavy
-  cells** — 149 client-side `not leader and no leader could be located`
-  errors, p99 up to 2.04 s; all other 46 runs are error-free.
+  (1347.0 / 1312.2 / 1350.4 ops/s).
 
 ## Leader failover
 
@@ -213,29 +266,34 @@ Why it was flat (measured, not assumed):
 t=4 s and t=5 s**. Raw progress lines:
 
 ```
-progress t=  4s attempts=1829 (+474) errors=0 (+0)
-leader killed at 22:56:31 (pid 24643)
-progress t=  5s attempts=1875 (+46)  errors=8 (+8)
-progress t=  6s attempts=1875 (+0)   errors=8 (+0)
-progress t=  7s attempts=2186 (+311) errors=8 (+0)
-progress t=  8s attempts=2744 (+558) errors=8 (+0)
+progress t=  4s attempts=1917 (+506) errors=0 (+0)
+leader killed at 23:54:58 (pid 40596)
+progress t=  5s attempts=2036 (+119) errors=8 (+8)
+progress t=  6s attempts=2621 (+585) errors=8 (+0)
+progress t=  7s attempts=3101 (+480) errors=8 (+0)
 ...
-progress t= 30s attempts=17502 (+636) errors=8 (+0)
-new leader after kill: node1:3s
+progress t= 30s attempts=17495 (+574) errors=8 (+0)
+new leader after kill: node3:1s
 ```
 
-- **New leader elected 3 s after the kill** (`new leader after kill:
-  node1:3s`, polled concurrently at 0.5 s granularity).
-- **Client-observed outage ≈ 3 s** (t=5 the 8 failures, t=6 stall, t=7
-  traffic resumes); after t=7 there are **no further errors for the
-  remaining 23 s**.
+- **New leader elected 1 s after the kill** (`new leader after kill:
+  node3:1s`, polled concurrently at 0.5 s granularity).
+- **Client-observed degradation ≈ 1 s**: t=5 slows to +119 attempts and
+  carries the 8 failures, t=6 is fully back (+585); no further errors
+  for the remaining 24 s.
 - The 8 failures are `not leader and no leader could be located`
   (client-side), excluded from latency.
-- Whole run: 17,510 attempts, 8 errors (0.05%), 583.4 ops/s,
-  p50 12.4 ms, p95 20.2 ms, p99 24.5 ms, max 1.58 s (a successful
-  operation that waited through the election window).
-- The pre-group-commit baseline run was 357.1 ops/s, p99 105.4 ms —
-  group commit helps this mixed workload too.
+- Whole run: 17,504 attempts, 8 errors (0.05%), 583.2 ops/s,
+  p50 13.2 ms, p95 20.3 ms, p99 25.9 ms, **max 162.0 ms** — no
+  successful operation could have spanned the kill-to-new-leader
+  window (it lasts >500 ms; earlier runs showed max 819 ms and
+  1.58 s).
+- Pre-vote costs nothing when the leader is genuinely dead: every
+  survivor is already past the minimum election timeout, so the first
+  pre-vote round is granted immediately. Baselines in order:
+  357.1 ops/s / p99 105.4 ms (pre-group-commit), 583.4 ops/s / p99
+  24.5 ms / new leader 3 s (group commit, pre-pre-vote), 583.2 ops/s /
+  p99 25.9 ms / new leader 1 s / max 162 ms (this run).
 
 ## Data-loss check (`-sweep`)
 
@@ -246,8 +304,10 @@ with preloading disabled so a missing key cannot be recreated:
 sweep: 1000/1000 keys present, 0 missing
 ```
 
-20,488 read attempts over 2 s at 10,103.8 ops/s, **0 errors** — after a
-leader was killed mid-run, no preloaded key was lost.
+20,555 read attempts over 2 s at 10,277.5 ops/s, **0 errors** — after a
+leader was killed mid-run, no preloaded key was lost (prior runs:
+16,409 reads at 8,203.7 ops/s, then 20,488 at 10,103.8 ops/s, also
+0 missing).
 
 ## Not covered (yet)
 

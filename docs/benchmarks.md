@@ -11,7 +11,7 @@ simulated, or copied from other systems.
 | **Hardware** | Apple M2, 8 cores, 8 GB RAM |
 | **OS** | macOS 27.0.1 (Darwin 27.0.0 arm64) |
 | **Go** | go1.25.5 darwin/arm64 |
-| **Commit** | `1028d09` (bench tooling `cad32b4`, election-timeout fix `7489e99`) |
+| **Commit** | `67002f1` (group commit; baseline data kept in `bench-results/*-before-groupcommit.jsonl`) |
 | **Date** | 2026-10-01 |
 
 > **Everything ran on this one machine.** All three server processes *and*
@@ -52,7 +52,9 @@ scripts/bench_failover.sh 30s 10s   # leader kill mid-run + data sweep
 ```
 
 Raw machine-readable results: `bench-results/matrix.jsonl`,
-`bench-results/failover.jsonl` (one JSON object per run).
+`bench-results/failover.jsonl` (one JSON object per run). The pre-group-commit
+baseline runs are kept as `bench-results/matrix-before-groupcommit.jsonl` and
+`bench-results/failover-before-groupcommit.jsonl`.
 
 ## Matrix: shards × read ratio × concurrency
 
@@ -65,118 +67,175 @@ successful ops only.
 
 | read ratio | conc | attempts | ops/s | errors | p50 | p95 | p99 | max |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 0.0 | 1 | 1168 | 116.8 | 0 | 8.2ms | 12.0ms | 18.9ms | 66.8ms |
-| 0.0 | 8 | 2136 | 213.6 | 0 | 36.4ms | 51.9ms | 79.0ms | 115.3ms |
-| 0.0 | 32 | 2998 | 299.8 | 0 | 105.6ms | 150.9ms | 194.4ms | 197.0ms |
-| 0.0 | 128 | 3157 | 315.7 | 0 | 408.6ms | 586.9ms | 635.6ms | 638.1ms |
-| 0.5 | 1 | 2125 | 212.5 | 0 | 4.7ms | 10.9ms | 14.5ms | 255.7ms |
-| 0.5 | 8 | 3564 | 356.4 | 0 | 22.6ms | 34.0ms | 39.8ms | 97.2ms |
-| 0.5 | 32 | 5312 | 531.1 | 0 | 57.9ms | 84.0ms | 113.4ms | 229.2ms |
-| 0.5 | 128 | 5973 | 597.2 | 0 | 225.4ms | 276.8ms | 361.8ms | 373.8ms |
-| 0.8 | 1 | 5655 | 565.5 | 0 | 203us | 8.7ms | 10.6ms | 22.5ms |
-| 0.8 | 8 | 6924 | 692.4 | 0 | 11.1ms | 23.6ms | 35.6ms | 418.0ms |
-| 0.8 | 32 | 6017 | 601.6 | 0 | 49.6ms | 102.7ms | 147.8ms | 205.8ms |
-| 0.8 | 128 | 8643 | 864.2 | 0 | 138.6ms | 312.0ms | 417.2ms | 454.0ms |
-| 1.0 | 1 | 40339 | 4033.9 | 0 | 204us | 435us | 793us | 47.4ms |
-| 1.0 | 8 | 214624 | 21461.7 | 0 | 329us | 675us | 1.0ms | 8.5ms |
-| 1.0 | 32 | 382947 | 38294.6 | 0 | 696us | 1.7ms | 3.0ms | 56.3ms |
-| 1.0 | 128 | 447662 | 44766.0 | 0 | 2.4ms | 6.2ms | 11.8ms | 93.9ms |
+| 0.0 | 1 | 1313 | 131.3 | 0 | 7.9ms | 9.6ms | 11.8ms | 57.0ms |
+| 0.0 | 8 | 2798 | 279.8 | 0 | 19.1ms | 31.5ms | 92.5ms | 2.66s |
+| 0.0 | 32 | 12926 | 1292.5 | 0 | 23.3ms | 34.4ms | 61.2ms | 83.0ms |
+| 0.0 | 128 | 39452 | 3944.9 | 0 | 26.6ms | 68.3ms | 88.7ms | 110.1ms |
+| 0.5 | 1 | 2826 | 282.6 | 0 | 1.4ms | 9.0ms | 10.2ms | 215.9ms |
+| 0.5 | 8 | 4680 | 468.0 | 0 | 16.9ms | 25.0ms | 32.6ms | 215.6ms |
+| 0.5 | 32 | 9758 | 975.8 | 0 | 32.2ms | 44.1ms | 65.1ms | 78.1ms |
+| 0.5 | 128 | 12693 | 1269.3 | 0 | 101.3ms | 136.4ms | 156.2ms | 171.7ms |
+| 0.8 | 1 | 7196 | 719.6 | 0 | 187us | 7.0ms | 8.8ms | 15.6ms |
+| 0.8 | 8 | 7184 | 717.8 | 0 | 9.1ms | 19.9ms | 39.0ms | 518.5ms |
+| 0.8 | 32 | 11928 | 1192.7 | 0 | 25.3ms | 40.1ms | 57.2ms | 225.4ms |
+| 0.8 | 128 | 20149 | 2014.7 | 0 | 64.5ms | 86.1ms | 99.5ms | 123.5ms |
+| 1.0 | 1 | 46306 | 4630.6 | 0 | 175us | 360us | 600us | 130.2ms |
+| 1.0 | 8 | 145128 | 14512.7 | 0 | 406us | 1.1ms | 2.3ms | 181.5ms |
+| 1.0 | 32 | 411929 | 41192.7 | 0 | 664us | 1.5ms | 2.6ms | 27.2ms |
+| 1.0 | 128 | 394596 | 39458.9 | 0 | 2.3ms | 6.6ms | 17.1ms | 567.5ms |
 
 ### shards=4
 
 | read ratio | conc | attempts | ops/s | errors | p50 | p95 | p99 | max |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 0.0 | 1 | 1272 | 127.2 | 0 | 7.7ms | 10.9ms | 14.1ms | 171.1ms |
-| 0.0 | 8 | 2050 | 205.0 | 0 | 36.8ms | 67.0ms | 84.9ms | 221.5ms |
-| 0.0 | 32 | 2320 | 232.0 | 0 | 109.5ms | 371.3ms | 462.9ms | 582.1ms |
-| 0.0 | 128 | 3108 | 310.8 | 0 | 339.6ms | 1.23s | 2.11s | 2.62s |
-| 0.5 | 1 | 2352 | 235.2 | 0 | 3.9ms | 10.7ms | 12.8ms | 34.9ms |
-| 0.5 | 8 | 3729 | 372.9 | 0 | 21.8ms | 44.7ms | 58.1ms | 138.9ms |
-| 0.5 | 32 | 3710 | 371.0 | 0 | 76.4ms | 187.6ms | 260.7ms | 310.5ms |
-| 0.5 | 128 | 4095 | 409.5 | 0 | 241.9ms | 841.7ms | 1.03s | 1.15s |
-| 0.8 | 1 | 4151 | 415.1 | 0 | 280us | 12.5ms | 15.9ms | 57.5ms |
-| 0.8 | 8 | 5213 | 521.3 | 0 | 9.5ms | 46.0ms | 57.5ms | 80.1ms |
-| 0.8 | 32 | 7211 | 721.0 | 0 | 43.1ms | 104.5ms | 133.6ms | 255.6ms |
-| 0.8 | 128 | 8376 | 837.6 | 0 | 120.1ms | 388.9ms | 665.4ms | 877.9ms |
-| 1.0 | 1 | 52043 | 5204.3 | 0 | 169us | 295us | 449us | 34.9ms |
-| 1.0 | 8 | 184447 | 18444.6 | 0 | 341us | 925us | 1.8ms | 19.9ms |
-| 1.0 | 32 | 335966 | 33596.6 | 0 | 727us | 2.4ms | 4.2ms | 44.1ms |
-| 1.0 | 128 | 419120 | 41907.1 | 0 | 2.3ms | 7.9ms | 14.4ms | 104.1ms |
+| 0.0 | 1 | 1451 | 145.1 | 0 | 6.6ms | 9.1ms | 10.3ms | 93.6ms |
+| 0.0 | 8 | 2437 | 243.7 | 0 | 31.8ms | 50.8ms | 62.0ms | 191.6ms |
+| 0.0 | 32 | 5610 | 561.0 | 0 | 53.5ms | 91.6ms | 166.1ms | 290.1ms |
+| 0.0 | 128 | 13998 | 1399.8 | 0 | 68.5ms | 261.5ms | 405.0ms | 876.9ms |
+| 0.5 | 1 | 2920 | 292.0 | 0 | 2.9ms | 8.7ms | 9.7ms | 14.0ms |
+| 0.5 | 8 | 4188 | 418.8 | 0 | 19.9ms | 39.6ms | 50.2ms | 153.4ms |
+| 0.5 | 32 | 7019 | 701.9 | 0 | 43.4ms | 84.1ms | 143.7ms | 255.7ms |
+| 0.5 | 128 | 10848 | 1084.7 | 0 | 90.2ms | 281.6ms | 341.2ms | 418.8ms |
+| 0.8 | 1 | 7081 | 708.1 | 0 | 216us | 7.0ms | 8.9ms | 16.8ms |
+| 0.8 | 8 | 8512 | 851.1 | 0 | 6.0ms | 27.6ms | 35.8ms | 109.4ms |
+| 0.8 | 32 | 12780 | 1277.9 | 0 | 25.1ms | 55.4ms | 70.9ms | 95.9ms |
+| 0.8 | 128 | 18826 | 1882.5 | 0 | 59.4ms | 155.6ms | 192.5ms | 246.0ms |
+| 1.0 | 1 | 58072 | 5807.2 | 0 | 157us | 249us | 342us | 77.1ms |
+| 1.0 | 8 | 193649 | 19364.8 | 0 | 330us | 864us | 1.6ms | 26.1ms |
+| 1.0 | 32 | 255273 | 25526.9 | 0 | 822us | 3.0ms | 6.6ms | 216.9ms |
+| 1.0 | 128 | 376107 | 37608.9 | 0 | 2.4ms | 9.3ms | 16.5ms | 133.8ms |
 
 ### shards=16
 
 | read ratio | conc | attempts | ops/s | errors | p50 | p95 | p99 | max |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 0.0 | 1 | 1266 | 126.6 | 0 | 7.9ms | 10.7ms | 12.6ms | 50.5ms |
-| 0.0 | 8 | 1929 | 192.8 | 0 | 38.2ms | 70.3ms | 94.3ms | 184.9ms |
-| 0.0 | 32 | 2599 | 259.9 | 0 | 105.4ms | 282.8ms | 366.7ms | 527.7ms |
-| 0.0 | 128 | 3132 | 308.6 | 46 | 189.9ms | 1.16s | 2.92s | 5.00s |
-| 0.5 | 1 | 2773 | 277.3 | 0 | 742us | 9.1ms | 11.2ms | 29.3ms |
-| 0.5 | 8 | 3426 | 342.6 | 0 | 24.1ms | 57.5ms | 86.6ms | 336.0ms |
-| 0.5 | 32 | 5286 | 528.6 | 0 | 51.0ms | 161.9ms | 250.7ms | 541.8ms |
-| 0.5 | 128 | 3437 | 331.9 | 118 | 151.9ms | 1.15s | 3.81s | 4.81s |
-| 0.8 | 1 | 5004 | 500.4 | 0 | 239us | 9.2ms | 13.5ms | 466.3ms |
-| 0.8 | 8 | 7565 | 756.4 | 0 | 469us | 38.0ms | 88.0ms | 677.5ms |
-| 0.8 | 32 | 11781 | 1178.1 | 0 | 15.5ms | 88.6ms | 132.2ms | 255.6ms |
-| 0.8 | 128 | 10763 | 1076.3 | 0 | 76.7ms | 393.3ms | 930.2ms | 1.23s |
-| 1.0 | 1 | 49928 | 4968.9 | 0 | 179us | 301us | 428us | 126.8ms |
-| 1.0 | 8 | 135021 | 13495.9 | 0 | 402us | 1.4ms | 3.4ms | 78.0ms |
-| 1.0 | 32 | 233154 | 23309.9 | 0 | 970us | 3.7ms | 7.2ms | 63.9ms |
-| 1.0 | 128 | 298585 | 29849.0 | 0 | 2.9ms | 12.2ms | 22.2ms | 116.1ms |
+| 0.0 | 1 | 1392 | 139.2 | 0 | 7.2ms | 9.6ms | 11.0ms | 14.0ms |
+| 0.0 | 8 | 2309 | 230.9 | 0 | 32.2ms | 57.9ms | 72.0ms | 89.9ms |
+| 0.0 | 32 | 2981 | 298.1 | 0 | 92.7ms | 230.9ms | 311.1ms | 532.3ms |
+| 0.0 | 128 | 4109 | 405.6 | 53 | 190.4ms | 920.5ms | 2.04s | 3.16s |
+| 0.5 | 1 | 2735 | 273.5 | 0 | 4.2ms | 9.0ms | 10.3ms | 16.5ms |
+| 0.5 | 8 | 4373 | 437.3 | 0 | 20.8ms | 43.5ms | 56.0ms | 123.1ms |
+| 0.5 | 32 | 5473 | 547.3 | 0 | 52.8ms | 145.0ms | 215.0ms | 643.1ms |
+| 0.5 | 128 | 6648 | 655.2 | 96 | 113.0ms | 522.1ms | 1.60s | 3.11s |
+| 0.8 | 1 | 7153 | 715.3 | 0 | 219us | 7.0ms | 8.8ms | 33.6ms |
+| 0.8 | 8 | 10226 | 1022.6 | 0 | 399us | 29.7ms | 39.6ms | 150.5ms |
+| 0.8 | 32 | 12364 | 1236.3 | 0 | 13.8ms | 84.0ms | 129.3ms | 398.2ms |
+| 0.8 | 128 | 14757 | 1475.7 | 0 | 65.2ms | 243.4ms | 640.6ms | 1.03s |
+| 1.0 | 1 | 61055 | 6105.5 | 0 | 153us | 240us | 310us | 2.2ms |
+| 1.0 | 8 | 191023 | 19102.3 | 0 | 324us | 897us | 1.7ms | 42.4ms |
+| 1.0 | 32 | 286346 | 28634.6 | 0 | 824us | 2.9ms | 5.5ms | 47.6ms |
+| 1.0 | 128 | 342205 | 34219.4 | 0 | 2.7ms | 10.1ms | 18.7ms | 122.3ms |
 
 ### Totals and errors
 
-- **48 runs, 2,954,056 attempts, 164 errors (0.006%).**
+- **48 runs, 3,064,782 attempts, 149 errors (0.005%).**
 - Every error is in a `shards=16, conc=128` write-heavy run:
-  - `read=0, conc=128`: 46/3132 (1.5%) — `DeadlineExceeded=23`,
-    `Unavailable=22`, `not-leader-located=1`
-  - `read=0.5, conc=128`: 118/3437 (3.4%) — `not-leader-located=110`,
-    `Unavailable=8`
+  - `read=0, conc=128`: 53/4109 (1.3%)
+  - `read=0.5, conc=128`: 96/6648 (1.4%)
+  - all 149 are the same client-side error —
+    `not leader and no leader could be located` (JSONL key
+    `Unknown(client: not leader and no leader could be located: raft: not)`)
   - the other 46 runs: **0 errors**.
+
+### Before and after group commit
+
+The baseline (`bench-results/matrix-before-groupcommit.jsonl`, commit
+`1028d09`) predates two changes: the election-timeout fix (`7489e99`) and
+group commit (`67002f1`). Group commit alone was isolated with a matched
+probe (3-node, write-only, 30 s, keyspace 10000, payload 100 B, same
+post-election-timeout code before and after):
+
+| conc | before | after | speedup | p50 before → after |
+|---:|---:|---:|---:|---:|
+| 8 | 251.4 ops/s | 291.9 ops/s | 1.2× | 31.5 ms → 22.0 ms |
+| 32 | 302.2 ops/s | 924.0 ops/s | 3.1× | 101.9 ms → 26.7 ms |
+| 128 | 347.3 ops/s | 1246.2 ops/s | 3.6× | 370.7 ms → 68.0 ms |
+
+Baseline matrix vs this run, write cells (read=0):
+
+| shards | conc | before ops/s | after ops/s | speedup | before p50 | after p50 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1 | 116.8 | 131.3 | 1.1× | 8.2ms | 7.9ms |
+| 1 | 8 | 213.6 | 279.8 | 1.3× | 36.4ms | 19.1ms |
+| 1 | 32 | 299.8 | 1292.5 | 4.3× | 105.6ms | 23.3ms |
+| 1 | 128 | 315.7 | 3944.9 | 12.5× | 408.6ms | 26.6ms |
+| 4 | 1 | 127.2 | 145.1 | 1.1× | 7.7ms | 6.6ms |
+| 4 | 8 | 205.0 | 243.7 | 1.2× | 36.8ms | 31.8ms |
+| 4 | 32 | 232.0 | 561.0 | 2.4× | 109.5ms | 53.5ms |
+| 4 | 128 | 310.8 | 1399.8 | 4.5× | 339.6ms | 68.5ms |
+| 16 | 1 | 126.6 | 139.2 | 1.1× | 7.9ms | 7.2ms |
+| 16 | 8 | 192.8 | 230.9 | 1.2× | 38.2ms | 32.2ms |
+| 16 | 32 | 259.9 | 298.1 | 1.1× | 105.4ms | 92.7ms |
+| 16 | 128 | 308.6 | 405.6 | 1.3× | 189.9ms | 190.4ms |
+
+Why it was flat (measured, not assumed):
+
+- A 20 s CPU profile of the leader during the before-run's write load:
+  **1.68 s samples over 20.05 s = 8.38% CPU** — the server was waiting,
+  not computing. On-CPU time is `write(2)` and Go's darwin durability
+  flush (`internal/poll.(*FD).Fsync → fcntl(F_FULLFSYNC)`).
+- Raw `File.Sync()` probe on this disk: **avg 2.719 ms → 368 syncs/s**.
+  The before-run measured 365.7 write ops/s — one proposal cost exactly
+  one serialized F_FULLFSYNC on the group's event loop.
+- Shared-disk contention was ruled out: the same probe costs 2.73 ms per
+  write while all three nodes fsync the same volume, vs 2.72 ms idle.
+- Fix (commit `67002f1`): consecutive queued proposals are drained into
+  one batch — one log write, one fsync, one broadcast. fsync-before-ack
+  is unchanged.
 
 ### Observations (facts read off the tables)
 
-- **Write throughput saturates ≈ 300–370 ops/s per group** on this
-  machine regardless of concurrency (fsync per proposal is the ceiling);
-  beyond that, extra concurrency buys latency, not throughput
-  (shards=1, read=0: 8.2 ms p50 at conc=1 → 408.6 ms p50 at conc=128 for
-  the same ~300 ops/s).
-- **Reads (ratio 1.0) reach 44,766 ops/s** (shards=1, conc=128) — the
-  ReadIndex path does not write to the log.
-- **Mixed 0.8 workloads scale with group count**: 601.6 ops/s at
-  shards=1 vs 1178.1 ops/s at shards=16 (same conc=32) — independent
-  groups commit in parallel.
-- **shards=16 write-heavy at conc=128 is the only cell with failures**
-  (17 Raft groups × 128 writers on 8 shared cores); p99 grows to 2.9–3.8 s.
+- **Write throughput now scales with offered load**: shards=1, read=0
+  goes 131.3 → 279.8 → 1292.5 → 3944.9 ops/s at conc 1/8/32/128, and
+  p50 barely moves from conc=32 to conc=128 (23.3 ms → 26.6 ms).
+  At conc=1 there is nothing to batch, so the gain is only 1.1× —
+  expected for a batching fix.
+- **Read throughput is in the same band as the baseline run**
+  (34,219–39,459 ops/s at conc=128 vs 29,849–44,766 before; run-to-run
+  variance ±15%). ReadIndex never writes to the log, so group commit
+  does not touch this path.
+- **Aggregate write throughput falls as shard count rises**: at conc=128,
+  3944.9 (shards=1) → 1399.8 (shards=4) → 405.6 (shards=16); at conc=32,
+  1292.5 → 561.0 → 298.1. More groups means fewer writers per group and
+  shallower queues (smaller fsync batches), plus 17 groups per node on
+  8 shared cores. The shards=16 deficit and its conc=128 failures are
+  under investigation.
+- **Mixed 0.8 at conc=32 is flat across shard counts**
+  (1192.7 / 1277.9 / 1236.3 ops/s).
+- **The only failures remain the two `shards=16, conc=128` write-heavy
+  cells** — 149 client-side `not leader and no leader could be located`
+  errors, p99 up to 2.04 s; all other 46 runs are error-free.
 
 ## Leader failover
 
 `scripts/bench_failover.sh 30s 10s`: 3-node cluster, 1000 keys preloaded,
-8 workers at read ratio 0.5, 30 s window, **leader (node3) killed between
-t=2 s and t=3 s**. Raw progress lines:
+8 workers at read ratio 0.5, 30 s window, **leader (node2) killed between
+t=4 s and t=5 s**. Raw progress lines:
 
 ```
-progress t=  2s attempts=529 (+174) errors=0 (+0)
-leader killed at 21:48:22 (pid 10411)
-progress t=  3s attempts=694 (+165) errors=0 (+0)
-progress t=  4s attempts=694 (+0)   errors=0 (+0)
-progress t=  5s attempts=702 (+8)   errors=8 (+8)
-progress t=  6s attempts=870 (+168) errors=8 (+0)
-progress t=  7s attempts=1241 (+371) errors=8 (+0)
-progress t=  8s attempts=1677 (+436) errors=8 (+0)
+progress t=  4s attempts=1829 (+474) errors=0 (+0)
+leader killed at 22:56:31 (pid 24643)
+progress t=  5s attempts=1875 (+46)  errors=8 (+8)
+progress t=  6s attempts=1875 (+0)   errors=8 (+0)
+progress t=  7s attempts=2186 (+311) errors=8 (+0)
+progress t=  8s attempts=2744 (+558) errors=8 (+0)
 ...
-progress t= 30s attempts=10713 (+576) errors=8 (+0)
+progress t= 30s attempts=17502 (+636) errors=8 (+0)
+new leader after kill: node1:3s
 ```
 
-- **New leader elected 2 s after the kill** (`new leader after kill:
-  node1:2s`, polled concurrently at 0.5 s granularity).
-- **Client-observed outage ≈ 3 s** (t=4 stall, t=5 the 8 failures, t=6
-  traffic resumes); after t=6 there are **no further errors for the
-  remaining 24 s**.
+- **New leader elected 3 s after the kill** (`new leader after kill:
+  node1:3s`, polled concurrently at 0.5 s granularity).
+- **Client-observed outage ≈ 3 s** (t=5 the 8 failures, t=6 stall, t=7
+  traffic resumes); after t=7 there are **no further errors for the
+  remaining 23 s**.
 - The 8 failures are `not leader and no leader could be located`
   (client-side), excluded from latency.
-- Whole run: 10,721 attempts, 8 errors (0.08%), 357.1 ops/s,
-  p50 16.3 ms, p95 48.7 ms, p99 105.4 ms, max 818.7 ms.
+- Whole run: 17,510 attempts, 8 errors (0.05%), 583.4 ops/s,
+  p50 12.4 ms, p95 20.2 ms, p99 24.5 ms, max 1.58 s (a successful
+  operation that waited through the election window).
+- The pre-group-commit baseline run was 357.1 ops/s, p99 105.4 ms —
+  group commit helps this mixed workload too.
 
 ## Data-loss check (`-sweep`)
 
@@ -187,7 +246,7 @@ with preloading disabled so a missing key cannot be recreated:
 sweep: 1000/1000 keys present, 0 missing
 ```
 
-16,409 read attempts over 2 s at 8,203.7 ops/s, **0 errors** — after a
+20,488 read attempts over 2 s at 10,103.8 ops/s, **0 errors** — after a
 leader was killed mid-run, no preloaded key was lost.
 
 ## Not covered (yet)

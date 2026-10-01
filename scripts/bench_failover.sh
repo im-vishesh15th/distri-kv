@@ -15,6 +15,9 @@ KILL_AFTER="${2:-10s}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RESULTS_DIR="$ROOT/bench-results"
 JSONL="$RESULTS_DIR/failover.jsonl"
+# One file per invocation, like bench_matrix.sh: cmd/bench appends (-out),
+# so truncate first or the file silently accumulates every past run.
+: > "$JSONL"
 PEER_PORTS=(8094 8095 8096)
 KEYSPACE=1000
 WARMUP=3s

@@ -14,7 +14,7 @@ and a self-serve service built on top of it (sign up → API key → use).
   linearizable reads (ReadIndex), snapshots + InstallSnapshot, fixed-slot
   sharding (16384 slots) + Multi-Raft.
 - **Assurance:** deterministic simulated network (seeded delay/drop/reorder/
-  partition), automated fault tests, linearizability checking (Porcupine).
+  partition), automated fault tests, linearizability checking (custom checker).
 - **Product:** hosted service — tenants, API keys, quotas/rate limiting,
   gateway, onboarding — so any business can use DistriKV over gRPC/HTTPS.
 

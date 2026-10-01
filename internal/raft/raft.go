@@ -576,6 +576,9 @@ func (n *Group) Tick() {
 
 // Status returns a snapshot of the node's state (any goroutine).
 func (n *Group) Status() Status {
+	if n == nil || n.events == nil || n.done == nil {
+		return Status{ID: ""}
+	}
 	reply := make(chan Status, 1)
 	select {
 	case n.events <- statusEvent{reply: reply}:

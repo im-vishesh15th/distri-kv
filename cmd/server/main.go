@@ -274,10 +274,7 @@ func run(id, addr, pprofAddr, dataDir, peersSpec, shardConfigPath string, snapEv
 			return fmt.Errorf("raft core: %w", err)
 		}
 		singleRaft = rn
-		// Note: in single-group mode, we still have the metadata group in host.
-		// But the legacy Service doesn't use it. We'll set handler to singleRaft
-		// for backward compat, but that means metadata group won't receive RPCs.
-		// For now, we need a combined handler. Let's use the host always.
+		host.AddGroup(singleRaft) // Add group 0 to host for status checks
 		rt.SetHandler(host)
 	}
 
@@ -338,6 +335,18 @@ func run(id, addr, pprofAddr, dataDir, peersSpec, shardConfigPath string, snapEv
 		}(g)
 		raft.StartTicker(ctx, g, 10*time.Millisecond)
 	}
+
+	// Wait for groups to initialize by polling Status() until it succeeds.
+	// Group.Run() initializes the events channel; we poll until Status() succeeds.
+	for _, gid := range host.GroupIDs() {
+		for i := 0; i < 50; i++ {
+			if s := host.Group(gid).Status(); s.Role != "" || s.ID != "" {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
 	if s := host.Group(0).Status(); s.Role != "" {
 		log.Info("raft_started",
 			slog.String("node_id", id),

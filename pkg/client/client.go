@@ -176,6 +176,22 @@ func Dial(ctx context.Context, addr string, opts ...grpc.DialOption) (*Client, e
 	return c, nil
 }
 
+// AddEndpoint pre-creates the memoized connection for another cluster
+// address so failover can reach it: repair() only ever falls back to
+// endpoints this client has already seen, so a client that dialed only the
+// (later-killed) leader would otherwise have nowhere to turn. A no-op for
+// an empty or already-known address. The connection is created lazily by
+// grpc.NewClient — no I/O happens here.
+func (c *Client) AddEndpoint(addr string) error {
+	if addr == "" {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, err := c.connLocked(addr)
+	return err
+}
+
 // Close releases every connection the client has opened.
 func (c *Client) Close() error {
 	c.mu.Lock()

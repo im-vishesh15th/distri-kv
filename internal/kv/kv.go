@@ -66,4 +66,9 @@ type Engine interface {
 	// encoding is an error, never a partial application: restoring half a
 	// state machine would silently diverge from every other replica.
 	Restore(data []byte) error
+
+	// HasKeyInSlotRange returns true if the engine has any key whose slot
+	// falls within [startSlot, endSlot). Used for safe MoveSlots checks.
+	// Must be deterministic and not modify state.
+	HasKeyInSlotRange(startSlot, endSlot uint64) (bool, error)
 }

@@ -457,15 +457,49 @@ func (s *GroupedService) GetShardConfig(ctx context.Context, req *kv1.GetShardCo
 }
 
 // MoveSlots proposes a slot range move via the metadata Raft group.
-// The request is encoded as a metadata command and proposed to the metadata group.
+// Before proposing, it performs a safety check on the metadata leader:
+// a linearizable read confirms leadership, then HasKeyInSlotRange checks
+// if the source range contains any keys. If keys exist and unsafe_no_migration
+// is not set, the move is rejected to prevent data loss.
 func (s *GroupedService) MoveSlots(ctx context.Context, req *kv1.MoveSlotsRequest) (*kv1.MoveSlotsResponse, error) {
+	// If unsafe_no_migration is not set, verify the source range is empty.
+	if !req.UnsafeNoMigration {
+		// Determine the source group's engine.
+		fromGID := raft.GroupID(req.FromGroup)
+		fromEngine := s.engineForGroup(fromGID)
+		if fromEngine == nil {
+			return &kv1.MoveSlotsResponse{Error: fmt.Sprintf("group %d not found", req.FromGroup)}, nil
+		}
+
+		// Linearizable read on the *source* group: ReadIndex on fromGID
+		// confirms this node has applied all committed entries up to the
+		// read barrier, so the engine state we inspect is a consistent
+		// prefix. Routing by a dummy key would hash to an arbitrary group.
+		if _, err := s.proposer.ReadIndex(ctx, fromGID); err != nil {
+			return nil, mapRaftError(err)
+		}
+
+		// Check if the range has any keys.
+		hasKeys, err := fromEngine.HasKeyInSlotRange(req.StartSlot, req.EndSlot)
+		if err != nil {
+			return nil, statusErrorInternal(fmt.Errorf("check range for keys: %w", err))
+		}
+		if hasKeys {
+			return &kv1.MoveSlotsResponse{
+				Error: fmt.Sprintf("move range [%d,%d) in group %d contains keys; use --unsafe-no-migration to override",
+					req.StartSlot, req.EndSlot, req.FromGroup),
+			}, nil
+		}
+	}
+
 	// Build the metadata command payload.
 	moveReq := kv.MoveSlotsRequest{
-		StartSlot:  req.StartSlot,
-		EndSlot:    req.EndSlot,
-		FromGroup:  req.FromGroup,
-		ToGroup:    req.ToGroup,
-		NewVersion: req.NewVersion,
+		StartSlot:         req.StartSlot,
+		EndSlot:           req.EndSlot,
+		FromGroup:         req.FromGroup,
+		ToGroup:           req.ToGroup,
+		NewVersion:        req.NewVersion,
+		UnsafeNoMigration: req.UnsafeNoMigration,
 	}
 	cmd := kv.MoveSlots(moveReq)
 	payload, err := kv.EncodeCommand(cmd)
@@ -593,10 +627,13 @@ func (s *GroupedService) Incr(ctx context.Context, req *kv1.IncrRequest) (*kv1.I
 // engineFor returns the engine for the group that owns key.
 func (s *GroupedService) engineFor(key string) kv.Engine {
 	gid := s.groupFor(key)
+	return s.engineForGroup(gid)
+}
+
+// engineForGroup returns the engine for the given group ID.
+func (s *GroupedService) engineForGroup(gid raft.GroupID) kv.Engine {
 	eng, ok := s.engines[gid]
 	if !ok {
-		// This is a misconfiguration — the group should have been registered.
-		// Return a nil engine to trigger a proper error.
 		return nil
 	}
 	return eng

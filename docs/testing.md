@@ -16,6 +16,8 @@ This document describes the testing philosophy, tools, and mutation testing appr
 | `internal/server` | gRPC service routing tests |
 | `internal/kv` | Engine and state machine tests |
 | `internal/transport/sim` | Deterministic fault-injection network |
+| `internal/gateway` | HTTP gateway: auth, rate-limiting, tenancy, metrics, `/v1/usage` |
+| `internal/nodemetrics` | Raft node metrics collector (Prometheus text format, no deps) |
 
 ---
 
@@ -173,3 +175,39 @@ All PRs must pass:
 - `go vet ./...` — no vet issues
 - `go test -race -count=1 ./...` — all tests pass with race detector
 - Mutation tests (documented above) — mutations must cause failures
+
+---
+
+## Gateway Tests (`internal/gateway`)
+
+The gateway package has comprehensive tests covering:
+
+- **Tenant lifecycle**: create/get tenants
+- **API key lifecycle**: create, validate, reject invalid/expired/nonexistent
+- **Rate limiter**: burst allowance, token refill over time, tenant-specific quota override
+- **Key namespacing**: `t:{tenantID}:{key}` encoding with fuzz test proving injective + reversible mapping
+- **HTTP auth middleware**: missing/malformed/valid auth, 401 responses
+- **Concurrent rate limiter access**: thread-safe token bucket
+- **Random key generation**: `dkv_live_` + 256 random bits, SHA-256 hashing stability
+- **HTTP auth**: 401 for missing/malformed auth, 500 for missing KV (not 401)
+- **HTTP rate limit**: burst requests allowed, then 429 with `Retry-After`
+- **HTTP methods**: GET/PUT/POST/DELETE on `/kv/{key}` with proper auth
+
+Run with: `go test -race -count=1 ./internal/gateway/...`
+
+---
+
+## Node Metrics Tests (`internal/nodemetrics`)
+
+The nodemetrics package tests the Prometheus metrics collector:
+
+- **Usage counts**: `/v1/usage` endpoint returns correct request counts per tenant
+- **Per-tenant isolation**: usage counters don't leak across tenants
+- **Auth on `/v1/usage`**: requires valid API key
+- **Prometheus output**: `/metrics` returns valid text-format exposition
+- **`/metrics` not on public handler**: separate listener on `MetricsAddr`
+- **Concurrency cap**: 429 with `too_many_concurrent_requests` code, slot freed after release
+- **TLS half-configuration**: errors if only one of cert/key provided
+- **Per-tenant isolation of concurrency limit**: one tenant's cap doesn't affect another
+
+Run with: `go test -race -count=1 ./internal/nodemetrics/...`

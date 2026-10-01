@@ -27,8 +27,9 @@ type testHandler struct {
 	lastApp  *raftpb.AppendEntriesRequest
 	lastSnap *raftpb.InstallSnapshotRequest
 
-	voteResp *raftpb.RequestVoteResponse
-	appResp  *raftpb.AppendEntriesResponse
+	voteResp    *raftpb.RequestVoteResponse
+	appResp     *raftpb.AppendEntriesResponse
+	lastPreVote *raftpb.PreVoteRequest
 }
 
 func (h *testHandler) HandleRequestVote(_ context.Context, req *raftpb.RequestVoteRequest) (*raftpb.RequestVoteResponse, error) {
@@ -39,6 +40,13 @@ func (h *testHandler) HandleRequestVote(_ context.Context, req *raftpb.RequestVo
 		return h.voteResp, nil
 	}
 	return &raftpb.RequestVoteResponse{Term: req.Term, VoteGranted: true}, nil
+}
+
+func (h *testHandler) HandlePreVote(_ context.Context, req *raftpb.PreVoteRequest) (*raftpb.PreVoteResponse, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lastPreVote = req
+	return &raftpb.PreVoteResponse{Term: req.Term, VoteGranted: true}, nil
 }
 
 func (h *testHandler) HandleAppendEntries(_ context.Context, req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error) {

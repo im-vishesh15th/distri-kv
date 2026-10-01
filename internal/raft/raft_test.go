@@ -87,6 +87,15 @@ func (f *fakeTransport) LocalID() transport.NodeID { return f.id }
 
 func (f *fakeTransport) Ping(context.Context, transport.NodeID) error { return nil }
 
+// PreVote is granted unconditionally (and not recorded on voteCalls):
+// tests that care about election outcomes do so at the real RequestVote
+// stage, so pre-vote must not stand in their way. Term 0 never exceeds
+// the candidate's term, so the response reads as "stale responder,
+// grant counted" rather than triggering a step-down.
+func (f *fakeTransport) PreVote(context.Context, transport.NodeID, *raftpb.PreVoteRequest) (*raftpb.PreVoteResponse, error) {
+	return &raftpb.PreVoteResponse{VoteGranted: true}, nil
+}
+
 func (f *fakeTransport) RequestVote(ctx context.Context, to transport.NodeID, req *raftpb.RequestVoteRequest) (*raftpb.RequestVoteResponse, error) {
 	select {
 	case f.voteCalls <- voteCall{to: to, req: req}:

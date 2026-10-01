@@ -42,8 +42,12 @@ The production values were 10/3 (100–190 ms) until the benchmark runs in
 fsync jitter: with ≥32 concurrent writers the loop can go >200 ms between
 processing control events, so followers campaigned constantly (measured:
 75 elections in 30 s and 25% failed ops at concurrency 128). At 500–990 ms
-the same load runs with zero elections and zero errors. The tighter values
-remain correct in tests, which drive `Tick()` themselves and control time.
+the same load runs with zero elections and zero errors. A longer timeout
+alone did not end elections everywhere, though: the 16-shard cells still
+churned under load (measured — a group's term inflating to 10 inside the
+error cells; [benchmarks.md](benchmarks.md)), and it is the pre-vote
+phase below that ended that. The tighter values remain correct in tests,
+which drive `Tick()` themselves and control time.
 
 ## State
 
@@ -64,7 +68,43 @@ node may participate — a restarted node can never forget a vote it cast.
 
 ## Election rules
 
-A follower campaigns when its randomized election timeout elapses:
+Elections happen in two phases: a **state-free pre-vote round**, then the
+real campaign. Only the second one ever changes a term.
+
+### Phase 1 — pre-vote (dissertation §9.6)
+
+When a follower's (or a failed candidate's) randomized election timeout
+elapses, the node first becomes `pre_candidate` — **no `term++`, no
+`votedFor`, no disk write** (there is nothing to fsync; a pre-vote
+response can never outrun persistence) — and asks every peer:
+
+> *"would you vote for me at `term+1`?"* — with the would-be term plus
+> our `lastLogIndex/lastLogTerm`.
+
+A majority of pre-votes → phase 2. A refusal is not an error: the timer
+was reset when the round started, so we simply try again at the next
+randomized deadline.
+
+A receiver grants a pre-vote only if **all three** hold:
+
+1. **No live leader** — we are not an incumbent leader, and we have not
+   heard from our leader within the *minimum* election timeout. This is
+   the protection pre-vote exists for: a majority that still hears its
+   leader refuses every disruptive pre-vote, so one node's stalled event
+   loop can no longer bump terms and force re-elections on a cluster
+   that is fine.
+2. **Not stale** — `request.term ≥ our.term`, else refuse and return our
+   term so the sender adopts it instead of inflating its own (how a
+   partitioned old node heals without a term war).
+3. **Up-to-date log** — the same §5.4.1 check as a real vote.
+
+Neither side mutates state — no term adoption, no vote, nothing durable.
+A responder reporting a term *above ours* still makes us step down: that
+term already existed somewhere else, so adopting it is learning, not
+inflation. Benchmarks before/after this landed are in
+[benchmarks.md](benchmarks.md).
+
+### Phase 2 — the real campaign
 
 1. `term++`, `votedFor = self`, **persist**, reset the timer, then solicit
    votes from every peer with `lastLogIndex/lastLogTerm` from the log.
@@ -395,6 +435,7 @@ them).
 | `TestSplitVoteResolvesOnRetry` | zero-grant round → new term → eventual leader |
 | `TestVotePersistedBeforeResponse` | on-disk vote matches the response the instant it is sent; double vote in one term refused; stale term refused |
 | `TestVoteDeniedWhenCandidateLogBehind` | election restriction (§5.4.1) incl. equal-term/shorter-log cases |
+| `TestPreVoteGrantChangesNoState`, `TestPreVoteLiveLeaderRefusesExpiredTimerGrants`, `TestPreVoteStaleSenderRefusedWithOurTerm`, `TestPreVoteLogCheckMatchesRequestVote`, `TestPreVoteMajorityStartsRealCampaign`, `TestPreVoteResponsesIgnoredOutsideRoundExceptHigherTerm` | pre-vote (§9.6): a grant mutates nothing (term, vote, role, disk all byte-identical); live-leader refusal and expired-timer grant; stale sender healed by our term; §5.4.1 applies in the pre-round; a pre-vote majority is the only key to the real campaign — exactly one term bump, at campaign time; stray responses ignored outside a round except a real higher term |
 | `TestAppendEntriesHeartbeatAndConsistency` | stale heartbeat rejected without timer reset; valid one adopts leader + resets timer; prevLog checked |
 | `TestStaleVoteResponseIgnored`, `TestDuplicateGrantCountsOnce`, `TestHigherTermResponseStepDownClearsVote`, `TestUnreachablePeerDoesNotBlockElection` | response-handling safety, driven synchronously (no polling) |
 | `TestLeaderReplicatesAndCommits` | proposal ships with correct prevLog anchor; one follower ack commits a 3-node majority; entry durable in the log; commit watermark rides the next heartbeat |

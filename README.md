@@ -61,7 +61,7 @@ half-finished extra.
 - [Consistency](docs/consistency.md) — precise guarantees and the tests that prove them
 - [Concurrency](docs/concurrency.md) — three levels (clients / event loop / shards) and who owns what
 - [Simulation](docs/simulation.md) — deterministic in-process network: seeded faults, clock modes, reproducibility boundary
-- [Faults](docs/faults.md) — spec §19 scenarios, seeded chaos, disk failure, and the no-pre-vote limitation
+- [Faults](docs/faults.md) — spec §19 scenarios, seeded chaos, disk failure, and the pre-vote protections
 - [Linearizability](docs/linearizability.md) — operation histories, the checker, and the end-to-end proof
 - [Multi-Raft](docs/multiraft.md) — per-group Raft, group-multiplexed transport, group vs node failure model
 - [Sharding](docs/shard.md) — fixed-slot key→group mapping, the shard map, and the routing chain

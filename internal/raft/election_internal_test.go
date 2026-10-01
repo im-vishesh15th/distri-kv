@@ -29,6 +29,11 @@ func (t *nopTransport) RequestVote(ctx context.Context, _ transport.NodeID, _ *r
 	return nil, ctx.Err()
 }
 
+func (t *nopTransport) PreVote(ctx context.Context, _ transport.NodeID, _ *raftpb.PreVoteRequest) (*raftpb.PreVoteResponse, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 func (t *nopTransport) AppendEntries(ctx context.Context, _ transport.NodeID, _ *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
@@ -209,5 +214,218 @@ func TestHigherTermVoteRequestAdoptsTermAndClearsVote(t *testing.T) {
 	}
 	if hs := n.rlog.HardState(); hs.Term != 4 || hs.VotedFor != "n3" {
 		t.Fatalf("term adoption not persisted: %+v", hs)
+	}
+}
+
+// --- pre-vote (dissertation §9.6) ---
+
+// upToDateReq builds a pre-vote whose log fields match n's own — i.e. a
+// candidate that passes the §5.4.1 check — at the term n WOULD campaign
+// in (n.term+1).
+func upToDateReq(n *Group) *raftpb.PreVoteRequest {
+	return &raftpb.PreVoteRequest{
+		Term:         n.term + 1,
+		CandidateId:  "cand",
+		LastLogIndex: n.rlog.LastIndex(),
+		LastLogTerm:  n.rlog.LastTerm(),
+	}
+}
+
+// A granted pre-vote must change NOTHING: same term, same vote, same role.
+// That is the entire point of the phase — a node that cannot win the real
+// election never gets to burn a term finding that out.
+func TestPreVoteGrantChangesNoState(t *testing.T) {
+	n := newTestNode(t, "n1", "n2", "n3")
+	term, votedFor, role := n.term, n.votedFor, n.role
+
+	resp, err := n.onPreVoteRequest(upToDateReq(n))
+	if err != nil {
+		t.Fatalf("onPreVoteRequest: %v", err)
+	}
+	if !resp.VoteGranted {
+		t.Fatalf("fresh follower should grant an up-to-date candidate: %+v", resp)
+	}
+	if resp.Term != term {
+		t.Fatalf("pre-vote response term: got %d want %d (responder term must not move)", resp.Term, term)
+	}
+	if n.term != term || n.votedFor != votedFor || n.role != role {
+		t.Fatalf("pre-vote mutated state: term %d->%d votedFor %q->%q role %s->%s",
+			term, n.term, votedFor, n.votedFor, role, n.role)
+	}
+	if hs := n.rlog.HardState(); hs.Term != term || hs.VotedFor != string(votedFor) {
+		t.Fatalf("pre-vote touched durable state: %+v", hs)
+	}
+}
+
+// The live-leader rule: a node that still hears its leader refuses
+// pre-votes no matter who asks — this is what keeps one stalled node from
+// forcing elections on a healthy cluster. Once the leader has been silent
+// for a full minimum election timeout, the same follower grants.
+func TestPreVoteLiveLeaderRefusesExpiredTimerGrants(t *testing.T) {
+	n := newTestNode(t, "n1", "n2", "n3")
+
+	// Leader recently heard (electionElapsed below the minimum timeout).
+	n.leaderID = "n2"
+	n.electionElapsed = n.electTO - 1
+	resp, err := n.onPreVoteRequest(upToDateReq(n))
+	if err != nil {
+		t.Fatalf("onPreVoteRequest: %v", err)
+	}
+	if resp.VoteGranted {
+		t.Fatalf("follower hearing its leader must refuse pre-votes: %+v", resp)
+	}
+
+	// Leader silent for at least the minimum election timeout: the
+	// follower has no live leader left to protect — grant.
+	n.electionElapsed = n.electTO
+	resp, err = n.onPreVoteRequest(upToDateReq(n))
+	if err != nil {
+		t.Fatalf("onPreVoteRequest: %v", err)
+	}
+	if !resp.VoteGranted {
+		t.Fatalf("follower whose leader went silent must grant: %+v", resp)
+	}
+
+	// An incumbent leader refuses even with a stale election timer field.
+	n.role = RoleLeader
+	n.leaderID = n.id
+	n.electionElapsed = 2 * n.electTO
+	resp, err = n.onPreVoteRequest(upToDateReq(n))
+	if err != nil {
+		t.Fatalf("onPreVoteRequest: %v", err)
+	}
+	if resp.VoteGranted {
+		t.Fatalf("incumbent leader must refuse pre-votes: %+v", resp)
+	}
+}
+
+// A stale sender (term behind ours) is refused, and OUR term travels back
+// so it adopts instead of inflating — how a partitioned old node heals.
+func TestPreVoteStaleSenderRefusedWithOurTerm(t *testing.T) {
+	n := newTestNode(t, "n1", "n2", "n3")
+	n.term = 5
+	if err := n.persistHardState(); err != nil {
+		t.Fatalf("persist: %v", err)
+	}
+	resp, err := n.onPreVoteRequest(&raftpb.PreVoteRequest{
+		Term: 4, CandidateId: "old", LastLogIndex: 0, LastLogTerm: 0,
+	})
+	if err != nil {
+		t.Fatalf("onPreVoteRequest: %v", err)
+	}
+	if resp.VoteGranted || resp.Term != 5 {
+		t.Fatalf("stale sender: got %+v, want refusal carrying term 5", resp)
+	}
+}
+
+// The §5.4.1 up-to-date check applies in the pre-round exactly as in the
+// real one: a candidate behind our log never passes, one at or ahead of
+// it does.
+func TestPreVoteLogCheckMatchesRequestVote(t *testing.T) {
+	n := newTestNode(t, "n1", "n2", "n3")
+	// Our log reaches (index 1, term 3).
+	if err := n.rlog.Append([]raftlog.Entry{{Index: 1, Term: 3, Payload: []byte("x")}}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	behindTerm := &raftpb.PreVoteRequest{Term: 1, CandidateId: "c",
+		LastLogIndex: 9, LastLogTerm: 2}
+	behindIdx := &raftpb.PreVoteRequest{Term: 1, CandidateId: "c",
+		LastLogIndex: 0, LastLogTerm: 3}
+	ahead := &raftpb.PreVoteRequest{Term: 1, CandidateId: "c",
+		LastLogIndex: 1, LastLogTerm: 3}
+	newerTerm := &raftpb.PreVoteRequest{Term: 1, CandidateId: "c",
+		LastLogIndex: 0, LastLogTerm: 4}
+
+	for _, tc := range []struct {
+		name string
+		req  *raftpb.PreVoteRequest
+		want bool
+	}{
+		{"behind last term", behindTerm, false},
+		{"same term, shorter log", behindIdx, false},
+		{"same term, same length", ahead, true},
+		{"newer last term", newerTerm, true},
+	} {
+		resp, err := n.onPreVoteRequest(tc.req)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if resp.VoteGranted != tc.want {
+			t.Errorf("%s: granted=%v want %v", tc.name, resp.VoteGranted, tc.want)
+		}
+	}
+}
+
+// A pre-vote majority is what unlocks the real campaign: on a five-node
+// cluster (majority 3) one external grant on top of our own vote is not
+// enough — the second one starts the campaign, term bumped by exactly
+// one, self-voted and persisted, role=candidate.
+func TestPreVoteMajorityStartsRealCampaign(t *testing.T) {
+	n := newTestNode(t, "n1", "n2", "n3", "n4", "n5")
+	if err := n.startPreVote(); err != nil {
+		t.Fatalf("startPreVote: %v", err)
+	}
+	if n.role != RolePreCandidate {
+		t.Fatalf("role=%s want pre_candidate", n.role)
+	}
+	term := n.term
+
+	// First grant: 2 of 5 — still short of the majority of 3.
+	if err := n.handle(preVoteRespEvent{from: "n2", resp: &raftpb.PreVoteResponse{
+		Term: term, VoteGranted: true,
+	}}); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if n.role != RolePreCandidate || n.term != term {
+		t.Fatalf("campaigned without a majority: role=%s term=%d", n.role, n.term)
+	}
+
+	// Second grant reaches 3 of 5: the real campaign starts now.
+	if err := n.handle(preVoteRespEvent{from: "n3", resp: &raftpb.PreVoteResponse{
+		Term: term, VoteGranted: true,
+	}}); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if n.role != RoleCandidate {
+		t.Fatalf("role=%s want candidate after pre-vote majority", n.role)
+	}
+	if n.term != term+1 {
+		t.Fatalf("term=%d want %d (exactly one bump, at campaign time)", n.term, term+1)
+	}
+	if len(n.votes) != 1 || !n.votes[n.id] {
+		t.Fatalf("votes=%v want only self", n.votes)
+	}
+	if hs := n.rlog.HardState(); hs.Term != term+1 || hs.VotedFor != string(n.id) {
+		t.Fatalf("campaign hard state not persisted: %+v", hs)
+	}
+}
+
+// Pre-vote responses are advisory: outside a pre-vote round they change
+// nothing, EXCEPT that a responder reporting a newer term still makes us
+// step down to it (learning a real term is always safe).
+func TestPreVoteResponsesIgnoredOutsideRoundExceptHigherTerm(t *testing.T) {
+	n := newTestNode(t, "n1", "n2", "n3") // idle follower
+
+	if err := n.handle(preVoteRespEvent{from: "n2", resp: &raftpb.PreVoteResponse{
+		Term: n.term, VoteGranted: true,
+	}}); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if n.role != RoleFollower || n.term != 0 {
+		t.Fatalf("stray grant changed state: role=%s term=%d", n.role, n.term)
+	}
+
+	if err := n.startPreVote(); err != nil {
+		t.Fatalf("startPreVote: %v", err)
+	}
+	term := n.term
+	if err := n.handle(preVoteRespEvent{from: "n2", resp: &raftpb.PreVoteResponse{
+		Term: term + 3, VoteGranted: false,
+	}}); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if n.role != RoleFollower || n.term != term+3 {
+		t.Fatalf("higher term not adopted: role=%s term=%d want follower/%d", n.role, n.term, term+3)
 	}
 }

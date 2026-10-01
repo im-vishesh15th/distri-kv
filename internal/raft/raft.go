@@ -48,9 +48,10 @@ type GroupID uint64
 type Role string
 
 const (
-	RoleFollower  Role = "follower"
-	RoleCandidate Role = "candidate"
-	RoleLeader    Role = "leader"
+	RoleFollower     Role = "follower"
+	RolePreCandidate Role = "pre_candidate"
+	RoleCandidate    Role = "candidate"
+	RoleLeader       Role = "leader"
 )
 
 // ErrStopped is returned by node entry points after Run has exited.
@@ -230,6 +231,29 @@ type voteRespEvent struct {
 
 func (voteRespEvent) isEvent() {}
 
+// preVoteReqEvent is an inbound PreVote RPC (dissertation §9.6), routed
+// through the loop like every other Raft decision — but it changes no
+// state: no term, no vote, no disk.
+type preVoteReqEvent struct {
+	req   *raftpb.PreVoteRequest
+	reply chan preVoteReply
+}
+
+func (preVoteReqEvent) isEvent() {}
+
+type preVoteReply struct {
+	resp *raftpb.PreVoteResponse
+	err  error
+}
+
+type preVoteRespEvent struct {
+	from transport.NodeID
+	resp *raftpb.PreVoteResponse
+	err  error
+}
+
+func (preVoteRespEvent) isEvent() {}
+
 type appReqEvent struct {
 	req   *raftpb.AppendEntriesRequest
 	reply chan appReply
@@ -362,6 +386,11 @@ type Group struct {
 	// votes dedupes grants for the current candidacy; len() is the
 	// distinct-vote count.
 	votes map[transport.NodeID]bool
+
+	// preVotes dedupes grants for the current PRE-vote round (§9.6);
+	// recreated at every startPreVote. A majority of preVotes is what
+	// permits startCampaign — the real, term-bumping election.
+	preVotes map[transport.NodeID]bool
 
 	// progress is the leader's per-peer replication state (next/match/
 	// in-flight), rebuilt fresh at every becomeLeader. Nil while follower.
@@ -692,6 +721,26 @@ func (n *Group) HandleRequestVote(ctx context.Context, req *raftpb.RequestVoteRe
 	}
 }
 
+// HandlePreVote implements transport.Handler (see HandleRequestVote).
+func (n *Group) HandlePreVote(ctx context.Context, req *raftpb.PreVoteRequest) (*raftpb.PreVoteResponse, error) {
+	reply := make(chan preVoteReply, 1)
+	select {
+	case n.events <- preVoteReqEvent{req: req, reply: reply}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-n.done:
+		return nil, ErrStopped
+	}
+	select {
+	case r := <-reply:
+		return r.resp, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-n.done:
+		return nil, ErrStopped
+	}
+}
+
 // HandleAppendEntries implements transport.Handler (see HandleRequestVote).
 func (n *Group) HandleAppendEntries(ctx context.Context, req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error) {
 	reply := make(chan appReply, 1)
@@ -774,6 +823,14 @@ func (n *Group) dispatch(ev event) error {
 
 	case voteRespEvent:
 		return n.onVoteResponse(e)
+
+	case preVoteReqEvent:
+		resp, err := n.onPreVoteRequest(e.req)
+		e.reply <- preVoteReply{resp: resp, err: err}
+		return err
+
+	case preVoteRespEvent:
+		return n.onPreVoteResponse(e)
 
 	case appRespEvent:
 		return n.onAppendResponse(e)

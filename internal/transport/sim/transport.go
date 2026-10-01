@@ -53,6 +53,16 @@ func (t *Transport) RequestVote(ctx context.Context, to transport.NodeID, req *r
 	return v.(*raftpb.RequestVoteResponse), nil
 }
 
+func (t *Transport) PreVote(ctx context.Context, to transport.NodeID, req *raftpb.PreVoteRequest) (*raftpb.PreVoteResponse, error) {
+	v, err := t.net.CallGroup(ctx, t.id, to, req.GroupId, func(h transport.Handler) (any, error) {
+		return h.HandlePreVote(ctx, req)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.(*raftpb.PreVoteResponse), nil
+}
+
 func (t *Transport) AppendEntries(ctx context.Context, to transport.NodeID, req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error) {
 	v, err := t.net.CallGroup(ctx, t.id, to, req.GroupId, func(h transport.Handler) (any, error) {
 		return h.HandleAppendEntries(ctx, req)

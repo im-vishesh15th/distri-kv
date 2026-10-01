@@ -8,9 +8,11 @@ import (
 	"distrikv/internal/transport"
 )
 
-// onTick advances logical time. Leaders run on heartbeat time; followers and
-// candidates run on election time (randomized to [E, 2E) ticks per term so
-// split votes are improbable).
+// onTick advances logical time. Leaders run on heartbeat time; everyone
+// else — follower, pre-candidate, or candidate waiting out a failed round
+// — runs on election time (randomized to [E, 2E) ticks per term so split
+// votes are improbable). Election expiry starts the PRE-vote phase; only a
+// pre-vote majority ever leads to a real campaign.
 func (n *Group) onTick() error {
 	switch n.role {
 	case RoleLeader:
@@ -24,7 +26,7 @@ func (n *Group) onTick() error {
 	default:
 		n.electionElapsed++
 		if n.electionElapsed >= n.electionTimeout {
-			return n.startCampaign()
+			return n.startPreVote()
 		}
 	}
 	return nil
@@ -38,8 +40,140 @@ func (n *Group) resetElectionTimer() {
 	n.electionTimeout = n.electTO + n.rng.Intn(n.electTO)
 }
 
-// startCampaign transitions follower/candidate → candidate: bump term, vote
+// startPreVote begins (or retries) the pre-vote phase (dissertation §9.6):
+// before bumping our term we ask a majority whether they WOULD vote for us
+// at term+1. Nothing is persisted and no term changes on either side, so a
+// node that cannot win — a partitioned node, a node with a stale log, or
+// (the case that motivated this) a node whose timer merely fired while a
+// majority still hears the leader — never inflates its term and never
+// disrupts a cluster that is fine. A majority of pre-votes unlocks
+// startCampaign (the one state change of the sequence: term++, persisted
+// self-vote); a refusal just waits for the next randomized timeout and
+// tries again.
+func (n *Group) startPreVote() error {
+	prevRole := n.role
+
+	n.role = RolePreCandidate
+	n.leaderID = ""
+	n.preVotes = map[transport.NodeID]bool{n.id: true}
+	n.resetElectionTimer()
+
+	n.logf("pre_vote_start", "prev_role", prevRole, "term", n.term,
+		"pre_term", n.term+1, "majority", n.majorityN)
+
+	// A cluster that already has a majority in hand (e.g. single node)
+	// proceeds straight to the real election.
+	if len(n.preVotes) >= n.majorityN {
+		return n.startCampaign()
+	}
+
+	req := &raftpb.PreVoteRequest{
+		Term:         n.term + 1,
+		CandidateId:  string(n.id),
+		LastLogIndex: n.rlog.LastIndex(),
+		LastLogTerm:  n.rlog.LastTerm(),
+		GroupId:      uint64(n.groupID), // Phase 17: demux on the receiving host
+	}
+	for _, p := range n.peers {
+		if p == n.id {
+			continue
+		}
+		go n.sendPreVote(p, req)
+	}
+	return nil
+}
+
+// sendPreVote runs on its own goroutine: one outbound RPC, one response
+// event back into the loop. The RPC lifetime is bounded by rpcCtx (cancelled
+// when Run exits) — no response can outlive the node.
+func (n *Group) sendPreVote(to transport.NodeID, req *raftpb.PreVoteRequest) {
+	resp, err := n.transport.PreVote(n.rpcCtx, to, req)
+	select {
+	case n.events <- preVoteRespEvent{from: to, resp: resp, err: err}:
+	case <-n.rpcCtx.Done():
+	case <-n.done:
+	}
+}
+
+// onPreVoteResponse handles one pre-vote reply while pre-candidate.
+// No state changed on the responder's side, so a refusal is not a failure
+// — only a majority of grants lets us campaign for real.
+func (n *Group) onPreVoteResponse(e preVoteRespEvent) error {
+	if n.role != RolePreCandidate {
+		// Stale round: we already won it (campaigning), gave up, or
+		// stepped down. Pre-vote replies are advisory — drop them.
+		return nil
+	}
+	if e.err != nil {
+		// Unreachable peer: not counted. Majority math makes this safe.
+		n.logf("pre_vote_rpc_failed", "peer", e.from, "err", e.err.Error())
+		return nil
+	}
+	if e.resp.Term > n.term {
+		// A peer knows a newer term: we're stale. Adopting it is learning,
+		// not inflation — that term already existed somewhere else (same
+		// rule as vote responses).
+		return n.stepDown(e.resp.Term, "higher_term_in_pre_vote_response")
+	}
+	if !e.resp.VoteGranted {
+		n.logf("pre_vote_refused", "peer", e.from, "peer_term", e.resp.Term)
+		return nil
+	}
+	if n.preVotes[e.from] {
+		return nil // duplicate grant (at-most-once per peer per round)
+	}
+	n.preVotes[e.from] = true
+	if len(n.preVotes) < n.majorityN {
+		return nil
+	}
+	// Pre-vote majority in hand: the real election may begin.
+	n.logfInfo("pre_vote_won", "term", n.term, "pre_term", n.term+1)
+	return n.startCampaign()
+}
+
+// onPreVoteRequest decides one PreVote (loop goroutine, §9.6).
+//
+// Unlike onVoteRequest this mutates NOTHING: no term is adopted, no
+// votedFor is recorded, nothing is fsynced — persist-before-respond has
+// no write to wait for, so the response can never outrun the disk.
+// Conditions to grant, in order:
+//
+//  1. Stale sender (req.Term < our term): refuse and let our term be the
+//     answer — the sender adopts it instead of inflating its own. This is
+//     how a partitioned old node heals without a term war.
+//  2. A leader we still believe in must not be challenged: an incumbent
+//     leader refuses outright, and a follower that has heard from its
+//     leader within the minimum election timeout refuses too. This is the
+//     whole point of pre-vote — a healthy majority keeps rejecting a
+//     would-be disruptor's pre-votes while it still hears a leader, so
+//     one node's stalled event loop can no longer force elections (and
+//     term inflation) on a cluster that is fine.
+//  3. §5.4.1 log check — the same up-to-date rule as RequestVote: only a
+//     candidate whose log is at least as complete as ours may win, in the
+//     pre-round as in the real one.
+func (n *Group) onPreVoteRequest(req *raftpb.PreVoteRequest) (*raftpb.PreVoteResponse, error) {
+	resp := &raftpb.PreVoteResponse{Term: n.term}
+
+	if req.Term < n.term {
+		return resp, nil // stale sender: our higher term is the answer
+	}
+	if n.role == RoleLeader || (n.leaderID != "" && n.electionElapsed < n.electTO) {
+		return resp, nil // a live leader protects itself and its followers
+	}
+	lastIdx, lastTerm := n.rlog.LastIndex(), n.rlog.LastTerm()
+	upToDate := req.LastLogTerm > lastTerm ||
+		(req.LastLogTerm == lastTerm && req.LastLogIndex >= lastIdx)
+	if !upToDate {
+		return resp, nil // behind-log candidates never pass the §5.4.1 check
+	}
+	resp.VoteGranted = true
+	return resp, nil
+}
+
+// startCampaign transitions pre-candidate → candidate: bump term, vote
 // for self (persisted BEFORE any vote request leaves), and solicit votes.
+// Callers have already won a pre-vote majority — this is the first (and
+// only) state change of an election round.
 func (n *Group) startCampaign() error {
 	prevRole, prevTerm := n.role, n.term
 
@@ -53,7 +187,9 @@ func (n *Group) startCampaign() error {
 	n.votes = map[transport.NodeID]bool{n.id: true}
 	n.resetElectionTimer()
 
-	n.logf("campaign", "prev_role", prevRole, "prev_term", prevTerm,
+	// Elections are rare and consequential: keep them at INFO alongside
+	// became_leader so a churn incident is auditable from the logs.
+	n.logfInfo("campaign", "prev_role", prevRole, "prev_term", prevTerm,
 		"peers", len(n.peers), "majority", n.majorityN)
 
 	// A cluster that already has a majority in hand (e.g. single node)

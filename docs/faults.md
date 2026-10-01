@@ -30,22 +30,32 @@ under a follower isolation).
 
 ### 2. Partition leader from one follower
 
-Two tests, because our Raft has **no pre-vote** (the spec doesn't
-require it) and the two cuts behave differently:
+Two tests — `Isolate` and the literal one-link `Block` cut — because they
+exercise the two sides of **pre-vote** (Raft §9.6, implemented): a
+partitioned node must burn no terms, and a majority that still hears its
+leader must refuse to be disrupted.
 
 - `TestSimPartitionLeaderFromFollower` — `Isolate(follower)`: the cut
-  node's campaign term-bumps cannot reach anyone, so the leader stays
-  put (asserted for 2s), the majority keeps committing, the isolated
-  node **provably never sees** the new entries (its `LastLogIndex`
-  stays below the first post-isolation index), and after heal all three
-  agree.
+  node's pre-votes reach nobody, so the leader stays put (asserted for
+  2s), the majority keeps committing, the isolated node **provably never
+  sees** the new entries (its `LastLogIndex` stays below the first
+  post-isolation index), and after heal all three agree — with **no churn
+  round at all**, its term never having moved.
 - `TestSimBlockLeaderFromFollower` — the literal one-link cut
-  `Block(leader, follower)`: the cut follower's campaigns *do* reach
-  the third node, so leadership churns between the two reachable nodes
-  while the partition lasts (correct vanilla-Raft behavior). Availability
-  is therefore asserted the way a client experiences it — writes keep
-  landing within a 15s deadline through leadership changes — and heal
-  must end in full agreement.
+  `Block(leader, follower)`: the cut follower's pre-votes *do* reach the
+  third node, but that node still hears its leader and refuses them all,
+  so no real campaign ever starts. The test asserts the leader holds its
+  seat **and its original term** for the whole partition (while writes
+  keep landing within a 15s deadline — what a client experiences through
+  retries), that the cut node's own term never moved either, and that
+  heal ends in full agreement. (Before pre-vote, leadership churned
+  between the two reachable nodes here — that churn was the old expected
+  behavior, updated when pre-vote landed.)
+- `TestSimPartitionedNodeDoesNotInflateTerm` — the harm pre-vote
+  removes, measured directly: after an isolation long enough to burn
+  several of the cut node's election timeouts (100–190 ms each), the cut
+  node's term *and* the majority leader's term must be exactly where
+  they started.
 
 ### 3. Minority cannot commit, majority continues
 
@@ -94,11 +104,21 @@ one.
 
 ## Known limitation (documented, not hidden)
 
-Without pre-vote, a partitioned node's term inflates with each failed
-campaign. While partitioned this is harmless for `Isolate`d nodes
-(their bumps reach no one) but causes the leadership churn exercised in
-`TestSimBlockLeaderFromFollower`; on heal it costs one re-election round
-before convergence. Pre-vote (Raft §9.6) would suppress both — it is a
-liveness optimization, not a correctness requirement, and the spec
-doesn't ask for it. Candidate for a later phase if production churn
-measurements justify it.
+Pre-vote (Raft §9.6) is implemented, so the old limitation — a
+partitioned node inflating its term and churning a healthy cluster — no
+longer applies; the three tests above pin down the new behavior. What
+remains honest to state:
+
+- Pre-vote protects only where a **majority still hears its leader**. If
+  a majority genuinely stalls past the election timeout, they can grant
+  each other pre-votes and re-elect — correct and desired (there may be
+  no leader left at that point).
+- Safety still rests entirely on the real vote rules (one durable vote
+  per term, §5.4.1 up-to-date check); pre-vote is a disruption
+  optimization layered in front of them.
+- The failure mode it fixed was measured, not hypothesized: the
+  pre-pre-vote 16-shard, concurrency-128 benchmark cells showed election
+  storms (a group's term inflating to 10) inside exactly the two cells
+  that had client errors (53 and 96); the same cells after pre-vote run
+  with zero elections in the window and zero errors
+  ([benchmarks.md](benchmarks.md)).

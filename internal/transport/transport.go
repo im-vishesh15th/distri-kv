@@ -47,6 +47,11 @@ type Transport interface {
 	// RequestVote sends a RequestVote RPC to `to`.
 	RequestVote(ctx context.Context, to NodeID, req *raftpb.RequestVoteRequest) (*raftpb.RequestVoteResponse, error)
 
+	// PreVote sends a PreVote RPC to `to` (Raft dissertation §9.6): the
+	// advisory round that precedes a real campaign and never changes
+	// state on either side.
+	PreVote(ctx context.Context, to NodeID, req *raftpb.PreVoteRequest) (*raftpb.PreVoteResponse, error)
+
 	// AppendEntries sends an AppendEntries RPC (or heartbeat when entries
 	// is empty) to `to`.
 	AppendEntries(ctx context.Context, to NodeID, req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error)
@@ -70,6 +75,7 @@ type Transport interface {
 // be safe for concurrent use — one call per inbound RPC.
 type Handler interface {
 	HandleRequestVote(ctx context.Context, req *raftpb.RequestVoteRequest) (*raftpb.RequestVoteResponse, error)
+	HandlePreVote(ctx context.Context, req *raftpb.PreVoteRequest) (*raftpb.PreVoteResponse, error)
 	HandleAppendEntries(ctx context.Context, req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error)
 	HandleInstallSnapshot(ctx context.Context, req *raftpb.InstallSnapshotRequest) (*raftpb.InstallSnapshotResponse, error)
 }

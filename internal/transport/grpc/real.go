@@ -142,6 +142,19 @@ func (t *RealTransport) RequestVote(ctx context.Context, to transport.NodeID, re
 	return resp, nil
 }
 
+// PreVote implements transport.Transport.
+func (t *RealTransport) PreVote(ctx context.Context, to transport.NodeID, req *raftpb.PreVoteRequest) (*raftpb.PreVoteResponse, error) {
+	conn, err := t.conn(to)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := raftpb.NewRaftServiceClient(conn).PreVote(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("grpctransport: pre-vote from %s: %w", to, err)
+	}
+	return resp, nil
+}
+
 // AppendEntries implements transport.Transport.
 func (t *RealTransport) AppendEntries(ctx context.Context, to transport.NodeID, req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error) {
 	conn, err := t.conn(to)
@@ -219,6 +232,17 @@ func (s *server) RequestVote(ctx context.Context, req *raftpb.RequestVoteRequest
 		return nil, status.Error(codes.Unimplemented, "raft core not attached (Phase 5)")
 	}
 	return h.HandleRequestVote(ctx, req)
+}
+
+// PreVote forwards to the Raft core.
+func (s *server) PreVote(ctx context.Context, req *raftpb.PreVoteRequest) (*raftpb.PreVoteResponse, error) {
+	s.t.mu.Lock()
+	h := s.t.handler
+	s.t.mu.Unlock()
+	if h == nil {
+		return nil, status.Error(codes.Unimplemented, "raft core not attached")
+	}
+	return h.HandlePreVote(ctx, req)
 }
 
 // AppendEntries forwards to the Raft core.

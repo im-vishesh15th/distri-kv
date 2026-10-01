@@ -91,6 +91,15 @@ func (h *Host) HandleRequestVote(ctx context.Context, req *raftpb.RequestVoteReq
 	return g.HandleRequestVote(ctx, req)
 }
 
+// HandlePreVote implements transport.Handler — demuxed by group_id.
+func (h *Host) HandlePreVote(ctx context.Context, req *raftpb.PreVoteRequest) (*raftpb.PreVoteResponse, error) {
+	g := h.group(raft.GroupID(req.GroupId))
+	if g == nil {
+		return nil, fmt.Errorf("multiraft: node %s does not host group %d", h.id, req.GroupId)
+	}
+	return g.HandlePreVote(ctx, req)
+}
+
 // HandleAppendEntries implements transport.Handler — demuxed by group_id.
 func (h *Host) HandleAppendEntries(ctx context.Context, req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error) {
 	g := h.group(raft.GroupID(req.GroupId))

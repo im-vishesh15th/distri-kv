@@ -22,6 +22,16 @@ service RaftService {
   // RequestVote implements Raft's RequestVote RPC (Phase 5).
   rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
 
+  // PreVote implements the pre-vote phase (Raft dissertation §9.6): a
+  // prospective candidate first asks whether it WOULD win an election —
+  // no term changes and no vote recorded on either side — and only a
+  // majority of pre-votes unlocks the real RequestVote. A node that
+  // cannot win (partitioned, stale log, or talking to a majority that
+  // still hears a live leader) therefore never inflates its term and
+  // never disrupts a healthy cluster. A new RPC, like InstallSnapshot
+  // (Phase 13): not a change to the existing ones.
+  rpc PreVote(PreVoteRequest) returns (PreVoteResponse);
+
   // AppendEntries implements Raft's AppendEntries RPC (Phase 6). With an
   // empty entries list it is also the heartbeat.
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
@@ -66,6 +76,30 @@ message RequestVoteRequest {
 }
 
 message RequestVoteResponse {
+  uint64 term = 1;
+  bool vote_granted = 2;
+}
+
+// PreVoteRequest is the advisory twin of RequestVote: it asks "would you
+// vote for me at `term`?" while changing nothing — the responder persists
+// no term and no vote, and neither does the sender (there is nothing to
+// fsync on this path). `term` is the term the sender WOULD campaign in,
+// i.e. its current term + 1.
+message PreVoteRequest {
+  uint64 term = 1;
+  string candidate_id = 2;
+  uint64 last_log_index = 3;
+  uint64 last_log_term = 4;
+  // Phase 17 (Multi-Raft): which Raft group this pre-vote is for (see
+  // RequestVoteRequest.group_id).
+  uint64 group_id = 5;
+}
+
+// PreVoteResponse.term is the RESPONDER's current term, still unchanged
+// by this exchange — a pre-vote round never moves a term in either
+// direction. vote_granted means "you could win here", not "you have my
+// vote": the real vote is cast later, in RequestVote.
+message PreVoteResponse {
   uint64 term = 1;
   bool vote_granted = 2;
 }

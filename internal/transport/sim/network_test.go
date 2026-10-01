@@ -26,6 +26,9 @@ type stubHandler struct{}
 func (stubHandler) HandleRequestVote(context.Context, *raftpb.RequestVoteRequest) (*raftpb.RequestVoteResponse, error) {
 	return &raftpb.RequestVoteResponse{}, nil
 }
+func (stubHandler) HandlePreVote(context.Context, *raftpb.PreVoteRequest) (*raftpb.PreVoteResponse, error) {
+	return &raftpb.PreVoteResponse{}, nil
+}
 func (stubHandler) HandleAppendEntries(context.Context, *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error) {
 	return &raftpb.AppendEntriesResponse{}, nil
 }

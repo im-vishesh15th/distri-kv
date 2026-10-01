@@ -24,8 +24,9 @@ This document describes the testing philosophy, tools, and mutation testing appr
 The `internal/raft/faults_test.go` implements spec §19 scenarios using the deterministic simulation network:
 
 - `TestSimLeaderKillRestartAgrees` — leader killed and restarted, state agrees
-- `TestSimPartitionLeaderFromFollower` — partition isolates leader from followers
-- `TestSimBlockLeaderFromFollower` — blocks single link (no partition)
+- `TestSimPartitionLeaderFromFollower` — one follower isolated from the leader
+- `TestSimBlockLeaderFromFollower` — blocks single link (no partition); pre-vote keeps the leader in its original term throughout
+- `TestSimPartitionedNodeDoesNotInflateTerm` — an isolated node's election timeouts change no term (pre-vote)
 - `TestSimMinorityLeaderCannotCommit` — minority leader cannot commit
 - `TestSimSeededChaosConverges` — random faults, system converges
 - `TestSimDiskFailureHaltsNode` — disk failure halts node

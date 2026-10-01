@@ -206,11 +206,12 @@ func TestSimLeaderKillRestartAgrees(t *testing.T) {
 // sees the new entries; after heal everyone agrees.
 //
 // Note: Isolate, not a bare leader↔follower Block — see
-// TestSimBlockLeaderFromFollower for the literal one-link cut. Our Raft
-// has no pre-vote (the spec doesn't require it), so a cut follower whose
-// campaigns REACH the third node forces repeated re-elections; isolating
-// the cut node keeps this test's focus on majority availability, and the
-// Block test covers the churny variant separately.
+// TestSimBlockLeaderFromFollower for the literal one-link cut, where the
+// cut node can still reach a majority member. With pre-vote (§9.6) the
+// isolated node's solicitation reaches nobody anyway, so this test's
+// focus stays on majority availability; the Block test asserts the
+// pre-vote protection itself (refusals from a majority that still hears
+// its leader).
 func TestSimPartitionLeaderFromFollower(t *testing.T) {
 	nodes, network := startSimCluster(t, 3, 1502)
 
@@ -251,9 +252,9 @@ func TestSimPartitionLeaderFromFollower(t *testing.T) {
 	}
 	requireConverged(t, []*simNode{leader, other}, want)
 
-	// Heal: the cut node catches up (expect a term-bump churn round —
-	// its inflated campaign terms are legitimate Raft — then one leader),
-	// and all three replicas agree.
+	// Heal: the cut node catches up — its term never moved (pre-vote
+	// makes campaigning without a reachable majority impossible), so
+	// there is no churn round at all: one leader, all three agree.
 	network.Heal()
 	waitForSimLeadership(t, 10*time.Second, "single leader after heal", nodes)
 	requireConverged(t, nodes, want)
@@ -261,11 +262,14 @@ func TestSimPartitionLeaderFromFollower(t *testing.T) {
 
 // TestSimBlockLeaderFromFollower is spec §19 scenario 2 in its literal
 // form: only the leader↔follower link is cut (the cut follower can still
-// talk to the third node). Without pre-vote, that follower's campaigns
-// bump the third node's term, forcing leadership to flip between the two
-// reachable nodes while the partition lasts — so "majority remains
-// available" is asserted as writes keep landing within a deadline (what
-// an actual client experiences through retries), and heal must end in
+// talk to the third node). Before pre-vote, that follower's campaigns
+// bumped the third node's term and leadership flipped between the two
+// reachable nodes while the partition lasted. With pre-vote (§9.6), the
+// third node still hears its leader and refuses the pre-votes, so no
+// real campaign ever starts — this test asserts BOTH that the majority
+// keeps writing (the deadline is what an actual client experiences
+// through retries) and that no term moves anywhere during the partition,
+// which is the disruption pre-vote exists to prevent. Heal must end in
 // full agreement.
 func TestSimBlockLeaderFromFollower(t *testing.T) {
 	nodes, network := startSimCluster(t, 3, 1503)
@@ -281,6 +285,17 @@ func TestSimBlockLeaderFromFollower(t *testing.T) {
 
 	network.Block(leader.id, cut.id)
 
+	// Pre-vote in action: the cut follower times out repeatedly (100–190 ms
+	// per round here) and solicits pre-votes, but the third node still
+	// hears its leader and refuses them all — so nothing may change: not
+	// the leader's identity, not its term. Without pre-vote, leadership
+	// would flip to the cut side within a few rounds.
+	termAtCut := leader.rnode.Status().Term
+	assertFor(t, 2*time.Second, "leader holds seat and term while the cut follower pre-votes", func() bool {
+		ls := simLeadersOf(nodes)
+		return len(ls) == 1 && ls[0] == leader && ls[0].rnode.Status().Term == termAtCut
+	})
+
 	want := map[string]string{}
 	for i := 0; i < 3; i++ {
 		k := fmt.Sprintf("blk%d", i)
@@ -288,8 +303,65 @@ func TestSimBlockLeaderFromFollower(t *testing.T) {
 		mustProposeUntil(t, 15*time.Second, nodes, kv.Set(k, []byte(want[k])))
 	}
 
-	// Heal: churn stops, one leader remains, everyone agrees — including
-	// whichever side was cut out of the writes.
+	// The cut node campaigned in the pre-round only: its own term must
+	// still be exactly where it was when the link was cut (before
+	// pre-vote, every failed campaign burned a term here).
+	if got := cut.rnode.Status().Term; got != termAtCut {
+		t.Fatalf("cut follower's term moved %d -> %d during the partition: pre-vote must burn no terms without a reachable majority",
+			termAtCut, got)
+	}
+
+	// Heal: churn-free rejoin, one leader remains, everyone agrees —
+	// including whichever side was cut out of the writes.
+	network.Heal()
+	waitForSimLeadership(t, 10*time.Second, "single leader after heal", nodes)
+	requireConverged(t, nodes, want)
+}
+
+// TestSimPartitionedNodeDoesNotInflateTerm proves the §9.6 guarantee that
+// motivated adding pre-vote: an isolated node's election timeouts cost no
+// terms. Before pre-vote, this partition made the cut node bump its term
+// on every campaign; on heal it re-entered the cluster with an inflated
+// term and forced an election on a majority that had been healthy the
+// whole time.
+func TestSimPartitionedNodeDoesNotInflateTerm(t *testing.T) {
+	nodes, network := startSimCluster(t, 3, 1510)
+
+	leader := waitForSimLeadership(t, 10*time.Second, "initial leader", nodes)
+	var others []*simNode
+	for _, n := range nodes {
+		if n != leader {
+			others = append(others, n)
+		}
+	}
+	cut, other := others[0], others[1]
+
+	termAtCut := cut.rnode.Status().Term
+	network.Isolate(cut.id)
+
+	// Majority keeps committing the whole time.
+	want := map[string]string{}
+	for i := 0; i < 3; i++ {
+		k := fmt.Sprintf("inf%d", i)
+		want[k] = fmt.Sprintf("v%d", i)
+		mustPropose(t, leader, kv.Set(k, []byte(want[k])))
+	}
+	requireConverged(t, []*simNode{leader, other}, want)
+
+	// Hold long enough for the cut node to burn through several of its
+	// election timeouts (100–190 ms each): every one of them must start
+	// and end inside the pre-vote phase, moving no term anywhere.
+	assertFor(t, 700*time.Millisecond, "majority leader undisturbed across many cut-node timeouts", func() bool {
+		ls := simLeadersOf(nodes)
+		return len(ls) == 1 && ls[0] == leader
+	})
+	if got := cut.rnode.Status().Term; got != termAtCut {
+		t.Fatalf("isolated node's term moved %d -> %d while campaigning: pre-vote must burn no terms", termAtCut, got)
+	}
+	if got := leader.rnode.Status().Term; got != termAtCut {
+		t.Fatalf("majority leader's term moved %d -> %d while a follower was isolated", termAtCut, got)
+	}
+
 	network.Heal()
 	waitForSimLeadership(t, 10*time.Second, "single leader after heal", nodes)
 	requireConverged(t, nodes, want)

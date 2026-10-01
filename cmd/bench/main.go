@@ -9,21 +9,21 @@ import (
 )
 
 type BenchmarkConfig struct {
-	Shards       int
-	ReadRatio    float64
-	Concurrency  int
-	Duration     time.Duration
-	Keyspace     int
-	PayloadSize  int
+	Shards          int
+	ReadRatio       float64
+	Concurrency     int
+	Duration        time.Duration
+	Keyspace        int
+	PayloadSize     int
 	UnsafeNoMigrate bool
 }
 
 type Result struct {
-	Ops        int64
-	Errors     int64
-	Latencies  []time.Duration
-	Duration   time.Duration
-	mu         sync.Mutex
+	Ops       int64
+	Errors    int64
+	Latencies []time.Duration
+	Duration  time.Duration
+	mu        sync.Mutex
 }
 
 func (r *Result) Record(d time.Duration, err error) {
@@ -47,12 +47,12 @@ func percentile(sorted []time.Duration, p float64) time.Duration {
 
 func main() {
 	cfg := BenchmarkConfig{
-		Shards:       4,
-		ReadRatio:    0.5,
-		Concurrency:  8,
-		Duration:     10 * time.Second,
-		Keyspace:     1000,
-		PayloadSize:  100,
+		Shards:      4,
+		ReadRatio:   0.5,
+		Concurrency: 8,
+		Duration:    10 * time.Second,
+		Keyspace:    1000,
+		PayloadSize: 100,
 	}
 
 	flag.IntVar(&cfg.Shards, "shards", cfg.Shards, "Number of shards (groups)")

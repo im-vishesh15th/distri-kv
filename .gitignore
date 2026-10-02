@@ -23,10 +23,33 @@ vendor/
 *.swo
 .DS_Store
 
-# Env / secrets
+# Env / secrets (the .env.example template IS committed)
 .env
+.env.*
+!.env.example
 *.key
 *.pem
+*.crt
+id_rsa*
+id_ed25519*
+*.pub
+credentials*
+secrets*
+
+# Local session artifacts (a curl cookie jar holds a live session token)
+/jar
+cookies.txt
+*.cookies
+
+# Frontend
+node_modules/
+console/dist/
+console/.vercel/
+.vercel/
+
+# Deployment runtime output
+deployments/backups/
+backups/
 
 # Coverage
 coverage.out

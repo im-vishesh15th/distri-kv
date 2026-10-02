@@ -111,7 +111,6 @@ func main() {
 			DefaultRateBurst:  *burst,
 			MaxConcurrent:     *maxConc,
 			Usage:             gw.Metrics().Usage,
-			UsageSeries:       gw.Metrics().Series,
 			Logger:            slog.New(slog.NewJSONHandler(os.Stderr, nil)),
 		}, store)
 		if err != nil {

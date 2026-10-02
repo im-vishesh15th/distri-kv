@@ -1,0 +1,35 @@
+# Reverse proxy for the DistriKV gateway. Automatic HTTPS (Let's Encrypt) for {$DOMAIN}.
+# DOMAIN must be a real DNS name that points at this VM, e.g. the free Azure name
+# <label>.eastasia.cloudapp.azure.com (see docs/deploy-azure.md). Ports 80 and 443
+# must be open in the Azure NSG for certificate issuance. Certificates persist in
+# the caddy-data volume.
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Limit request bodies before they reach the gateway (gateway also enforces 1 MiB).
+	request_body {
+		max_size 2MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	# Console control API (cookie sessions) -> gateway control listener.
+	handle /api/v1/* {
+		reverse_proxy gateway:9091
+	}
+
+	# Data plane (API keys): KV operations, per-tenant usage, health.
+	@dataplane path /kv /kv/* /v1/usage /healthz
+	handle @dataplane {
+		reverse_proxy gateway:8080
+	}
+
+	# Everything else, including the private /metrics ports, is not routed.
+	handle {
+		respond "not found" 404
+	}
+}

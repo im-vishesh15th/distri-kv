@@ -1,0 +1,167 @@
+# DistriKV production stack for ONE small Azure VM (Standard_B2ats_v2: 2 vCPU, 1 GiB RAM).
+#
+#   Internet -> caddy (80/443, automatic HTTPS) -> gateway -> distrikv-1/2/3
+#
+# Exactly 5 containers: 3 DistriKV nodes, 1 gateway, 1 reverse proxy.
+# The three nodes are logically independent Raft replicas that happen to run on
+# the same VM; this is NOT three physically separate servers.
+#
+# Raft groups hosted by EVERY node (cmd/server/main.go):
+#   data groups 0,1,2   (from deployments/shard.json: {"groups":3}, 16384 fixed slots)
+#   metadata group      (always created by the server; owns the versioned shard config)
+#   => 4 groups x 3 replicas = 12 logical Raft replicas in 3 containers.
+#
+# Usage (from the repo root):
+#   docker compose -f deployments/docker-compose.prod.yml --env-file deployments/.env up -d
+# Normal operation never needs `down -v`: that deletes the Raft data volumes.
+#
+# Prometheus/Grafana are deliberately NOT part of this file (1 GiB RAM).
+
+name: distrikv # pins the compose project name so volume names never depend on the directory
+
+x-node: &node
+  image: distrikv:latest
+  build:
+    context: ..
+    dockerfile: Dockerfile
+    args:
+      # Low-memory build: one package at a time (see docs/deploy-azure.md).
+      GO_BUILD_FLAGS: "-p=1 -trimpath"
+  restart: unless-stopped
+  networks: [distrikv-net]
+  mem_limit: 200m
+  environment:
+    GOMEMLIMIT: 160MiB
+  healthcheck:
+    # /metrics is only served after every Raft group of the node has been
+    # created and started, so this is a stronger signal than "port open".
+    # wget is part of busybox in the alpine runtime image (the gateway
+    # healthcheck already relies on it).
+    test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9101/metrics"]
+    interval: 10s
+    timeout: 5s
+    retries: 6
+    start_period: 30s
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
+
+services:
+  distrikv-1:
+    <<: *node
+    container_name: distrikv-1
+    hostname: distrikv-1
+    volumes:
+      - distrikv-data-1:/var/lib/distrikv
+      - ./shard.json:/etc/distrikv/shard.json:ro
+    command: >
+      -id=node1 -addr=:8080 -metrics-addr=:9101
+      -peers=node1@distrikv-1:8080,node2@distrikv-2:8080,node3@distrikv-3:8080
+      -data-dir=/var/lib/distrikv -snapshot-every=1024
+      -shard-config=/etc/distrikv/shard.json
+
+  distrikv-2:
+    <<: *node
+    container_name: distrikv-2
+    hostname: distrikv-2
+    volumes:
+      - distrikv-data-2:/var/lib/distrikv
+      - ./shard.json:/etc/distrikv/shard.json:ro
+    command: >
+      -id=node2 -addr=:8080 -metrics-addr=:9101
+      -peers=node1@distrikv-1:8080,node2@distrikv-2:8080,node3@distrikv-3:8080
+      -data-dir=/var/lib/distrikv -snapshot-every=1024
+      -shard-config=/etc/distrikv/shard.json
+
+  distrikv-3:
+    <<: *node
+    container_name: distrikv-3
+    hostname: distrikv-3
+    volumes:
+      - distrikv-data-3:/var/lib/distrikv
+      - ./shard.json:/etc/distrikv/shard.json:ro
+    command: >
+      -id=node3 -addr=:8080 -metrics-addr=:9101
+      -peers=node1@distrikv-1:8080,node2@distrikv-2:8080,node3@distrikv-3:8080
+      -data-dir=/var/lib/distrikv -snapshot-every=1024
+      -shard-config=/etc/distrikv/shard.json
+
+  gateway:
+    image: distrikv:latest
+    container_name: distrikv-gateway
+    hostname: gateway
+    restart: unless-stopped
+    networks: [distrikv-net]
+    mem_limit: 160m
+    environment:
+      GOMEMLIMIT: 128MiB
+    depends_on:
+      distrikv-1: {condition: service_healthy}
+      distrikv-2: {condition: service_healthy}
+      distrikv-3: {condition: service_healthy}
+    entrypoint: ["gateway"]
+    # :8080 data plane (API keys), :9091 control API (console sessions), :9100 metrics.
+    # None of these are published to the host; only caddy is.
+    command: >
+      -db=/var/lib/gateway/gateway.db
+      -bind=:8080 -metrics-addr=:9100
+      -control-bind=:9091
+      -control-origins=${CONTROL_ORIGINS:?set CONTROL_ORIGINS in deployments/.env}
+      -control-signup=${CONTROL_SIGNUP:-false}
+      -control-cookie-secure=true
+      -control-trust-xff=true
+      -kv-addrs=distrikv-1:8080,distrikv-2:8080,distrikv-3:8080
+      -shard-config=/etc/distrikv/shard.json
+    volumes:
+      - gateway-data:/var/lib/gateway # SQLite: tenants, hashed API keys, console users. BACK THIS UP.
+      - ./shard.json:/etc/distrikv/shard.json:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  reverse-proxy:
+    image: caddy:2-alpine
+    container_name: distrikv-proxy
+    restart: unless-stopped
+    networks: [distrikv-net]
+    mem_limit: 96m
+    depends_on:
+      gateway: {condition: service_healthy}
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in deployments/.env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data # TLS certificates: keep, or Let's Encrypt rate limits bite
+      - caddy-config:/config
+    healthcheck:
+      # Caddy's admin API listens on localhost inside the container only.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+networks:
+  distrikv-net:
+    name: distrikv-net
+    driver: bridge
+
+volumes:
+  distrikv-data-1: {name: distrikv-data-1}
+  distrikv-data-2: {name: distrikv-data-2}
+  distrikv-data-3: {name: distrikv-data-3}
+  gateway-data: {name: gateway-data}
+  caddy-data: {name: caddy-data}
+  caddy-config: {name: caddy-config}

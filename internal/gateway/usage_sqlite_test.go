@@ -101,9 +101,7 @@ func TestSQLiteUsageIsPerTenant(t *testing.T) {
 	if err := gw.Metrics().Flush(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if got := usageOf(t, e, b).Requests; got != 0 {
-		t.Fatalf("beta requests = %d", got)
-	}
+	
 	ser, err := gw.Metrics().Series("beta", "24h")
 	if err != nil {
 		t.Fatal(err)
@@ -112,5 +110,9 @@ func TestSQLiteUsageIsPerTenant(t *testing.T) {
 		if p.Requests != 0 {
 			t.Fatalf("beta series leaked %d", p.Requests)
 		}
+	}
+
+	if got := usageOf(t, e, b).Requests; got != 0 {
+		t.Fatalf("beta requests = %d", got)
 	}
 }

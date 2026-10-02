@@ -51,6 +51,22 @@ curl localhost:8080/v1/usage        -H "Authorization: Bearer $DKV_KEY"
 Only the gateway port is published. See [Deployment](docs/deploy.md) and
 [Gateway](docs/gateway.md).
 
+### Production (one Azure VM)
+
+```bash
+# on a fresh Ubuntu 24.04 VM, after cloning the repo
+./scripts/setup_azure_vm.sh                      # Docker + Compose + Git + swap; then log out/in
+cp deployments/.env.example deployments/.env     # set DOMAIN and CONTROL_ORIGINS
+./scripts/deploy_vm.sh                           # build, start 5 containers, wait for health
+./scripts/healthcheck_prod.sh                    # verify
+./scripts/failover_prod.sh                       # stop a leader, keep writing, restart, verify catch-up
+```
+
+Three DistriKV node containers (each hosting 3 data Raft groups plus the metadata group, so 12 logical
+Raft replicas), one gateway and a Caddy reverse proxy on a single VM. Only ports 80/443 are published.
+These are logically independent replicas on one machine, not three servers. Full guide, safe vs.
+destructive commands, backups and security notes: [docs/deploy-azure.md](docs/deploy-azure.md).
+
 ## Roadmap
 
 | Milestone | Phases | What you get | Status |
@@ -89,6 +105,7 @@ half-finished extra.
 - [Gateway](docs/gateway.md) — HTTP API, API keys, tenant isolation, rate/concurrency limits, TLS, usage, metrics
 - [Control-plane API](docs/control-api.md) — web-console JSON API: signup/login sessions, API-key management, quotas, usage, operator routes ([OpenAPI](docs/openapi.yaml))
 - [Deployment](docs/deploy.md) — compose topology, demo, e2e, VM outline, backups
+- [Azure VM deployment](docs/deploy-azure.md) — production stack on one small VM: 3 node containers (3 data Raft groups + metadata group), gateway, Caddy HTTPS; scripts for setup, deploy, health, failover, backup
 - [Benchmarks](docs/benchmarks.md) — real end-to-end results: 3-node cluster over gRPC, matrix + node scaling (1/3/5) + failover + snapshot recovery, with environment and exact commands
 
 ## Non-goals

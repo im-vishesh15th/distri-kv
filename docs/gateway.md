@@ -101,6 +101,13 @@ private network. Series: `distrikv_gateway_requests_total{tenant,op,status}`,
 for hundreds of tenants; cap or drop it before running thousands. Unauthenticated
 requests are counted under `tenant="none"`.
 
+## Control plane (web console API)
+
+Signup, login, key management, quotas and operator tooling for a web frontend live in a separate
+JSON API, enabled with `-control-bind`. See [control-api.md](control-api.md) and
+[openapi.yaml](openapi.yaml). It shares the same SQLite database as the data plane, so a key
+created, rotated or revoked in the console is honoured by the very next data-plane request.
+
 ## Known limitations (be upfront about these)
 
 - **HTTP retries are not idempotent.** The cluster deduplicates retries by

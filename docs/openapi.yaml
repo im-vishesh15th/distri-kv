@@ -1,0 +1,403 @@
+openapi: 3.0.3
+info:
+  title: DistriKV control-plane API
+  version: "1.0"
+  description: >
+    JSON API behind the DistriKV web console. Authentication is a session cookie
+    (dkv_session; HttpOnly, SameSite=Strict). Browsers must call with credentials and
+    from an origin listed in the gateway's -control-origins. Errors always use the
+    Error schema. See docs/control-api.md.
+servers:
+  - url: http://localhost:9091/api/v1
+tags:
+  - {name: public}
+  - {name: customer}
+  - {name: admin}
+components:
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: dkv_session
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: {type: string, example: invalid_credentials}
+            message: {type: string}
+    User:
+      type: object
+      required: [id, email, is_admin, created_at]
+      properties:
+        id: {type: string}
+        email: {type: string, format: email}
+        is_admin: {type: boolean}
+        tenant_id: {type: string}
+        created_at: {type: string, format: date-time}
+    Tenant:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+        created_at: {type: string, format: date-time}
+        quota_rps: {type: number, description: "0 = gateway default"}
+        quota_burst: {type: integer, description: "0 = gateway default"}
+        effective_rps: {type: number}
+        effective_burst: {type: integer}
+        max_concurrent: {type: integer}
+        max_keys: {type: integer}
+        max_key_ttl_hours: {type: integer}
+    Key:
+      type: object
+      properties:
+        prefix: {type: string, example: dkv_live_ab12cd34}
+        name: {type: string}
+        status: {type: string, enum: [active, expired, revoked]}
+        created_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time, nullable: true}
+        revoked_at: {type: string, format: date-time, nullable: true}
+    NewKey:
+      type: object
+      properties:
+        key: {type: string, description: "Plaintext API key. Shown once."}
+        info: {$ref: "#/components/schemas/Key"}
+    Usage:
+      type: object
+      properties:
+        since: {type: string, format: date-time}
+        requests: {type: integer}
+        by_op: {type: object, additionalProperties: {type: integer}}
+        by_status: {type: object, additionalProperties: {type: integer}}
+        rate_limited: {type: integer}
+        concurrency_limited: {type: integer}
+    UserAndTenant:
+      type: object
+      properties:
+        user: {$ref: "#/components/schemas/User"}
+        tenant: {$ref: "#/components/schemas/Tenant"}
+  responses:
+    Err:
+      description: Error
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  parameters:
+    Prefix:
+      name: prefix
+      in: path
+      required: true
+      schema: {type: string, pattern: '^dkv_live_[0-9a-f]{8}$'}
+    TenantId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[a-z0-9][a-z0-9_-]{0,62}$'}
+paths:
+  /health:
+    get:
+      tags: [public]
+      responses:
+        "200": {description: OK}
+  /auth/signup:
+    post:
+      tags: [public]
+      summary: Create an account, its tenant, a first API key, and a session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: {type: string, format: email}
+                password: {type: string, minLength: 10, maxLength: 128}
+                tenant_id: {type: string, pattern: '^[a-z0-9][a-z0-9_-]{0,62}$'}
+                name: {type: string, maxLength: 80}
+      responses:
+        "201":
+          description: Created. Sets the dkv_session cookie.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: {$ref: "#/components/schemas/User"}
+                  tenant: {$ref: "#/components/schemas/Tenant"}
+                  api_key:
+                    type: object
+                    properties:
+                      key: {type: string}
+                      prefix: {type: string}
+                      name: {type: string}
+                      created_at: {type: string, format: date-time}
+        "400": {$ref: "#/components/responses/Err"}
+        "403": {$ref: "#/components/responses/Err"}
+        "409": {$ref: "#/components/responses/Err"}
+        "429": {$ref: "#/components/responses/Err"}
+  /auth/login:
+    post:
+      tags: [public]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: {type: string}
+                password: {type: string}
+      responses:
+        "200":
+          description: Logged in. Sets the dkv_session cookie.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/UserAndTenant"}
+        "401": {$ref: "#/components/responses/Err"}
+        "429": {$ref: "#/components/responses/Err"}
+  /auth/logout:
+    post:
+      tags: [customer]
+      security: [{session: []}]
+      responses:
+        "204": {description: Logged out}
+        "401": {$ref: "#/components/responses/Err"}
+  /me:
+    get:
+      tags: [customer]
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Current user (and tenant, if any)
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/UserAndTenant"}
+        "401": {$ref: "#/components/responses/Err"}
+  /me/password:
+    put:
+      tags: [customer]
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: {type: string}
+                new_password: {type: string, minLength: 10, maxLength: 128}
+      responses:
+        "204": {description: Changed; other sessions ended}
+        "400": {$ref: "#/components/responses/Err"}
+        "401": {$ref: "#/components/responses/Err"}
+        "429": {$ref: "#/components/responses/Err"}
+  /tenant:
+    get:
+      tags: [customer]
+      security: [{session: []}]
+      responses:
+        "200":
+          description: The caller's tenant
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant: {$ref: "#/components/schemas/Tenant"}
+        "401": {$ref: "#/components/responses/Err"}
+        "404": {$ref: "#/components/responses/Err"}
+  /tenant/usage:
+    get:
+      tags: [customer]
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Data-plane counters since the gateway process started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant_id: {type: string}
+                  usage: {$ref: "#/components/schemas/Usage"}
+        "401": {$ref: "#/components/responses/Err"}
+  /tenant/keys:
+    get:
+      tags: [customer]
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Keys (prefixes only)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items: {$ref: "#/components/schemas/Key"}
+        "401": {$ref: "#/components/responses/Err"}
+    post:
+      tags: [customer]
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string, minLength: 1, maxLength: 64}
+                ttl_hours: {type: integer, minimum: 0, maximum: 8760, description: "0 or absent = never expires"}
+      responses:
+        "201":
+          description: Created. The plaintext key is shown only here.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/NewKey"}
+        "400": {$ref: "#/components/responses/Err"}
+        "409": {$ref: "#/components/responses/Err"}
+  /tenant/keys/{prefix}:
+    parameters: [{$ref: "#/components/parameters/Prefix"}]
+    delete:
+      tags: [customer]
+      security: [{session: []}]
+      responses:
+        "204": {description: Revoked (idempotent)}
+        "404": {$ref: "#/components/responses/Err"}
+  /tenant/keys/{prefix}/rotate:
+    parameters: [{$ref: "#/components/parameters/Prefix"}]
+    post:
+      tags: [customer]
+      security: [{session: []}]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ttl_hours: {type: integer, minimum: 0, maximum: 8760}
+      responses:
+        "201":
+          description: New key issued, old key revoked
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/NewKey"}
+                  - type: object
+                    properties:
+                      revoked_prefix: {type: string}
+        "404": {$ref: "#/components/responses/Err"}
+        "409": {$ref: "#/components/responses/Err"}
+  /admin/tenants:
+    get:
+      tags: [admin]
+      security: [{session: []}]
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {name: after, in: query, schema: {type: string}, description: "Return tenants with id greater than this"}
+      responses:
+        "200":
+          description: A page of tenants
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenants:
+                    type: array
+                    items: {$ref: "#/components/schemas/Tenant"}
+                  next_after: {type: string, description: "empty on the last page"}
+        "403": {$ref: "#/components/responses/Err"}
+  /admin/tenants/{id}:
+    parameters: [{$ref: "#/components/parameters/TenantId"}]
+    get:
+      tags: [admin]
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Tenant
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant: {$ref: "#/components/schemas/Tenant"}
+        "404": {$ref: "#/components/responses/Err"}
+  /admin/tenants/{id}/quota:
+    parameters: [{$ref: "#/components/parameters/TenantId"}]
+    put:
+      tags: [admin]
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rps, burst]
+              properties:
+                rps: {type: number, minimum: 0, maximum: 1000000}
+                burst: {type: integer, minimum: 0, maximum: 10000000}
+      responses:
+        "200":
+          description: Updated tenant
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant: {$ref: "#/components/schemas/Tenant"}
+        "400": {$ref: "#/components/responses/Err"}
+        "404": {$ref: "#/components/responses/Err"}
+  /admin/tenants/{id}/usage:
+    parameters: [{$ref: "#/components/parameters/TenantId"}]
+    get:
+      tags: [admin]
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Usage
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant_id: {type: string}
+                  usage: {$ref: "#/components/schemas/Usage"}
+  /admin/tenants/{id}/keys:
+    parameters: [{$ref: "#/components/parameters/TenantId"}]
+    get:
+      tags: [admin]
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Keys
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items: {$ref: "#/components/schemas/Key"}
+  /admin/tenants/{id}/keys/{prefix}:
+    parameters:
+      - {$ref: "#/components/parameters/TenantId"}
+      - {$ref: "#/components/parameters/Prefix"}
+    delete:
+      tags: [admin]
+      security: [{session: []}]
+      responses:
+        "204": {description: Revoked}
+        "404": {$ref: "#/components/responses/Err"}

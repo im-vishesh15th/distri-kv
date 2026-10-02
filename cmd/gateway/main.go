@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -36,6 +37,13 @@ func main() {
 		tlsCert   = flag.String("tls-cert", "", "TLS certificate file (enables HTTPS; needs -tls-key)")
 		tlsKey    = flag.String("tls-key", "", "TLS private key file (needs -tls-cert)")
 		metrics   = flag.String("metrics-addr", "", "serve Prometheus /metrics on this private address (e.g. :9100); empty disables")
+
+		ctlBind    = flag.String("control-bind", "", "serve the web-console control API on this address (e.g. :9091); empty disables")
+		ctlOrigins = flag.String("control-origins", "", "comma-separated browser origins allowed to call the control API (e.g. https://console.example.com)")
+		ctlSignup  = flag.Bool("control-signup", true, "allow self-service signup through the control API")
+		ctlSecure  = flag.Bool("control-cookie-secure", false, "mark the session cookie Secure (set when the console is served over HTTPS)")
+		ctlXFF     = flag.Bool("control-trust-xff", false, "use the last X-Forwarded-For hop as the client IP (only behind your own proxy)")
+		ctlTTL     = flag.Duration("control-session-ttl", 24*time.Hour, "console login session lifetime")
 	)
 	flag.Parse()
 
@@ -82,6 +90,40 @@ func main() {
 		MetricsAddr:            *metrics,
 	}, store, pool)
 	defer gw.Close()
+
+	if *ctlBind != "" {
+		var origins []string
+		for _, o := range strings.Split(*ctlOrigins, ",") {
+			if o = strings.TrimSpace(o); o != "" {
+				origins = append(origins, o)
+			}
+		}
+		api, err := gateway.NewControlAPI(gateway.ControlConfig{
+			BindAddr:          *ctlBind,
+			AllowedOrigins:    origins,
+			AllowSignup:       *ctlSignup,
+			CookieSecure:      *ctlSecure || *tlsCert != "",
+			SessionTTL:        *ctlTTL,
+			TLSCertFile:       *tlsCert,
+			TLSKeyFile:        *tlsKey,
+			TrustForwardedFor: *ctlXFF,
+			DefaultRateRPS:    *rps,
+			DefaultRateBurst:  *burst,
+			MaxConcurrent:     *maxConc,
+			Usage:             gw.Metrics().Usage,
+			Logger:            slog.New(slog.NewJSONHandler(os.Stderr, nil)),
+		}, store)
+		if err != nil {
+			log.Fatalf("control api: %v", err)
+		}
+		go func() {
+			log.Printf("control API listening on %s (signup=%v, origins=%v)", *ctlBind, *ctlSignup, origins)
+			if err := api.Run(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("control api: %v", err)
+				stop() // a dead control plane should not leave a half-running process
+			}
+		}()
+	}
 
 	if err := gw.Run(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("gateway: %v", err)

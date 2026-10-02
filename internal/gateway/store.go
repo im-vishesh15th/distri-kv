@@ -58,6 +58,9 @@ type MemStore struct {
 	mu      sync.RWMutex
 	tenants map[string]Tenant
 	byHash  map[string]APIKey
+
+	accOnce  sync.Once // lazily builds accounts (see accounts.go)
+	accounts *memAccounts
 }
 
 func NewMemStore() *MemStore {

@@ -132,6 +132,9 @@ jobs:
       - name: Run end-to-end checks
         run: ./scripts/e2e_signup.sh
 
+      - name: Run control-plane (web console API) end-to-end checks
+        run: ./scripts/e2e_control.sh
+
       - name: Dump logs on failure
         if: failure()
         run: docker compose logs --no-color --tail=200

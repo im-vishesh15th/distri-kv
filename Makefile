@@ -1,4 +1,4 @@
-.PHONY: test test-race vet fmt lint build run tidy proto demo-up demo-down demo-monitoring e2e
+.PHONY: test test-race vet fmt lint build run tidy proto demo-up demo-down demo-monitoring e2e e2e-control
 
 test:
 	go test ./...
@@ -53,3 +53,7 @@ demo-down:
 # e2e: end-to-end product checks against a running stack (run demo-up first).
 e2e:
 	./scripts/e2e_signup.sh
+
+# e2e-control: signup -> login -> keys -> data plane, through the control API.
+e2e-control:
+	./scripts/e2e_control.sh

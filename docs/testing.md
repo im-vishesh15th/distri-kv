@@ -193,6 +193,13 @@ The gateway package has comprehensive tests covering:
 - **HTTP rate limit**: burst requests allowed, then 429 with `Retry-After`
 - **HTTP methods**: GET/PUT/POST/DELETE on `/kv/{key}` with proper auth
 
+The control-plane API (`control_test.go`, `accounts_sqlite_test.go`) adds: PBKDF2 against RFC 7914
+vectors; signup/login/logout/session expiry; uniform login errors; per-account and per-IP brute-force
+limits; password change ending other sessions; key create/rotate/revoke being reflected on the data
+plane immediately; cross-tenant isolation; admin pagination and quota; CSRF/CORS; and a store suite run
+against both `MemStore` and `SQLiteStore` (including backup and upgrade of an existing database).
+`scripts/e2e_control.sh` (`make e2e-control`) runs the same flows over HTTP against the compose stack.
+
 Run with: `go test -race -count=1 ./internal/gateway/...`
 
 ---

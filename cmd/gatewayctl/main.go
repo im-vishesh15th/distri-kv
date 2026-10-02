@@ -7,9 +7,13 @@
 //	gatewayctl -db gateway.db revoke-key shoestore dkv_live_ab12cd34
 //	gatewayctl -db gateway.db rotate-key shoestore dkv_live_ab12cd34 [720h]
 //	gatewayctl -db gateway.db set-quota shoestore 200 400
+//	gatewayctl -db gateway.db create-admin ops@example.com      (password from $DKV_PASSWORD or stdin)
+//	gatewayctl -db gateway.db reset-password user@example.com   (password from $DKV_PASSWORD or stdin)
+//	gatewayctl -db gateway.db backup /backups/gateway-2026-10-02.db
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -33,6 +37,10 @@ commands:
   revoke-key    <tenant> <prefix>       takes effect immediately
   rotate-key    <tenant> <prefix> [ttl] creates a replacement, revokes the old key
   set-quota     <tenant> <rps> <burst>  per-tenant rate limit (0 0 = gateway default)
+  create-admin  <email>                 operator account for the console admin API;
+                                        password from $DKV_PASSWORD or one line on stdin
+  reset-password <email>                new password (same input rules); signs the user out everywhere
+  backup        <path>                  consistent copy of the whole database (path must not exist)
 `)
 }
 
@@ -46,6 +54,19 @@ func need(args []string, n int) {
 		usage()
 		os.Exit(2)
 	}
+}
+
+// readPassword takes the password from $DKV_PASSWORD, else one line of stdin,
+// so it never appears in the process list or shell history.
+func readPassword() string {
+	if p := os.Getenv("DKV_PASSWORD"); p != "" {
+		return p
+	}
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		fatal(fmt.Errorf("no password: set DKV_PASSWORD or pipe it on stdin"))
+	}
+	return strings.TrimRight(line, "\r\n")
 }
 
 func parseTTL(s string) time.Duration {
@@ -155,6 +176,28 @@ func main() {
 			fatal(err)
 		}
 		fmt.Printf("quota for %s: %g req/s, burst %d\n", args[1], rps, burst)
+
+	case "create-admin":
+		need(args, 2)
+		u, err := gateway.CreateAdminUser(ctx, store, args[1], readPassword(), 0, now)
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Printf("created operator %s (id %s)\n", u.Email, u.ID)
+
+	case "reset-password":
+		need(args, 2)
+		if err := gateway.ResetUserPassword(ctx, store, args[1], readPassword(), 0); err != nil {
+			fatal(err)
+		}
+		fmt.Println("password updated; all sessions for this user were ended")
+
+	case "backup":
+		need(args, 2)
+		if err := store.Backup(ctx, args[1]); err != nil {
+			fatal(err)
+		}
+		fmt.Println("backup written to", args[1])
 
 	default:
 		usage()

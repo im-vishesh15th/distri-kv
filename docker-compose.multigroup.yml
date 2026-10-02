@@ -24,6 +24,7 @@ services:
     command: >
       -db=/var/lib/gateway/gateway.db
       -bind=:8080 -metrics-addr=:9100
+      -control-bind=:9091 -control-origins=${CONTROL_ORIGINS:-http://localhost:5173}
       -kv-addrs=distrikv-1:8080,distrikv-2:8080,distrikv-3:8080
       -shard-config=/etc/distrikv/shard.json
     volumes: ["./deployments/shard.json:/etc/distrikv/shard.json:ro"]

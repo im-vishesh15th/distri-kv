@@ -89,8 +89,10 @@ When omitted, the gateway runs in single-group mode (all keys route to group
 ## Usage and metrics
 
 `GET /v1/usage` returns the calling tenant's request counts by op and status,
-plus `rate_limited` and `concurrency_limited`, and `since` (when counting
-began). **Counters are in memory and reset when the gateway restarts.**
+plus `rate_limited` and `concurrency_limited`, and `since` (first stored hour).
+Counters are flushed into hourly SQLite buckets (`usage_buckets` in `gateway.db`)
+every 15s and on shutdown, so they survive gateway restarts. Unflushed in-memory
+deltas are included in the response. Prometheus `/metrics` is still process-local.
 
 `-metrics-addr :9100` serves Prometheus `/metrics` on a separate listener. It is
 never mounted on the public port, because it exposes tenant IDs; keep it on a
@@ -118,9 +120,10 @@ created, rotated or revoked in the console is honoured by the very next data-pla
   limits exist.
 - **TLS is optional.** Plain HTTP is the default; always enable TLS (or a
   proxy) before exposing the gateway to the internet.
-- **Rate limits, concurrency caps and usage counters are per gateway process,
-  in memory.** Running N gateways gives each tenant N times the limits, and
-  usage resets on restart.
+- **Rate limits and concurrency caps are per gateway process,
+  in memory.** Running N gateways gives each tenant N times the limits.
+  Usage totals in SQLite are durable; each replica flushes its own deltas into
+  the shared `gateway.db` when they use the same file.
 - **Every request does two SQLite reads** (key, tenant). That keeps revocation
   instant; add a short-lived cache only if profiling shows it matters.
 - **`gatewayctl` edits the database file directly**, so run it on the gateway's

@@ -59,6 +59,10 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("gateway: create account schema: %w", err)
 	}
+	if _, err := db.Exec(usageSchema); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("gateway: create usage schema: %w", err)
+	}
 	// Key hashes are credentials: keep the file private to this user.
 	_ = os.Chmod(path, 0o600)
 	return &SQLiteStore{db: db}, nil

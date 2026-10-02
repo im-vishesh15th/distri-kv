@@ -57,7 +57,8 @@ type ControlConfig struct {
 	DefaultRateBurst int
 	MaxConcurrent    int
 	Usage            func(tenantID string) Usage // data-plane counters (Gateway.Metrics().Usage)
-	Logger           *slog.Logger                // audit log; nil = off
+	UsageSeries      func(tenantID, rng string) (UsageSeries, error)
+	Logger           *slog.Logger // audit log; nil = off
 	now              func() time.Time
 }
 
@@ -308,6 +309,7 @@ func (c *ControlAPI) Handler() http.Handler {
 
 	mux.HandleFunc("/api/v1/tenant", methods(map[string]http.HandlerFunc{http.MethodGet: c.tenantH(c.getTenant)}))
 	mux.HandleFunc("/api/v1/tenant/usage", methods(map[string]http.HandlerFunc{http.MethodGet: c.tenantH(c.tenantUsage)}))
+	mux.HandleFunc("/api/v1/tenant/usage/series", methods(map[string]http.HandlerFunc{http.MethodGet: c.tenantH(c.tenantUsageSeries)}))
 	mux.HandleFunc("/api/v1/tenant/keys", methods(map[string]http.HandlerFunc{
 		http.MethodGet:  c.tenantH(c.listKeys),
 		http.MethodPost: c.tenantH(c.createKey),
@@ -319,6 +321,7 @@ func (c *ControlAPI) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/admin/tenants/{id}", methods(map[string]http.HandlerFunc{http.MethodGet: c.admin(c.adminGetTenant)}))
 	mux.HandleFunc("/api/v1/admin/tenants/{id}/quota", methods(map[string]http.HandlerFunc{http.MethodPut: c.admin(c.adminSetQuota)}))
 	mux.HandleFunc("/api/v1/admin/tenants/{id}/usage", methods(map[string]http.HandlerFunc{http.MethodGet: c.admin(c.adminUsage)}))
+	mux.HandleFunc("/api/v1/admin/tenants/{id}/usage/series", methods(map[string]http.HandlerFunc{http.MethodGet: c.admin(c.adminUsageSeries)}))
 	mux.HandleFunc("/api/v1/admin/tenants/{id}/keys", methods(map[string]http.HandlerFunc{http.MethodGet: c.admin(c.adminListKeys)}))
 	mux.HandleFunc("/api/v1/admin/tenants/{id}/keys/{prefix}", methods(map[string]http.HandlerFunc{http.MethodDelete: c.admin(c.adminRevokeKey)}))
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
@@ -758,6 +761,33 @@ func (c *ControlAPI) tenantUsage(w http.ResponseWriter, _ *http.Request, _ *auth
 	writeJSON(w, http.StatusOK, map[string]any{"tenant_id": t.ID, "usage": c.usageFor(t.ID)})
 }
 
+func (c *ControlAPI) seriesFor(w http.ResponseWriter, tenantID, rng string) (UsageSeries, bool) {
+	if rng == "" {
+		rng = "24h"
+	}
+	if c.cfg.UsageSeries == nil {
+		return UsageSeries{Range: rng, Points: []UsagePoint{}}, true
+	}
+	s, err := c.cfg.UsageSeries(tenantID, rng)
+	if err != nil {
+		if errors.Is(err, errInvalidUsageRange) {
+			writeError(w, http.StatusBadRequest, "invalid_range", "range must be 24h, 7d or 30d")
+			return UsageSeries{}, false
+		}
+		c.internal(w, "usage series", err)
+		return UsageSeries{}, false
+	}
+	return s, true
+}
+
+func (c *ControlAPI) tenantUsageSeries(w http.ResponseWriter, r *http.Request, _ *authed, t Tenant) {
+	s, ok := c.seriesFor(w, t.ID, r.URL.Query().Get("range"))
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tenant_id": t.ID, "series": s})
+}
+
 func (c *ControlAPI) listKeysFor(r *http.Request, tenantID string) ([]keyDTO, error) {
 	keys, err := c.store.ListKeys(r.Context(), tenantID)
 	if err != nil {
@@ -999,6 +1029,18 @@ func (c *ControlAPI) adminUsage(w http.ResponseWriter, r *http.Request, _ *authe
 	if t, ok := c.adminTenant(w, r); ok {
 		writeJSON(w, http.StatusOK, map[string]any{"tenant_id": t.ID, "usage": c.usageFor(t.ID)})
 	}
+}
+
+func (c *ControlAPI) adminUsageSeries(w http.ResponseWriter, r *http.Request, _ *authed) {
+	t, ok := c.adminTenant(w, r)
+	if !ok {
+		return
+	}
+	s, ok := c.seriesFor(w, t.ID, r.URL.Query().Get("range"))
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tenant_id": t.ID, "series": s})
 }
 
 func (c *ControlAPI) adminListKeys(w http.ResponseWriter, r *http.Request, _ *authed) {

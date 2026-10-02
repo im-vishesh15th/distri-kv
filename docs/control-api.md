@@ -77,7 +77,8 @@ printf '%s\n' "$PASSWORD" | gatewayctl -db gateway.db create-admin ops@example.c
 | `GET /me` | `200 {user, tenant?}` | `401 unauthenticated` when not logged in |
 | `PUT /me/password` `{current_password, new_password}` | `204` | all *other* sessions are ended |
 | `GET /tenant` | `200 {tenant}` | includes `quota_rps/burst` (0 = default) and `effective_*` |
-| `GET /tenant/usage` | `200 {tenant_id, usage}` | data-plane counters since the gateway process started (`usage.since`) |
+| `GET /tenant/usage` | `200 {tenant_id, usage}` | durable totals (`usage.since` is the first stored hour) |
+| `GET /tenant/usage/series?range=24h\|7d\|30d` | `200 {tenant_id, series}` | `24h` hourly points; `7d`/`30d` daily points. `400 invalid_range` |
 | `GET /tenant/keys` | `200 {keys:[{prefix,name,status,created_at,expires_at,revoked_at}]}` | `status`: `active` / `expired` / `revoked` |
 | `POST /tenant/keys` `{name, ttl_hours?}` | `201 {key, info}` | `ttl_hours` 0 or absent = no expiry, max 8760; `409 key_limit_reached` (default 10 active keys) |
 | `POST /tenant/keys/{prefix}/rotate` `{ttl_hours?}` | `201 {key, info, revoked_prefix}` | body optional; old key is revoked immediately; `409 key_not_active` |
@@ -93,6 +94,7 @@ printf '%s\n' "$PASSWORD" | gatewayctl -db gateway.db create-admin ops@example.c
 | `GET /admin/tenants/{id}` | `200 {tenant}` |
 | `PUT /admin/tenants/{id}/quota` `{rps, burst}` | `200 {tenant}`; both required; `0 0` = gateway default; takes effect on the next data-plane request |
 | `GET /admin/tenants/{id}/usage` | `200 {tenant_id, usage}` |
+| `GET /admin/tenants/{id}/usage/series?range=24h\|7d\|30d` | `200 {tenant_id, series}` |
 | `GET /admin/tenants/{id}/keys` | `200 {keys}` |
 | `DELETE /admin/tenants/{id}/keys/{prefix}` | `204` |
 
@@ -123,6 +125,7 @@ Operator accounts have no tenant, so the customer routes answer `404 no_tenant` 
   password with `gatewayctl reset-password`.
 - One user per tenant, one tenant per user. No teams, roles beyond customer/operator, SSO or MFA.
 - No tenant suspension/deletion endpoint (an operator can revoke keys and set the quota to a tiny value).
-- Rate limiters and usage counters are in memory per gateway process; with several gateway
-  replicas each enforces its own limits.
+- Rate limiters are in memory per gateway process; with several gateway
+  replicas each enforces its own limits. Usage buckets are stored in SQLite and
+  survive restarts.
 - Sessions use cookies only; non-browser clients should use the data-plane API keys instead.

@@ -1,0 +1,113 @@
+/** @type {import('tailwindcss').Config} */
+export default {
+  darkMode: 'class',
+  content: [
+    './index.html',
+    './src/**/*.{js,ts,jsx,tsx}',
+  ],
+  theme: {
+    extend: {
+      colors: {
+        // Steep design system colors
+        'ink-black':    '#17191c',
+        'paper-white':  '#ffffff',
+        'mist-gray':    '#f2f2f3',
+        'fog-white':    '#fafafb',
+        'slate-gray':   '#777b86',
+        'ash-gray':     '#979799',
+        'smoke-gray':   '#a3a6af',
+        'blush-peach':  '#fbe1d1',
+        'sienna-brown': '#5d2a1a',
+        // Functional aliases
+        'brand':        '#17191c',
+        'danger':       '#ef4444',
+        // Semantic shorthands (for component utilities)
+        border:   '#ececec',
+        input:    '#ececec',
+        ring:     '#17191c',
+      },
+      fontFamily: {
+        signifier: ['Signifier', 'ui-serif', 'Georgia', 'Cambria', 'Times New Roman', 'serif'],
+        sohne:     ['Sohne', 'Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
+        mono:      ['JetBrains Mono Variable', 'ui-monospace', 'SF Mono', 'Monaco', 'monospace'],
+      },
+      fontSize: {
+        'caption':    ['15px', { lineHeight: '1.5',  fontWeight: '400' }],
+        'body':       ['17px', { lineHeight: '1.35', fontWeight: '400' }],
+        'body-lg':    ['20px', { lineHeight: '1.35', fontWeight: '400' }],
+        'subheading': ['22px', { lineHeight: '1.5',  fontWeight: '400' }],
+        'heading-sm': ['26px', { lineHeight: '1.18', fontWeight: '400', letterSpacing: '-0.023em' }],
+        'heading':    ['44px', { lineHeight: '1.3',  letterSpacing: '-0.015em', fontWeight: '400' }],
+        'heading-lg': ['64px', { lineHeight: '1.3',  letterSpacing: '-0.015em', fontWeight: '400' }],
+        'display':    ['90px', { lineHeight: '1.3',  letterSpacing: '-0.025em', fontWeight: '400' }],
+      },
+      fontWeight: {
+        regular: '400',
+        w430:    '430',
+        w450:    '450',
+        w480:    '480',
+        medium:  '500',
+      },
+      spacing: {
+        '124': '124px',
+      },
+      borderRadius: {
+        'none':          '0px',
+        'sm':            '4px',
+        DEFAULT:         '8px',
+        'md':            '8px',
+        'xl':            '12px',
+        '2xl':           '16px',
+        '2xl-2':         '20px',
+        '3xl':           '24px',
+        'full':          '9999px',
+        // Named design tokens
+        'cards':         '24px',
+        'images':        '12px',
+        'inputs':        '16px',
+        'buttons':       '9999px',
+        'smallCards':    '16px',
+        'elevatedCards': '20px',
+      },
+      boxShadow: {
+        'subtle':   'oklab(0 0 0 / 0.05) 0px 0px 0px 1px, rgba(0, 0, 0, 0.08) 0px 4px 24px 0px',
+        'subtle-2': 'oklab(0 0 0 / 0.05) 0px 0px 0px 1px, rgba(0, 0, 0, 0.1) 0px 8px 40px 0px',
+        'subtle-3': 'rgba(4, 23, 43, 0.05) 0px 0px 0px 1px, rgba(0, 0, 0, 0.1) 0px 20px 25px -5px, rgba(0, 0, 0, 0.1) 0px 8px 10px -6px',
+        'modal':    'oklab(0 0 0 / 0.05) 0px 0px 0px 1px, rgba(0, 0, 0, 0.1) 0px 8px 40px 0px',
+        'dropdown': 'oklab(0 0 0 / 0.05) 0px 0px 0px 1px, rgba(0, 0, 0, 0.08) 0px 4px 24px 0px',
+        'artifact': '0 0 0 1px rgba(4,23,43,0.05), 0 20px 25px -5px rgba(0,0,0,0.1), 0 8px 10px -6px rgba(0,0,0,0.1)',
+      },
+      transitionDuration: {
+        '75':  '75ms',
+        '150': '150ms',
+        '200': '200ms',
+        '250': '250ms',
+        '300': '300ms',
+        '500': '500ms',
+      },
+      transitionTimingFunction: {
+        'ease-smooth': 'cubic-bezier(0.4, 0, 0.2, 1)',
+        'ease-spring': 'cubic-bezier(0.34, 1.56, 0.64, 1)',
+        'ease-sharp':  'cubic-bezier(0.4, 0, 1, 1)',
+        'ease-soft':   'cubic-bezier(0, 0, 0.2, 1)',
+      },
+      animation: {
+        'fade-in':       'fadeIn 150ms ease-soft',
+        'fade-out':      'fadeOut 150ms ease-sharp',
+        'slide-up':      'slideUp 200ms ease-smooth',
+        'slide-down':    'slideDown 200ms ease-smooth',
+        'scale-in':      'scaleIn 150ms ease-spring',
+        'slide-in-right':'slideInRight 200ms ease-smooth',
+      },
+      keyframes: {
+        fadeIn:       { '0%': { opacity: '0' }, '100%': { opacity: '1' } },
+        fadeOut:      { '0%': { opacity: '1' }, '100%': { opacity: '0' } },
+        slideUp:      { '0%': { opacity: '0', transform: 'translateY(6px)' }, '100%': { opacity: '1', transform: 'translateY(0)' } },
+        slideDown:    { '0%': { opacity: '0', transform: 'translateY(-6px)' }, '100%': { opacity: '1', transform: 'translateY(0)' } },
+        scaleIn:      { '0%': { opacity: '0', transform: 'scale(0.96)' }, '100%': { opacity: '1', transform: 'scale(1)' } },
+        slideInRight: { '0%': { opacity: '0', transform: 'translateX(10px)' }, '100%': { opacity: '1', transform: 'translateX(0)' } },
+      },
+    },
+  },
+  plugins: [],
+}

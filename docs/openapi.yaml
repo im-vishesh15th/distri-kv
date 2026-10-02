@@ -75,6 +75,22 @@ components:
         by_status: {type: object, additionalProperties: {type: integer}}
         rate_limited: {type: integer}
         concurrency_limited: {type: integer}
+    UsagePoint:
+      type: object
+      properties:
+        t: {type: string, format: date-time}
+        requests: {type: integer}
+        by_op: {type: object, additionalProperties: {type: integer}}
+        rate_limited: {type: integer}
+        concurrency_limited: {type: integer}
+    UsageSeries:
+      type: object
+      properties:
+        range: {type: string}
+        step: {type: string}
+        points:
+          type: array
+          items: {$ref: "#/components/schemas/UsagePoint"}
     UserAndTenant:
       type: object
       properties:
@@ -219,7 +235,7 @@ paths:
       security: [{session: []}]
       responses:
         "200":
-          description: Data-plane counters since the gateway process started
+          description: Durable data-plane counters (hourly SQLite rollups + unflushed deltas)
           content:
             application/json:
               schema:
@@ -227,6 +243,26 @@ paths:
                 properties:
                   tenant_id: {type: string}
                   usage: {$ref: "#/components/schemas/Usage"}
+        "401": {$ref: "#/components/responses/Err"}
+  /tenant/usage/series:
+    get:
+      tags: [customer]
+      security: [{session: []}]
+      parameters:
+        - in: query
+          name: range
+          schema: {type: string, enum: [24h, 7d, 30d], default: 24h}
+      responses:
+        "200":
+          description: Zero-filled hourly (24h) or daily (7d/30d) usage points
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant_id: {type: string}
+                  series: {$ref: "#/components/schemas/UsageSeries"}
+        "400": {$ref: "#/components/responses/Err"}
         "401": {$ref: "#/components/responses/Err"}
   /tenant/keys:
     get:

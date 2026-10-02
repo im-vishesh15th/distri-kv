@@ -80,6 +80,7 @@ func newCtl(t *testing.T, mod func(*ControlConfig)) *ctlEnv {
 	}
 	e.gw = New(Config{RateLimitRPS: 1e6, RateLimitBurst: 1e6}, e.store, newFakeKV())
 	cfg.Usage = e.gw.Metrics().Usage
+	cfg.UsageSeries = e.gw.Metrics().Series
 	if mod != nil {
 		mod(&cfg)
 	}
@@ -497,6 +498,42 @@ func TestUsageComesFromDataPlane(t *testing.T) {
 	u := r.json()["usage"].(map[string]any)
 	if u["requests"] != float64(3) {
 		t.Fatalf("requests = %v, want 3", u["requests"])
+	}
+}
+
+func TestUsageSeriesEndpoint(t *testing.T) {
+	e := newCtl(t, nil)
+	a := e.signup("a@x.io", "tenant-a")
+	b := e.signup("b@x.io", "tenant-b")
+	for i := 0; i < 3; i++ {
+		e.gwStatus(a.key)
+	}
+	r := e.do("GET", "/api/v1/tenant/usage/series?range=24h", nil, withCookie(a.cookie))
+	if r.Code != 200 {
+		t.Fatalf("series: %d %s", r.Code, r.Body.String())
+	}
+	ser := r.json()["series"].(map[string]any)
+	pts := ser["points"].([]any)
+	if len(pts) != 24 {
+		t.Fatalf("points = %d, want 24", len(pts))
+	}
+	var sum float64
+	for _, p := range pts {
+		sum += p.(map[string]any)["requests"].(float64)
+	}
+	if sum != 3 {
+		t.Fatalf("series sum = %v, want 3", sum)
+	}
+	rb := e.do("GET", "/api/v1/tenant/usage/series?range=24h", nil, withCookie(b.cookie))
+	var bsum float64
+	for _, p := range rb.json()["series"].(map[string]any)["points"].([]any) {
+		bsum += p.(map[string]any)["requests"].(float64)
+	}
+	if bsum != 0 {
+		t.Fatalf("tenant-b saw %v of tenant-a traffic", bsum)
+	}
+	if bad := e.do("GET", "/api/v1/tenant/usage/series?range=year", nil, withCookie(a.cookie)); bad.Code != 400 {
+		t.Fatalf("bad range: %d", bad.Code)
 	}
 }
 

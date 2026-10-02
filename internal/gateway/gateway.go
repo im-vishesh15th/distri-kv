@@ -108,7 +108,7 @@ type Gateway struct {
 // New builds a gateway over a Store (accounts and keys) and a KV (data plane).
 func New(cfg Config, store Store, kv KV) *Gateway {
 	cfg.applyDefaults()
-	return &Gateway{
+	g := &Gateway{
 		cfg:      cfg,
 		store:    store,
 		kv:       kv,
@@ -117,6 +117,11 @@ func New(cfg Config, store Store, kv KV) *Gateway {
 		sems:     make(map[string]chan struct{}),
 		metrics:  NewMetrics(time.Now()),
 	}
+	g.metrics.now = func() time.Time { return g.now() }
+	if p, ok := store.(UsagePersister); ok {
+		g.metrics.SetPersister(p)
+	}
+	return g
 }
 
 // Metrics returns the gateway's counters (for tests and embedding).
@@ -134,8 +139,13 @@ func (g *Gateway) semFor(tenantID string) chan struct{} {
 	return s
 }
 
-// Close closes the data-plane client. The caller owns the Store.
-func (g *Gateway) Close() error { return g.kv.Close() }
+// Close flushes durable usage then closes the data-plane client. The caller owns the Store.
+func (g *Gateway) Close() error {
+	fctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	_ = g.metrics.Flush(fctx)
+	cancel()
+	return g.kv.Close()
+}
 
 // ---------------------------------------------------------------- rate limit
 
@@ -311,6 +321,20 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/v1/usage" && r.Method == http.MethodGet:
 		writeJSON(w, http.StatusOK, g.metrics.Usage(tenant.ID))
+	case r.URL.Path == "/tenant/usage/series" && r.Method == http.MethodGet:
+		rng := r.URL.Query().Get("range")
+		if rng == "" {
+			rng = "24h"
+		}
+		series, err := g.metrics.Series(tenant.ID, rng)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_range", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"tenant_id": tenant.ID,
+			"series":    series,
+		})
 	case r.URL.Path == "/kv" && r.Method == http.MethodPost:
 		g.handleOp(w, r, tenant.ID)
 	case strings.HasPrefix(r.URL.Path, "/kv/"):
@@ -552,11 +576,16 @@ func (g *Gateway) Run(ctx context.Context) error {
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		_ = g.metrics.Flush(sctx)
 		_ = srv.Shutdown(sctx)
 		if msrv != nil {
 			_ = msrv.Shutdown(sctx)
 		}
 	}()
+
+	if g.metrics.persister != nil {
+		go g.metrics.runFlusher(ctx, 15*time.Second)
+	}
 
 	if tlsOn {
 		log.Printf("gateway listening on %s (TLS)", g.cfg.BindAddr)

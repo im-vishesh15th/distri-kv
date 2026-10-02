@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { forwardRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -58,13 +58,17 @@ function InputField({
 const INPUT_BASE =
   'w-full text-[14px] text-ink-black rounded-[12px] px-3.5 py-2.5 transition-all duration-150 focus:outline-none'
 
-function FieldInput({
-  hasError,
-  mono,
-  ...props
-}: React.InputHTMLAttributes<HTMLInputElement> & { hasError?: boolean; mono?: boolean }) {
+
+const FieldInput = forwardRef<
+  HTMLInputElement,
+  React.InputHTMLAttributes<HTMLInputElement> & {
+    hasError?: boolean
+    mono?: boolean
+  }
+>(function FieldInput({ hasError, mono, ...props }, ref) {
   return (
     <input
+      ref={ref}
       {...props}
       className={`${INPUT_BASE} ${mono ? 'font-mono text-[13px]' : ''} ${
         hasError
@@ -78,7 +82,7 @@ function FieldInput({
       }}
     />
   )
-}
+})
 
 export function SignupPage() {
   const { signup } = useAuth()

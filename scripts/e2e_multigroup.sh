@@ -56,7 +56,7 @@ for tenant in 1 2; do
         key="tenant${tenant}-key-$i"
         val="tenant${tenant}-value-$i"
         if test_key "$key" "$val" "$auth" 200; then
-            ((success++))
+            success=$((success + 1))
         else
             echo "  FAIL on $key"
         fi

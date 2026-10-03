@@ -6,6 +6,14 @@
       "destination": "https://distrikv-vishesh.eastasia.cloudapp.azure.com/api/v1/:path*"
     },
     {
+      "source": "/kv/:path*",
+      "destination": "https://distrikv-vishesh.eastasia.cloudapp.azure.com/kv/:path*"
+    },
+    {
+      "source": "/kv",
+      "destination": "https://distrikv-vishesh.eastasia.cloudapp.azure.com/kv"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }
@@ -13,6 +21,15 @@
   "headers": [
     {
       "source": "/api/v1/:path*",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-store"
+        }
+      ]
+    },
+    {
+      "source": "/kv/:path*",
       "headers": [
         {
           "key": "Cache-Control",

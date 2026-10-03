@@ -6,6 +6,8 @@ import {
   ClipboardDocumentIcon,
   CheckIcon,
   MagnifyingGlassIcon,
+  Bars3Icon,
+  XMarkIcon,
 } from '@heroicons/react/24/outline'
 import { useAuth } from '../../context/AuthContext'
 
@@ -250,6 +252,7 @@ export function DocumentationPage() {
   const [copiedSnippet, setCopiedSnippet] = useState<string | null>(null)
   const [selectedSdk, setSelectedSdk] = useState<'ts' | 'python' | 'go' | 'java' | 'rust' | 'php' | 'curl'>('ts')
   const [sdkTab, setSdkTab] = useState<'walkthrough' | 'full'>('walkthrough')
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
   const handleCopy = (code: string, id: string) => {
     navigator.clipboard.writeText(code)
@@ -280,10 +283,24 @@ export function DocumentationPage() {
           <div className="flex items-center gap-3">
             <Link
               to="/"
-              className="inline-flex items-center"
+              className="inline-flex items-center gap-2.5"
               style={{ textDecoration: 'none' }}
             >
-              <span style={{ fontFamily: "'Georgia', ui-serif, serif", fontSize: '18px', fontWeight: 400, letterSpacing: '-0.02em', color: '#17191c' }}>
+              <img
+                src="/distrikv-logo.png"
+                alt="Distri-KV"
+                className="h-8 w-8 object-contain"
+              />
+
+              <span
+                style={{
+                  fontFamily: "'Georgia', ui-serif, serif",
+                  fontSize: '18px',
+                  fontWeight: 400,
+                  letterSpacing: '-0.02em',
+                  color: '#17191c',
+                }}
+              >
                 Distri<span style={{ fontStyle: 'italic', color: '#5d2a1a' }}>KV</span>
               </span>
             </Link>
@@ -308,6 +325,15 @@ export function DocumentationPage() {
 
           {/* Right: search + CTA */}
           <div className="flex items-center gap-3">
+            {/* Mobile menu button */}
+            <button
+              type="button"
+              onClick={() => setMobileMenuOpen(true)}
+              className="md:hidden inline-flex items-center justify-center rounded-lg p-2 hover:bg-[#f2f2f3]"
+              aria-label="Open documentation menu"
+            >
+              <Bars3Icon className="h-5 w-5 text-[#17191c]" />
+            </button>
             <div className="relative hidden md:block" style={{ width: '220px' }}>
               <MagnifyingGlassIcon
                 className="absolute top-1/2 -translate-y-1/2"
@@ -381,10 +407,47 @@ export function DocumentationPage() {
       {/* ─── Main Documentation Grid ───────────────────────── */}
       <div className="max-w-[1440px] mx-auto w-full flex-1 flex flex-col md:flex-row">
         {/* Left Sidebar Navigation */}
+        {/* Left Sidebar Navigation */}
         <aside
-          className="md:sticky md:top-[60px] w-full md:w-[240px] lg:w-[260px] shrink-0 md:h-[calc(100vh-60px)] overflow-y-auto"
-          style={{ borderRight: '1px solid #ececec', background: '#ffffff', padding: '24px 16px' }}
+          className={`
+    md:sticky md:top-[60px]
+    w-[280px] md:w-[240px] lg:w-[260px]
+    shrink-0 md:h-[calc(100vh-60px)]
+    overflow-y-auto
+    fixed md:static
+    top-[60px] bottom-0 left-0
+    z-50
+    transition-transform duration-200 ease-out
+    ${mobileMenuOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
+  `}
+          style={{
+            borderRight: '1px solid #ececec',
+            background: '#ffffff',
+            padding: '24px 16px',
+          }}
         >
+          {/* Mobile sidebar header */}
+          <div className="flex md:hidden items-center justify-between mb-5 px-2">
+            <span
+              style={{
+                fontSize: '13px',
+                fontWeight: 600,
+                color: '#17191c',
+              }}
+            >
+              Documentation
+            </span>
+
+            <button
+              type="button"
+              onClick={() => setMobileMenuOpen(false)}
+              className="rounded-lg p-1.5 hover:bg-[#f2f2f3]"
+              aria-label="Close documentation menu"
+            >
+              <XMarkIcon className="h-5 w-5 text-[#17191c]" />
+            </button>
+          </div>
+
           <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
             {groups.map((group) => (
               <div key={group}>
@@ -401,7 +464,17 @@ export function DocumentationPage() {
                 >
                   {group}
                 </div>
-                <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: '1px' }}>
+
+                <ul
+                  style={{
+                    listStyle: 'none',
+                    margin: 0,
+                    padding: 0,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '1px',
+                  }}
+                >
                   {filteredSections
                     .filter((s) => s.group === group)
                     .map((item) => (
@@ -409,12 +482,19 @@ export function DocumentationPage() {
                         <button
                           onClick={() => {
                             setActiveSection(item.id)
+                            setMobileMenuOpen(false)
+
                             if (item.id.startsWith('sdk-')) {
                               const lang = item.id.replace('sdk-', '') as any
                               setSelectedSdk(lang)
-                              document.getElementById('sdk-hub')?.scrollIntoView({ behavior: 'smooth' })
+
+                              document
+                                .getElementById('sdk-hub')
+                                ?.scrollIntoView({ behavior: 'smooth' })
                             } else {
-                              document.getElementById(item.id)?.scrollIntoView({ behavior: 'smooth' })
+                              document
+                                .getElementById(item.id)
+                                ?.scrollIntoView({ behavior: 'smooth' })
                             }
                           }}
                           style={{
@@ -424,8 +504,14 @@ export function DocumentationPage() {
                             borderRadius: '8px',
                             fontSize: '13px',
                             fontWeight: activeSection === item.id ? 500 : 400,
-                            color: activeSection === item.id ? '#17191c' : '#777b86',
-                            background: activeSection === item.id ? '#f2f2f3' : 'transparent',
+                            color:
+                              activeSection === item.id
+                                ? '#17191c'
+                                : '#777b86',
+                            background:
+                              activeSection === item.id
+                                ? '#f2f2f3'
+                                : 'transparent',
                             border: 'none',
                             cursor: 'pointer',
                             transition: 'background 100ms, color 100ms',
@@ -453,6 +539,15 @@ export function DocumentationPage() {
             ))}
           </div>
         </aside>
+        
+        {mobileMenuOpen && (
+          <button
+            type="button"
+            aria-label="Close documentation menu"
+            className="md:hidden fixed inset-0 top-[60px] z-40 bg-black/30"
+            onClick={() => setMobileMenuOpen(false)}
+          />
+        )}
 
         {/* Center Content Pane */}
         <main
@@ -460,52 +555,52 @@ export function DocumentationPage() {
           style={{ padding: '40px 40px', maxWidth: '860px' }}
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: '52px' }}>
-          {/* SECTION: Overview */}
-          <section id="overview" className="space-y-4 scroll-mt-20">
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blush-peach/40 text-sienna-brown text-xs font-semibold">
-              <BoltIcon className="h-3.5 w-3.5" />
-              <span>Core Architecture & Mission</span>
-            </div>
-            <h1 className="font-serif text-4xl sm:text-5xl font-normal text-ink-black tracking-tight">
-              DistriKV Developer Guide
-            </h1>
-            <p className="text-base text-slate-gray leading-relaxed">
-              DistriKV is a fault-tolerant, horizontally scalable distributed key-value store engineered in Go. 
-              It provides <strong>sub-millisecond p99 latency</strong> with strict linearizability through Raft consensus, 
-              hardware-isolated multi-tenant rate limiting, and zero cross-tenant tail latency degradation.
-            </p>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
-              <div className="p-4 rounded-cards bg-mist-gray border border-[#ececec]">
-                <div className="text-xs text-slate-gray uppercase font-semibold">Port 8080</div>
-                <div className="text-sm font-semibold text-ink-black mt-1">Data Plane Gateway</div>
-                <div className="text-xs text-slate-gray mt-1">GET / PUT / CAS / DELETE for applications</div>
+            {/* SECTION: Overview */}
+            <section id="overview" className="space-y-4 scroll-mt-20">
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blush-peach/40 text-sienna-brown text-xs font-semibold">
+                <BoltIcon className="h-3.5 w-3.5" />
+                <span>Core Architecture & Mission</span>
               </div>
-              <div className="p-4 rounded-cards bg-mist-gray border border-[#ececec]">
-                <div className="text-xs text-slate-gray uppercase font-semibold">Port 9091</div>
-                <div className="text-sm font-semibold text-ink-black mt-1">Control Plane API</div>
-                <div className="text-xs text-slate-gray mt-1">Console telemetry, user auth, & key mgmt</div>
-              </div>
-              <div className="p-4 rounded-cards bg-mist-gray border border-[#ececec]">
-                <div className="text-xs text-slate-gray uppercase font-semibold">Consensus</div>
-                <div className="text-sm font-semibold text-ink-black mt-1">Raft Quorum (2N/2+1)</div>
-                <div className="text-xs text-slate-gray mt-1">Strict ordering and automated failover</div>
-              </div>
-            </div>
-          </section>
+              <h1 className="font-serif text-4xl sm:text-5xl font-normal text-ink-black tracking-tight">
+                DistriKV Developer Guide
+              </h1>
+              <p className="text-base text-slate-gray leading-relaxed">
+                DistriKV is a fault-tolerant, horizontally scalable distributed key-value store engineered in Go.
+                It provides <strong>sub-millisecond p99 latency</strong> with strict linearizability through Raft consensus,
+                hardware-isolated multi-tenant rate limiting, and zero cross-tenant tail latency degradation.
+              </p>
 
-          {/* SECTION: Architecture & Ports */}
-          <section id="architecture" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
-            <h2 className="font-serif text-2xl sm:text-3xl text-ink-black font-normal">
-              Network Topology & Ports
-            </h2>
-            <p className="text-sm text-slate-gray leading-relaxed">
-              DistriKV separates traffic into public data ingress and loopback control planes.
-              Your applications communicate exclusively with the <strong>Edge Gateway</strong> on port <code className="font-mono text-xs bg-mist-gray px-1.5 py-0.5 rounded">8080</code>.
-            </p>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
+                <div className="p-4 rounded-cards bg-mist-gray border border-[#ececec]">
+                  <div className="text-xs text-slate-gray uppercase font-semibold">Port 8080</div>
+                  <div className="text-sm font-semibold text-ink-black mt-1">Data Plane Gateway</div>
+                  <div className="text-xs text-slate-gray mt-1">GET / PUT / CAS / DELETE for applications</div>
+                </div>
+                <div className="p-4 rounded-cards bg-mist-gray border border-[#ececec]">
+                  <div className="text-xs text-slate-gray uppercase font-semibold">Port 9091</div>
+                  <div className="text-sm font-semibold text-ink-black mt-1">Control Plane API</div>
+                  <div className="text-xs text-slate-gray mt-1">Console telemetry, user auth, & key mgmt</div>
+                </div>
+                <div className="p-4 rounded-cards bg-mist-gray border border-[#ececec]">
+                  <div className="text-xs text-slate-gray uppercase font-semibold">Consensus</div>
+                  <div className="text-sm font-semibold text-ink-black mt-1">Raft Quorum (2N/2+1)</div>
+                  <div className="text-xs text-slate-gray mt-1">Strict ordering and automated failover</div>
+                </div>
+              </div>
+            </section>
 
-            <CodeBlock
-              code={`+-------------------------------------------------------------+
+            {/* SECTION: Architecture & Ports */}
+            <section id="architecture" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
+              <h2 className="font-serif text-2xl sm:text-3xl text-ink-black font-normal">
+                Network Topology & Ports
+              </h2>
+              <p className="text-sm text-slate-gray leading-relaxed">
+                DistriKV separates traffic into public data ingress and loopback control planes.
+                Your applications communicate exclusively with the <strong>Edge Gateway</strong> on port <code className="font-mono text-xs bg-mist-gray px-1.5 py-0.5 rounded">8080</code>.
+              </p>
+
+              <CodeBlock
+                code={`+-------------------------------------------------------------+
 | CLIENT APPLICATION (Node.js, Python, Go, Java, Rust, cURL)  |
 +-------------------------------------------------------------+
                              │
@@ -524,299 +619,299 @@ export function DocumentationPage() {
 │ Append Log    │ Atomic Quorum Commit        │ Append Log    │
 │ State Machine │ Multi-Threaded State Apply  │ State Machine │
 └───────────────┴─────────────────────────────┴───────────────┘`}
-              filename="network-topology.txt"
-              id="arch-ascii"
-              copiedSnippet={copiedSnippet}
-              onCopy={handleCopy}
-            />
-          </section>
+                filename="network-topology.txt"
+                id="arch-ascii"
+                copiedSnippet={copiedSnippet}
+                onCopy={handleCopy}
+              />
+            </section>
 
-          {/* SECTION: Durable Analytics Architecture */}
-          <section id="durable-analytics" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
-            <h2 className="font-serif text-2xl sm:text-3xl text-ink-black font-normal">
-              Durable Analytics Architecture
-            </h2>
-            <p className="text-sm text-slate-gray leading-relaxed">
-              DistriKV's analytics pipeline is designed for durability. Unlike many systems that lose in-memory counters on restart,
-              DistriKV persists usage metrics to hourly SQLite buckets that survive gateway restarts and crashes.
-            </p>
+            {/* SECTION: Durable Analytics Architecture */}
+            <section id="durable-analytics" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
+              <h2 className="font-serif text-2xl sm:text-3xl text-ink-black font-normal">
+                Durable Analytics Architecture
+              </h2>
+              <p className="text-sm text-slate-gray leading-relaxed">
+                DistriKV's analytics pipeline is designed for durability. Unlike many systems that lose in-memory counters on restart,
+                DistriKV persists usage metrics to hourly SQLite buckets that survive gateway restarts and crashes.
+              </p>
 
-            <div className="space-y-4">
-              <div className="bg-mist-gray p-4 rounded-cards border border-[#ececec]">
-                <h3 className="text-h-sm mb-3 text-ink-black">How It Works</h3>
-                <ul className="space-y-2 text-sm text-slate-gray list-disc list-inside">
-                  <li><strong>In-Memory Counters:</strong> Live traffic increments in-memory counters (requests, rate limits, concurrency limits) per tenant and operation.</li>
-                  <li><strong>Hourly Flushing:</strong> Every hour, deltas are flushed to SQLite as <code className="font-mono text-xs bg-mist-gray px-1 rounded">usageDelta</code> rows with tenant, operation, status, and count.</li>
-                  <li><strong>Crash-Safe Persistence:</strong> Flush uses SQLite's <code className="font-mono text-xs bg-mist-gray px-1 rounded">VACUUM INTO</code> for atomic file replacement — no partial writes on crash.</li>
-                  <li><strong>Reconciliation on Restart:</strong> On startup, the gateway loads the latest snapshot, then replays unflushed WAL entries to reconstruct exact state.</li>
-                  <li><strong>Series API:</strong> The <code className="font-mono text-xs bg-mist-gray px-1 rounded">/tenant/usage/series</code> endpoint reads hourly buckets to produce zero-filled time series for charts.</li>
-                </ul>
-              </div>
-
-              <div className="bg-mist-gray p-4 rounded-cards border border-[#ececec]">
-                <h3 className="text-h-sm mb-3 text-ink-black">Durability Guarantees</h3>
-                <table className="w-full text-xs text-left border-collapse">
-                  <thead>
-                    <tr className="border-b border-[#ececec]">
-                      <th className="py-2 px-3 font-semibold text-ink-black">Scenario</th>
-                      <th className="py-3 px-3 font-semibold text-ink-black">Behavior</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#ececec]">
-                    <tr>
-                      <td className="py-2 px-3 text-slate-gray font-mono">Graceful shutdown</td>
-                      <td className="py-2 px-3 text-slate-gray">All pending deltas flushed before exit</td>
-                    </tr>
-                    <tr>
-                      <td className="py-2 px-3 text-slate-gray font-mono">Crash / power loss</td>
-                      <td className="py-2 px-3 text-slate-gray">Last hourly bucket preserved; unflushed deltas replayed from WAL on restart</td>
-                    </tr>
-                    <tr>
-                      <td className="py-2 px-3 text-slate-gray font-mono">Gateway restart</td>
-                      <td className="py-2 px-3 text-slate-gray">Counters restored from SQLite; <code className="font-mono text-xs bg-mist-gray px-1 rounded">/v1/usage</code> shows correct totals</td>
-                    </tr>
-                    <tr>
-                      <td className="py-2 px-3 text-slate-gray font-mono">Hourly boundary</td>
-                      <td className="py-2 px-3 text-slate-gray">Flush triggered at minute 0; atomic <code className="font-mono text-xs bg-mist-gray px-1 rounded">VACUUM INTO</code> ensures no partial writes</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </section>
-          <section id="quickstart" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
-            <h2 className="font-serif text-2xl sm:text-3xl text-ink-black font-normal">
-              2-Minute Quickstart
-            </h2>
-            <p className="text-sm text-slate-gray">
-              Follow these three steps to write and read your first distributed record:
-            </p>
-
-            <div className="space-y-4">
-              <div className="p-4 rounded-cards bg-paper-white border border-[#e4e4e6] space-y-2">
-                <div className="flex items-center gap-2 text-xs font-semibold text-ink-black">
-                  <span className="h-5 w-5 rounded-full bg-ink-black text-paper-white flex items-center justify-center text-[11px]">1</span>
-                  <span>Get your API Key</span>
+              <div className="space-y-4">
+                <div className="bg-mist-gray p-4 rounded-cards border border-[#ececec]">
+                  <h3 className="text-h-sm mb-3 text-ink-black">How It Works</h3>
+                  <ul className="space-y-2 text-sm text-slate-gray list-disc list-inside">
+                    <li><strong>In-Memory Counters:</strong> Live traffic increments in-memory counters (requests, rate limits, concurrency limits) per tenant and operation.</li>
+                    <li><strong>Hourly Flushing:</strong> Every hour, deltas are flushed to SQLite as <code className="font-mono text-xs bg-mist-gray px-1 rounded">usageDelta</code> rows with tenant, operation, status, and count.</li>
+                    <li><strong>Crash-Safe Persistence:</strong> Flush uses SQLite's <code className="font-mono text-xs bg-mist-gray px-1 rounded">VACUUM INTO</code> for atomic file replacement — no partial writes on crash.</li>
+                    <li><strong>Reconciliation on Restart:</strong> On startup, the gateway loads the latest snapshot, then replays unflushed WAL entries to reconstruct exact state.</li>
+                    <li><strong>Series API:</strong> The <code className="font-mono text-xs bg-mist-gray px-1 rounded">/tenant/usage/series</code> endpoint reads hourly buckets to produce zero-filled time series for charts.</li>
+                  </ul>
                 </div>
-                <p className="text-xs text-slate-gray pl-7">
-                  Log in to the console and visit <strong>API Keys</strong> (<code className="font-mono text-[11px] bg-mist-gray px-1 rounded">/keys</code>) to generate a key. It begins with <code className="font-mono text-[11px] bg-mist-gray px-1 rounded">dkv_live_...</code>.
-                </p>
-              </div>
 
-              <div className="p-4 rounded-cards bg-paper-white border border-[#e4e4e6] space-y-2">
-                <div className="flex items-center gap-2 text-xs font-semibold text-ink-black">
-                  <span className="h-5 w-5 rounded-full bg-ink-black text-paper-white flex items-center justify-center text-[11px]">2</span>
-                  <span>Store a Key (<code className="font-mono">PUT /kv/:key</code>)</span>
+                <div className="bg-mist-gray p-4 rounded-cards border border-[#ececec]">
+                  <h3 className="text-h-sm mb-3 text-ink-black">Durability Guarantees</h3>
+                  <table className="w-full text-xs text-left border-collapse">
+                    <thead>
+                      <tr className="border-b border-[#ececec]">
+                        <th className="py-2 px-3 font-semibold text-ink-black">Scenario</th>
+                        <th className="py-3 px-3 font-semibold text-ink-black">Behavior</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#ececec]">
+                      <tr>
+                        <td className="py-2 px-3 text-slate-gray font-mono">Graceful shutdown</td>
+                        <td className="py-2 px-3 text-slate-gray">All pending deltas flushed before exit</td>
+                      </tr>
+                      <tr>
+                        <td className="py-2 px-3 text-slate-gray font-mono">Crash / power loss</td>
+                        <td className="py-2 px-3 text-slate-gray">Last hourly bucket preserved; unflushed deltas replayed from WAL on restart</td>
+                      </tr>
+                      <tr>
+                        <td className="py-2 px-3 text-slate-gray font-mono">Gateway restart</td>
+                        <td className="py-2 px-3 text-slate-gray">Counters restored from SQLite; <code className="font-mono text-xs bg-mist-gray px-1 rounded">/v1/usage</code> shows correct totals</td>
+                      </tr>
+                      <tr>
+                        <td className="py-2 px-3 text-slate-gray font-mono">Hourly boundary</td>
+                        <td className="py-2 px-3 text-slate-gray">Flush triggered at minute 0; atomic <code className="font-mono text-xs bg-mist-gray px-1 rounded">VACUUM INTO</code> ensures no partial writes</td>
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
-                <div className="pl-7">
-                  <CodeBlock
-                    code={`curl -X PUT "http://localhost:8080/kv/user:profile:1001" \\
+              </div>
+            </section>
+            <section id="quickstart" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
+              <h2 className="font-serif text-2xl sm:text-3xl text-ink-black font-normal">
+                2-Minute Quickstart
+              </h2>
+              <p className="text-sm text-slate-gray">
+                Follow these three steps to write and read your first distributed record:
+              </p>
+
+              <div className="space-y-4">
+                <div className="p-4 rounded-cards bg-paper-white border border-[#e4e4e6] space-y-2">
+                  <div className="flex items-center gap-2 text-xs font-semibold text-ink-black">
+                    <span className="h-5 w-5 rounded-full bg-ink-black text-paper-white flex items-center justify-center text-[11px]">1</span>
+                    <span>Get your API Key</span>
+                  </div>
+                  <p className="text-xs text-slate-gray pl-7">
+                    Log in to the console and visit <strong>API Keys</strong> (<code className="font-mono text-[11px] bg-mist-gray px-1 rounded">/keys</code>) to generate a key. It begins with <code className="font-mono text-[11px] bg-mist-gray px-1 rounded">dkv_live_...</code>.
+                  </p>
+                </div>
+
+                <div className="p-4 rounded-cards bg-paper-white border border-[#e4e4e6] space-y-2">
+                  <div className="flex items-center gap-2 text-xs font-semibold text-ink-black">
+                    <span className="h-5 w-5 rounded-full bg-ink-black text-paper-white flex items-center justify-center text-[11px]">2</span>
+                    <span>Store a Key (<code className="font-mono">PUT /kv/:key</code>)</span>
+                  </div>
+                  <div className="pl-7">
+                    <CodeBlock
+                      code={`curl -X PUT "http://localhost:8080/kv/user:profile:1001" \\
   -H "Authorization: Bearer $DKV_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{"value":"{\\"name\\":\\"Alice\\",\\"role\\":\\"engineer\\"}"}'`}
-                    filename="quickstart-put.sh"
-                    id="quick-put"
-                    copiedSnippet={copiedSnippet}
-                    onCopy={handleCopy}
-                  />
-                  <p className="text-xs text-slate-gray mt-1">
-                    Response: <code className="font-mono text-[#1a7f37]">{`{"ok": true}`}</code>
-                  </p>
+                      filename="quickstart-put.sh"
+                      id="quick-put"
+                      copiedSnippet={copiedSnippet}
+                      onCopy={handleCopy}
+                    />
+                    <p className="text-xs text-slate-gray mt-1">
+                      Response: <code className="font-mono text-[#1a7f37]">{`{"ok": true}`}</code>
+                    </p>
+                  </div>
                 </div>
-              </div>
 
-              <div className="p-4 rounded-cards bg-paper-white border border-[#e4e4e6] space-y-2">
-                <div className="flex items-center gap-2 text-xs font-semibold text-ink-black">
-                  <span className="h-5 w-5 rounded-full bg-ink-black text-paper-white flex items-center justify-center text-[11px]">3</span>
-                  <span>Read back with Linearizability (<code className="font-mono">GET /kv/:key</code>)</span>
-                </div>
-                <div className="pl-7">
-                  <CodeBlock
-                    code={`curl -X GET "http://localhost:8080/kv/user:profile:1001" \\
+                <div className="p-4 rounded-cards bg-paper-white border border-[#e4e4e6] space-y-2">
+                  <div className="flex items-center gap-2 text-xs font-semibold text-ink-black">
+                    <span className="h-5 w-5 rounded-full bg-ink-black text-paper-white flex items-center justify-center text-[11px]">3</span>
+                    <span>Read back with Linearizability (<code className="font-mono">GET /kv/:key</code>)</span>
+                  </div>
+                  <div className="pl-7">
+                    <CodeBlock
+                      code={`curl -X GET "http://localhost:8080/kv/user:profile:1001" \\
   -H "Authorization: Bearer $DKV_KEY"`}
-                    filename="quickstart-get.sh"
-                    id="quick-get"
-                    copiedSnippet={copiedSnippet}
-                    onCopy={handleCopy}
-                  />
-                  <p className="text-xs text-slate-gray mt-1">
-                    Response: <code className="font-mono text-[#1a7f37]">{`{"value":"{\\"name\\":\\"Alice\\",\\"role\\":\\"engineer\\"}"}`}</code>
-                  </p>
+                      filename="quickstart-get.sh"
+                      id="quick-get"
+                      copiedSnippet={copiedSnippet}
+                      onCopy={handleCopy}
+                    />
+                    <p className="text-xs text-slate-gray mt-1">
+                      Response: <code className="font-mono text-[#1a7f37]">{`{"value":"{\\"name\\":\\"Alice\\",\\"role\\":\\"engineer\\"}"}`}</code>
+                    </p>
+                  </div>
                 </div>
               </div>
-            </div>
-          </section>
+            </section>
 
-          {/* SECTION: Authentication */}
-          <section id="auth" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
-            <h2 className="font-serif text-2xl sm:text-3xl text-ink-black font-normal">
-              Authentication & API Keys
-            </h2>
-            <p className="text-sm text-slate-gray leading-relaxed">
-              Every request to the data plane gateway must include your API key in the standard HTTP header:
-            </p>
+            {/* SECTION: Authentication */}
+            <section id="auth" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
+              <h2 className="font-serif text-2xl sm:text-3xl text-ink-black font-normal">
+                Authentication & API Keys
+              </h2>
+              <p className="text-sm text-slate-gray leading-relaxed">
+                Every request to the data plane gateway must include your API key in the standard HTTP header:
+              </p>
 
-            <div className="bg-mist-gray p-4 rounded-cards font-mono text-xs text-ink-black border border-[#e0e0e2]">
-              Authorization: Bearer dkv_live_&lt;KEY_SECRET&gt;
-            </div>
-
-            <div className="space-y-2 text-xs text-slate-gray leading-relaxed">
-              <div className="flex items-start gap-2">
-                <span className="font-bold text-ink-black shrink-0">• Key Format:</span>
-                <span>All live keys start with the prefix <code className="font-mono text-ink-black bg-mist-gray px-1 py-0.5 rounded">dkv_live_</code> followed by 64 hex characters.</span>
+              <div className="bg-mist-gray p-4 rounded-cards font-mono text-xs text-ink-black border border-[#e0e0e2]">
+                Authorization: Bearer dkv_live_&lt;KEY_SECRET&gt;
               </div>
-              <div className="flex items-start gap-2">
-                <span className="font-bold text-ink-black shrink-0">• Key Prefix ID:</span>
-                <span>The first 16 characters (e.g. <code className="font-mono text-ink-black bg-mist-gray px-1 py-0.5 rounded">dkv_live_317765c9</code>) serve as a public identifier for lookup and rotation, while the remainder is securely hashed with Argon2id.</span>
-              </div>
-              <div className="flex items-start gap-2">
-                <span className="font-bold text-ink-black shrink-0">• Security:</span>
-                <span>The full secret key is only shown once at creation time. If lost, rotate the key in the console or generate a replacement.</span>
-              </div>
-            </div>
-          </section>
 
-          {/* SECTION: PUT /kv/{key} */}
-          <section id="op-put" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
-            <div className="flex items-center gap-2">
-              <span className="px-2.5 py-1 rounded-md text-xs font-mono font-bold bg-[#1a7f37] text-paper-white">PUT</span>
-              <code className="text-base font-mono font-semibold text-ink-black">/kv/:key</code>
-            </div>
-            <p className="text-sm text-slate-gray leading-relaxed">
-              Stores or updates a string or serialized JSON payload for the specified key within your tenant partition. 
-              The request body must be a JSON object containing the required <code className="font-mono text-ink-black bg-mist-gray px-1 rounded">value</code> string field.
-            </p>
+              <div className="space-y-2 text-xs text-slate-gray leading-relaxed">
+                <div className="flex items-start gap-2">
+                  <span className="font-bold text-ink-black shrink-0">• Key Format:</span>
+                  <span>All live keys start with the prefix <code className="font-mono text-ink-black bg-mist-gray px-1 py-0.5 rounded">dkv_live_</code> followed by 64 hex characters.</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-bold text-ink-black shrink-0">• Key Prefix ID:</span>
+                  <span>The first 16 characters (e.g. <code className="font-mono text-ink-black bg-mist-gray px-1 py-0.5 rounded">dkv_live_317765c9</code>) serve as a public identifier for lookup and rotation, while the remainder is securely hashed with Argon2id.</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="font-bold text-ink-black shrink-0">• Security:</span>
+                  <span>The full secret key is only shown once at creation time. If lost, rotate the key in the console or generate a replacement.</span>
+                </div>
+              </div>
+            </section>
 
-            <div className="space-y-3">
-              <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">Request Body Schema</div>
-              <div className="bg-paper-white border border-[#e4e4e6] rounded-cards p-4 text-xs font-mono">
-                {`{
+            {/* SECTION: PUT /kv/{key} */}
+            <section id="op-put" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-1 rounded-md text-xs font-mono font-bold bg-[#1a7f37] text-paper-white">PUT</span>
+                <code className="text-base font-mono font-semibold text-ink-black">/kv/:key</code>
+              </div>
+              <p className="text-sm text-slate-gray leading-relaxed">
+                Stores or updates a string or serialized JSON payload for the specified key within your tenant partition.
+                The request body must be a JSON object containing the required <code className="font-mono text-ink-black bg-mist-gray px-1 rounded">value</code> string field.
+              </p>
+
+              <div className="space-y-3">
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">Request Body Schema</div>
+                <div className="bg-paper-white border border-[#e4e4e6] rounded-cards p-4 text-xs font-mono">
+                  {`{
   "value": string   // Required. String, JSON text, or base64 binary (max 1MB)
 }`}
+                </div>
               </div>
-            </div>
 
-            <div className="space-y-3">
-              <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">cURL Example</div>
-              <CodeBlock
-                code={`curl -X PUT "http://localhost:8080/kv/cache:session:402" \\
+              <div className="space-y-3">
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">cURL Example</div>
+                <CodeBlock
+                  code={`curl -X PUT "http://localhost:8080/kv/cache:session:402" \\
   -H "Authorization: Bearer $DKV_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{"value":"{\\"user_id\\":\\"usr_99\\",\\"role\\":\\"admin\\"}"}'`}
-                filename="put-record.sh"
-                id="op-put-curl"
-                copiedSnippet={copiedSnippet}
-                onCopy={handleCopy}
-              />
-            </div>
+                  filename="put-record.sh"
+                  id="op-put-curl"
+                  copiedSnippet={copiedSnippet}
+                  onCopy={handleCopy}
+                />
+              </div>
 
-            <div className="p-3 bg-mist-gray rounded-[12px] text-xs text-slate-gray flex items-center justify-between">
-              <span>Success Response: <code className="text-ink-black font-mono">200 OK</code></span>
-              <code className="font-mono text-[#1a7f37]">{`{"ok": true}`}</code>
-            </div>
-          </section>
+              <div className="p-3 bg-mist-gray rounded-[12px] text-xs text-slate-gray flex items-center justify-between">
+                <span>Success Response: <code className="text-ink-black font-mono">200 OK</code></span>
+                <code className="font-mono text-[#1a7f37]">{`{"ok": true}`}</code>
+              </div>
+            </section>
 
-          {/* SECTION: GET /kv/{key} */}
-          <section id="op-get" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
-            <div className="flex items-center gap-2">
-              <span className="px-2.5 py-1 rounded-md text-xs font-mono font-bold bg-[#0969da] text-paper-white">GET</span>
-              <code className="text-base font-mono font-semibold text-ink-black">/kv/:key</code>
-            </div>
-            <p className="text-sm text-slate-gray leading-relaxed">
-              Retrieves the stored value for <code className="font-mono text-xs bg-mist-gray px-1 rounded">:key</code>.
-              Reads are strictly linearizable through the Raft leader quorum, guaranteeing that stale reads never occur.
-            </p>
+            {/* SECTION: GET /kv/{key} */}
+            <section id="op-get" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-1 rounded-md text-xs font-mono font-bold bg-[#0969da] text-paper-white">GET</span>
+                <code className="text-base font-mono font-semibold text-ink-black">/kv/:key</code>
+              </div>
+              <p className="text-sm text-slate-gray leading-relaxed">
+                Retrieves the stored value for <code className="font-mono text-xs bg-mist-gray px-1 rounded">:key</code>.
+                Reads are strictly linearizable through the Raft leader quorum, guaranteeing that stale reads never occur.
+              </p>
 
-            <div className="space-y-3">
-              <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">cURL Example</div>
-              <CodeBlock
-                code={`curl -X GET "http://localhost:8080/kv/cache:session:402" \\
+              <div className="space-y-3">
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">cURL Example</div>
+                <CodeBlock
+                  code={`curl -X GET "http://localhost:8080/kv/cache:session:402" \\
   -H "Authorization: Bearer $DKV_KEY"`}
-                filename="get-record.sh"
-                id="op-get-curl"
-                copiedSnippet={copiedSnippet}
-                onCopy={handleCopy}
-              />
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-              <div className="p-3 bg-mist-gray rounded-[12px]">
-                <div className="text-slate-gray font-semibold mb-1">Found: 200 OK</div>
-                <code className="font-mono text-[#1a7f37]">{`{"value": "{\\"user_id\\":\\"usr_99\\"}"}`}</code>
+                  filename="get-record.sh"
+                  id="op-get-curl"
+                  copiedSnippet={copiedSnippet}
+                  onCopy={handleCopy}
+                />
               </div>
-              <div className="p-3 bg-mist-gray rounded-[12px]">
-                <div className="text-slate-gray font-semibold mb-1">Missing: 404 Not Found</div>
-                <code className="font-mono text-[#cf222e]">{`{"error": {"code": "not_found"}}`}</code>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                <div className="p-3 bg-mist-gray rounded-[12px]">
+                  <div className="text-slate-gray font-semibold mb-1">Found: 200 OK</div>
+                  <code className="font-mono text-[#1a7f37]">{`{"value": "{\\"user_id\\":\\"usr_99\\"}"}`}</code>
+                </div>
+                <div className="p-3 bg-mist-gray rounded-[12px]">
+                  <div className="text-slate-gray font-semibold mb-1">Missing: 404 Not Found</div>
+                  <code className="font-mono text-[#cf222e]">{`{"error": {"code": "not_found"}}`}</code>
+                </div>
               </div>
-            </div>
-          </section>
+            </section>
 
-          {/* SECTION: POST /kv (Atomic CAS) */}
-          <section id="op-cas" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
-            <div className="flex items-center gap-2">
-              <span className="px-2.5 py-1 rounded-md text-xs font-mono font-bold bg-[#8250df] text-paper-white">POST</span>
-              <code className="text-base font-mono font-semibold text-ink-black">/kv (Atomic Compare-and-Swap)</code>
-            </div>
-            <p className="text-sm text-slate-gray leading-relaxed">
-              Performs atomic compare-and-swap (CAS) updates for distributed locks, state transitions, and concurrency control. 
-              The update only succeeds if the current value matches <code className="font-mono text-xs bg-mist-gray px-1 rounded">expected</code>. 
-              If <code className="font-mono text-xs bg-mist-gray px-1 rounded">expected</code> is omitted or null, the operation succeeds only if the key does not already exist (insert-if-absent).
-            </p>
+            {/* SECTION: POST /kv (Atomic CAS) */}
+            <section id="op-cas" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-1 rounded-md text-xs font-mono font-bold bg-[#8250df] text-paper-white">POST</span>
+                <code className="text-base font-mono font-semibold text-ink-black">/kv (Atomic Compare-and-Swap)</code>
+              </div>
+              <p className="text-sm text-slate-gray leading-relaxed">
+                Performs atomic compare-and-swap (CAS) updates for distributed locks, state transitions, and concurrency control.
+                The update only succeeds if the current value matches <code className="font-mono text-xs bg-mist-gray px-1 rounded">expected</code>.
+                If <code className="font-mono text-xs bg-mist-gray px-1 rounded">expected</code> is omitted or null, the operation succeeds only if the key does not already exist (insert-if-absent).
+              </p>
 
-            <div className="space-y-3">
-              <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">Request Body Schema</div>
-              <CodeBlock
-                code={`{
+              <div className="space-y-3">
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">Request Body Schema</div>
+                <CodeBlock
+                  code={`{
   "op": "cas",
   "key": "lock:cron_job",
   "expected": "idle",       // Omit or null to mean "only if key does not exist"
   "value": "running"        // The new value to set on match
 }`}
-                filename="cas-schema.json"
-                id="cas-schema"
-                copiedSnippet={copiedSnippet}
-                onCopy={handleCopy}
-              />
-            </div>
+                  filename="cas-schema.json"
+                  id="cas-schema"
+                  copiedSnippet={copiedSnippet}
+                  onCopy={handleCopy}
+                />
+              </div>
 
-            <div className="space-y-3">
-              <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">cURL Example</div>
-              <CodeBlock
-                code={`curl -X POST "http://localhost:8080/kv" \\
+              <div className="space-y-3">
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">cURL Example</div>
+                <CodeBlock
+                  code={`curl -X POST "http://localhost:8080/kv" \\
   -H "Authorization: Bearer $DKV_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{"op":"cas","key":"lock:cron_job","expected":"idle","value":"running"}'`}
-                filename="cas-request.sh"
-                id="op-cas-curl"
-                copiedSnippet={copiedSnippet}
-                onCopy={handleCopy}
-              />
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-              <div className="p-3 bg-mist-gray rounded-[12px]">
-                <div className="text-slate-gray font-semibold mb-1">Match Success: 200 OK</div>
-                <code className="font-mono text-[#1a7f37]">{`{"ok": true}`}</code>
+                  filename="cas-request.sh"
+                  id="op-cas-curl"
+                  copiedSnippet={copiedSnippet}
+                  onCopy={handleCopy}
+                />
               </div>
-              <div className="p-3 bg-mist-gray rounded-[12px]">
-                <div className="text-slate-gray font-semibold mb-1">Mismatch: 409 Conflict</div>
-                <code className="font-mono text-[#cf222e]">{`{"error": {"code": "cas_failed"}}`}</code>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                <div className="p-3 bg-mist-gray rounded-[12px]">
+                  <div className="text-slate-gray font-semibold mb-1">Match Success: 200 OK</div>
+                  <code className="font-mono text-[#1a7f37]">{`{"ok": true}`}</code>
+                </div>
+                <div className="p-3 bg-mist-gray rounded-[12px]">
+                  <div className="text-slate-gray font-semibold mb-1">Mismatch: 409 Conflict</div>
+                  <code className="font-mono text-[#cf222e]">{`{"error": {"code": "cas_failed"}}`}</code>
+                </div>
               </div>
-            </div>
-          </section>
+            </section>
 
-          {/* SECTION: Atomic Counters */}
-          <section id="op-counters" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
-            <div className="flex items-center gap-2">
-              <span className="px-2.5 py-1 rounded-md text-xs font-mono font-bold bg-[#8250df] text-paper-white">POST</span>
-              <code className="text-base font-mono font-semibold text-ink-black">/kv (Atomic Increment / Decrement)</code>
-            </div>
-            <p className="text-sm text-slate-gray leading-relaxed">
-              Atomically increments or decrements an integer counter key with zero locking overhead.
-            </p>
+            {/* SECTION: Atomic Counters */}
+            <section id="op-counters" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-1 rounded-md text-xs font-mono font-bold bg-[#8250df] text-paper-white">POST</span>
+                <code className="text-base font-mono font-semibold text-ink-black">/kv (Atomic Increment / Decrement)</code>
+              </div>
+              <p className="text-sm text-slate-gray leading-relaxed">
+                Atomically increments or decrements an integer counter key with zero locking overhead.
+              </p>
 
-            <CodeBlock
-              code={`# Atomic Increment by 5
+              <CodeBlock
+                code={`# Atomic Increment by 5
 curl -X POST "http://localhost:8080/kv" \\
   -H "Authorization: Bearer $DKV_KEY" \\
   -H "Content-Type: application/json" \\
@@ -827,56 +922,56 @@ curl -X POST "http://localhost:8080/kv" \\
   -H "Authorization: Bearer $DKV_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{"op":"decr","key":"inventory:seats_left","delta":1}'`}
-              filename="counter-ops.sh"
-              id="op-counter-curl"
-              copiedSnippet={copiedSnippet}
-              onCopy={handleCopy}
-            />
-          </section>
+                filename="counter-ops.sh"
+                id="op-counter-curl"
+                copiedSnippet={copiedSnippet}
+                onCopy={handleCopy}
+              />
+            </section>
 
-          {/* SECTION: DELETE /kv/{key} */}
-          <section id="op-delete" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
-            <div className="flex items-center gap-2">
-              <span className="px-2.5 py-1 rounded-md text-xs font-mono font-bold bg-[#cf222e] text-paper-white">DELETE</span>
-              <code className="text-base font-mono font-semibold text-ink-black">/kv/:key</code>
-            </div>
-            <p className="text-sm text-slate-gray leading-relaxed">
-              Evicts the specified key. Returns <code className="font-mono text-xs bg-mist-gray px-1 rounded">204 No Content</code> on success (idempotent; deleting an absent key also returns 204).
-            </p>
+            {/* SECTION: DELETE /kv/{key} */}
+            <section id="op-delete" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-1 rounded-md text-xs font-mono font-bold bg-[#cf222e] text-paper-white">DELETE</span>
+                <code className="text-base font-mono font-semibold text-ink-black">/kv/:key</code>
+              </div>
+              <p className="text-sm text-slate-gray leading-relaxed">
+                Evicts the specified key. Returns <code className="font-mono text-xs bg-mist-gray px-1 rounded">204 No Content</code> on success (idempotent; deleting an absent key also returns 204).
+              </p>
 
-            <CodeBlock
-              code={`curl -X DELETE "http://localhost:8080/kv/cache:session:402" \\
+              <CodeBlock
+                code={`curl -X DELETE "http://localhost:8080/kv/cache:session:402" \\
   -H "Authorization: Bearer $DKV_KEY"`}
-              filename="delete-key.sh"
-              id="op-del-curl"
-              copiedSnippet={copiedSnippet}
-              onCopy={handleCopy}
-            />
-          </section>
+                filename="delete-key.sh"
+                id="op-del-curl"
+                copiedSnippet={copiedSnippet}
+                onCopy={handleCopy}
+              />
+            </section>
 
-          {/* SECTION: GET /v1/usage */}
-          <section id="op-usage" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
-            <div className="flex items-center gap-2">
-              <span className="px-2.5 py-1 rounded-md text-xs font-mono font-bold bg-[#0969da] text-paper-white">GET</span>
-              <code className="text-base font-mono font-semibold text-ink-black">/v1/usage (Live Telemetry)</code>
-            </div>
-            <p className="text-sm text-slate-gray leading-relaxed">
-              Returns real-time telemetry counters for your tenant since gateway initialization.
-              <strong>With durable analytics enabled, this data persists across gateway restarts</strong> — 
-              counters are flushed to hourly SQLite buckets and survive gateway restarts.
-            </p>
+            {/* SECTION: GET /v1/usage */}
+            <section id="op-usage" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-1 rounded-md text-xs font-mono font-bold bg-[#0969da] text-paper-white">GET</span>
+                <code className="text-base font-mono font-semibold text-ink-black">/v1/usage (Live Telemetry)</code>
+              </div>
+              <p className="text-sm text-slate-gray leading-relaxed">
+                Returns real-time telemetry counters for your tenant since gateway initialization.
+                <strong>With durable analytics enabled, this data persists across gateway restarts</strong> —
+                counters are flushed to hourly SQLite buckets and survive gateway restarts.
+              </p>
 
-            <CodeBlock
-              code={`curl -X GET "http://localhost:8080/v1/usage" \\
+              <CodeBlock
+                code={`curl -X GET "http://localhost:8080/v1/usage" \\
   -H "Authorization: Bearer $DKV_KEY"`}
-              filename="get-telemetry.sh"
-              id="op-usage-curl"
-              copiedSnippet={copiedSnippet}
-              onCopy={handleCopy}
-            />
+                filename="get-telemetry.sh"
+                id="op-usage-curl"
+                copiedSnippet={copiedSnippet}
+                onCopy={handleCopy}
+              />
 
-            <CodeBlock
-              code={`{
+              <CodeBlock
+                code={`{
   "since": "2026-10-02T12:25:26Z",
   "requests": 1420,
   "by_op": { "get": 980, "put": 310, "cas": 85, "delete": 45 },
@@ -884,32 +979,32 @@ curl -X POST "http://localhost:8080/kv" \\
   "rate_limited": 10,
   "concurrency_limited": 0
 }`}
-              filename="telemetry-response.json"
-              id="telemetry-json"
-              copiedSnippet={copiedSnippet}
-              onCopy={handleCopy}
-            />
-          </section>
+                filename="telemetry-response.json"
+                id="telemetry-json"
+                copiedSnippet={copiedSnippet}
+                onCopy={handleCopy}
+              />
+            </section>
 
-          {/* SECTION: GET /tenant/usage/series (Time-Series Analytics) */}
-          <section id="op-usage-series" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
-            <div className="flex items-center gap-2">
-              <span className="px-2.5 py-1 rounded-md text-xs font-mono font-bold bg-[#0969da] text-paper-white">GET</span>
-              <code className="text-base font-mono font-semibold text-ink-black">/tenant/usage/series</code>
-            </div>
-            <p className="text-sm text-slate-gray leading-relaxed">
-              Returns a zero-filled time-series of usage metrics for charting. 
-              Data is sourced from hourly SQLite buckets and survives gateway restarts.
-              Supports <code className="font-mono text-xs bg-mist-gray px-1 rounded">range</code> parameter:
-              <code className="font-mono text-xs bg-mist-gray px-1 rounded">24h</code> (hourly), 
-              <code className="font-mono text-xs bg-mist-gray px-1 rounded">7d</code> (daily), 
-              <code className="font-mono text-xs bg-mist-gray px-1 rounded">30d</code> (daily).
-            </p>
+            {/* SECTION: GET /tenant/usage/series (Time-Series Analytics) */}
+            <section id="op-usage-series" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-1 rounded-md text-xs font-mono font-bold bg-[#0969da] text-paper-white">GET</span>
+                <code className="text-base font-mono font-semibold text-ink-black">/tenant/usage/series</code>
+              </div>
+              <p className="text-sm text-slate-gray leading-relaxed">
+                Returns a zero-filled time-series of usage metrics for charting.
+                Data is sourced from hourly SQLite buckets and survives gateway restarts.
+                Supports <code className="font-mono text-xs bg-mist-gray px-1 rounded">range</code> parameter:
+                <code className="font-mono text-xs bg-mist-gray px-1 rounded">24h</code> (hourly),
+                <code className="font-mono text-xs bg-mist-gray px-1 rounded">7d</code> (daily),
+                <code className="font-mono text-xs bg-mist-gray px-1 rounded">30d</code> (daily).
+              </p>
 
-            <div className="space-y-3">
-              <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">cURL Examples</div>
-              <CodeBlock
-                code={`# 24h hourly series (default)
+              <div className="space-y-3">
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">cURL Examples</div>
+                <CodeBlock
+                  code={`# 24h hourly series (default)
 curl -X GET "http://localhost:8080/tenant/usage/series" \\
   -H "Authorization: Bearer $DKV_KEY"
 
@@ -920,17 +1015,17 @@ curl -X GET "http://localhost:8080/tenant/usage/series?range=7d" \\
 # 30d daily series
 curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
   -H "Authorization: Bearer $DKV_KEY"`}
-                filename="get-usage-series.sh"
-                id="op-usage-series-curl"
-                copiedSnippet={copiedSnippet}
-                onCopy={handleCopy}
-              />
-            </div>
+                  filename="get-usage-series.sh"
+                  id="op-usage-series-curl"
+                  copiedSnippet={copiedSnippet}
+                  onCopy={handleCopy}
+                />
+              </div>
 
-            <div className="space-y-3">
-              <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">24h Hourly Response</div>
-              <CodeBlock
-                code={`{
+              <div className="space-y-3">
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">24h Hourly Response</div>
+                <CodeBlock
+                  code={`{
   "tenant_id": "acme-corp",
   "series": {
     "range": "24h",
@@ -941,16 +1036,16 @@ curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
       { "t": "2026-10-01T14:00:00Z", "requests": 98, "by_op": { "get": 60, "put": 38 }, "rate_limited": 0, "concurrency_limited": 0 }
     ]
   }`}
-                filename="usage-series-24h.json"
-                id="usage-series-24h"
-                copiedSnippet={copiedSnippet}
-                onCopy={handleCopy}
-              />
+                  filename="usage-series-24h.json"
+                  id="usage-series-24h"
+                  copiedSnippet={copiedSnippet}
+                  onCopy={handleCopy}
+                />
 
-              <div className="space-y-3">
-                <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">7d Daily Response</div>
-                <CodeBlock
-                  code={`{
+                <div className="space-y-3">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">7d Daily Response</div>
+                  <CodeBlock
+                    code={`{
   "tenant_id": "acme-corp",
   "series": {
     "range": "7d",
@@ -960,276 +1055,273 @@ curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
       { "t": "2026-09-26T00:00:00Z", "requests": 3124, "by_op": { "get": 2010, "put": 1114 }, "rate_limited": 8, "concurrency_limited": 1 }
     ]
   }`}
-                filename="usage-series-7d.json"
-                id="usage-series-7d"
-                copiedSnippet={copiedSnippet}
-                onCopy={handleCopy}
-              />
-            </div>
-          </div>
-          </section>
-
-          {/* SECTION: Language SDKs */}
-          <section id="sdk-hub" className="space-y-6 scroll-mt-20 pt-6 border-t border-[#ececec]">
-            {/* Anchors for sidebar bookmarks and direct URL hashes */}
-            <div id="sdk-curl" className="scroll-mt-24" />
-            <div id="sdk-ts" className="scroll-mt-24" />
-            <div id="sdk-python" className="scroll-mt-24" />
-            <div id="sdk-go" className="scroll-mt-24" />
-            <div id="sdk-java" className="scroll-mt-24" />
-            <div id="sdk-rust" className="scroll-mt-24" />
-            <div id="sdk-php" className="scroll-mt-24" />
-
-            <div>
-              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-mist-gray text-ink-black text-xs font-semibold mb-2">
-                <CodeBracketIcon className="h-3.5 w-3.5" />
-                <span>Production Language Guides</span>
+                    filename="usage-series-7d.json"
+                    id="usage-series-7d"
+                    copiedSnippet={copiedSnippet}
+                    onCopy={handleCopy}
+                  />
+                </div>
               </div>
-              <h2 className="font-serif text-3xl sm:text-4xl text-ink-black font-normal">
-                Complete Language Implementations
-              </h2>
-              <p className="text-sm text-slate-gray mt-2 leading-relaxed">
-                Production-ready, copy-pasteable client code for all major backend environments. Select your language below to inspect installation instructions, quick usage examples, and full drop-in client classes:
-              </p>
-            </div>
+            </section>
 
-            {/* Language Selector Pills */}
-            <div className="flex items-center gap-2 overflow-x-auto pb-2 border-b border-[#e5e5e7]">
-              {SDK_LANGUAGES.map((lang) => {
-                const isActive = selectedSdk === lang.id
-                return (
-                  <button
-                    key={lang.id}
-                    type="button"
-                    onClick={() => setSelectedSdk(lang.id)}
-                    className={`px-3.5 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-all flex items-center gap-1.5 ${
-                      isActive
+            {/* SECTION: Language SDKs */}
+            <section id="sdk-hub" className="space-y-6 scroll-mt-20 pt-6 border-t border-[#ececec]">
+              {/* Anchors for sidebar bookmarks and direct URL hashes */}
+              <div id="sdk-curl" className="scroll-mt-24" />
+              <div id="sdk-ts" className="scroll-mt-24" />
+              <div id="sdk-python" className="scroll-mt-24" />
+              <div id="sdk-go" className="scroll-mt-24" />
+              <div id="sdk-java" className="scroll-mt-24" />
+              <div id="sdk-rust" className="scroll-mt-24" />
+              <div id="sdk-php" className="scroll-mt-24" />
+
+              <div>
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-mist-gray text-ink-black text-xs font-semibold mb-2">
+                  <CodeBracketIcon className="h-3.5 w-3.5" />
+                  <span>Production Language Guides</span>
+                </div>
+                <h2 className="font-serif text-3xl sm:text-4xl text-ink-black font-normal">
+                  Complete Language Implementations
+                </h2>
+                <p className="text-sm text-slate-gray mt-2 leading-relaxed">
+                  Production-ready, copy-pasteable client code for all major backend environments. Select your language below to inspect installation instructions, quick usage examples, and full drop-in client classes:
+                </p>
+              </div>
+
+              {/* Language Selector Pills */}
+              <div className="flex items-center gap-2 overflow-x-auto pb-2 border-b border-[#e5e5e7]">
+                {SDK_LANGUAGES.map((lang) => {
+                  const isActive = selectedSdk === lang.id
+                  return (
+                    <button
+                      key={lang.id}
+                      type="button"
+                      onClick={() => setSelectedSdk(lang.id)}
+                      className={`px-3.5 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-all flex items-center gap-1.5 ${isActive
                         ? 'bg-ink-black text-paper-white shadow-sm'
                         : 'bg-mist-gray text-slate-gray hover:text-ink-black hover:bg-[#e4e4e6]'
-                    }`}
-                  >
-                    <span>{lang.pill}</span>
-                  </button>
-                )
-              })}
-            </div>
-
-            {/* Active Language Content Card */}
-            {(() => {
-              const current = SDK_LANGUAGES.find((l) => l.id === selectedSdk) || SDK_LANGUAGES[0]
-              const fullCode =
-                current.id === 'ts'
-                  ? tsExample
-                  : current.id === 'python'
-                  ? pythonExample
-                  : current.id === 'go'
-                  ? goExample
-                  : current.id === 'java'
-                  ? javaExample
-                  : current.id === 'rust'
-                  ? rustExample
-                  : current.id === 'php'
-                  ? phpExample
-                  : curlExample
-
-              const snippetCode = quickSnippets[current.id] || fullCode
-
-              return (
-                <div className="bg-paper-white border border-[#e4e4e6] rounded-cards p-6 space-y-6 shadow-sm">
-                  {/* Header info */}
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-[#ececec]">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <h3 className="font-serif text-2xl font-normal text-ink-black">{current.name}</h3>
-                        <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-mist-gray text-slate-gray font-medium">
-                          {current.badge}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-gray mt-1">Runtime target: {current.runtime}</p>
-                    </div>
-
-                    {/* Code mode toggle */}
-                    <div className="inline-flex items-center p-1 bg-mist-gray rounded-[10px] text-xs self-start sm:self-auto">
-                      <button
-                        type="button"
-                        onClick={() => setSdkTab('walkthrough')}
-                        className={`px-3 py-1 rounded-[8px] font-medium transition-all ${
-                          sdkTab === 'walkthrough'
-                            ? 'bg-paper-white text-ink-black shadow-xs'
-                            : 'text-slate-gray hover:text-ink-black'
                         }`}
-                      >
-                        ⚡️ Quick Usage (10 lines)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setSdkTab('full')}
-                        className={`px-3 py-1 rounded-[8px] font-medium transition-all ${
-                          sdkTab === 'full'
-                            ? 'bg-paper-white text-ink-black shadow-xs'
-                            : 'text-slate-gray hover:text-ink-black'
-                        }`}
-                      >
-                        📦 Full Client File ({current.filename})
-                      </button>
-                    </div>
-                  </div>
+                    >
+                      <span>{lang.pill}</span>
+                    </button>
+                  )
+                })}
+              </div>
 
-                  {/* Installation Banner */}
-                  {current.installCmd && (
-                    <div className="space-y-1.5">
-                      <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-gray">
-                        {current.installLabel || 'Installation / Dependency'}
+              {/* Active Language Content Card */}
+              {(() => {
+                const current = SDK_LANGUAGES.find((l) => l.id === selectedSdk) || SDK_LANGUAGES[0]
+                const fullCode =
+                  current.id === 'ts'
+                    ? tsExample
+                    : current.id === 'python'
+                      ? pythonExample
+                      : current.id === 'go'
+                        ? goExample
+                        : current.id === 'java'
+                          ? javaExample
+                          : current.id === 'rust'
+                            ? rustExample
+                            : current.id === 'php'
+                              ? phpExample
+                              : curlExample
+
+                const snippetCode = quickSnippets[current.id] || fullCode
+
+                return (
+                  <div className="bg-paper-white border border-[#e4e4e6] rounded-cards p-6 space-y-6 shadow-sm">
+                    {/* Header info */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-[#ececec]">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h3 className="font-serif text-2xl font-normal text-ink-black">{current.name}</h3>
+                          <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-mist-gray text-slate-gray font-medium">
+                            {current.badge}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-gray mt-1">Runtime target: {current.runtime}</p>
                       </div>
-                      <div className="flex items-center justify-between bg-mist-gray px-3.5 py-2.5 rounded-[12px] border border-[#e2e2e4] text-xs font-mono">
-                        <span className="text-ink-black truncate">{current.installCmd}</span>
+
+                      {/* Code mode toggle */}
+                      <div className="inline-flex items-center p-1 bg-mist-gray rounded-[10px] text-xs self-start sm:self-auto">
                         <button
                           type="button"
-                          onClick={() => handleCopy(current.installCmd!, `install-${current.id}`)}
-                          className="shrink-0 ml-3 text-slate-gray hover:text-ink-black text-xs font-sans flex items-center gap-1 bg-paper-white px-2 py-1 rounded border border-[#d8d8dc]"
+                          onClick={() => setSdkTab('walkthrough')}
+                          className={`px-3 py-1 rounded-[8px] font-medium transition-all ${sdkTab === 'walkthrough'
+                            ? 'bg-paper-white text-ink-black shadow-xs'
+                            : 'text-slate-gray hover:text-ink-black'
+                            }`}
                         >
-                          {copiedSnippet === `install-${current.id}` ? (
-                            <>
-                              <CheckIcon className="h-3 w-3 text-emerald-600" />
-                              <span className="text-emerald-600 text-[11px]">Copied</span>
-                            </>
-                          ) : (
-                            <>
-                              <ClipboardDocumentIcon className="h-3 w-3" />
-                              <span className="text-[11px]">Copy</span>
-                            </>
-                          )}
+                          ⚡️ Quick Usage (10 lines)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSdkTab('full')}
+                          className={`px-3 py-1 rounded-[8px] font-medium transition-all ${sdkTab === 'full'
+                            ? 'bg-paper-white text-ink-black shadow-xs'
+                            : 'text-slate-gray hover:text-ink-black'
+                            }`}
+                        >
+                          📦 Full Client File ({current.filename})
                         </button>
                       </div>
                     </div>
-                  )}
 
-                  {/* Code Block Container */}
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-gray">
-                        {sdkTab === 'walkthrough' ? 'Usage Walkthrough' : `Complete Source Code (${current.filename})`}
-                      </div>
-                      <span className="text-[11px] text-slate-gray font-mono">
-                        {sdkTab === 'walkthrough' ? 'Ready to execute' : 'Complete drop-in module'}
-                      </span>
-                    </div>
-
-                    <CodeBlock
-                      code={sdkTab === 'walkthrough' ? snippetCode : fullCode}
-                      filename={sdkTab === 'walkthrough' ? `example.${current.id === 'ts' ? 'ts' : current.id === 'python' ? 'py' : current.id === 'go' ? 'go' : current.id === 'java' ? 'java' : current.id === 'rust' ? 'rs' : current.id === 'php' ? 'php' : 'sh'}` : current.filename}
-                      id={`sdk-${current.id}-${sdkTab}`}
-                      copiedSnippet={copiedSnippet}
-                      onCopy={handleCopy}
-                    />
-                  </div>
-
-                  {/* Highlights / Features Checklist */}
-                  <div className="space-y-2 pt-2 border-t border-[#ececec]">
-                    <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-gray">
-                      Client Architecture & Guarantees
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                      {current.highlights.map((h, i) => (
-                        <div key={i} className="p-3 bg-mist-gray/60 rounded-[12px] text-xs flex items-start gap-2">
-                          <CheckIcon className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
-                          <span className="text-ink-black font-medium leading-relaxed">{h}</span>
+                    {/* Installation Banner */}
+                    {current.installCmd && (
+                      <div className="space-y-1.5">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-gray">
+                          {current.installLabel || 'Installation / Dependency'}
                         </div>
-                      ))}
+                        <div className="flex items-center justify-between bg-mist-gray px-3.5 py-2.5 rounded-[12px] border border-[#e2e2e4] text-xs font-mono">
+                          <span className="text-ink-black truncate">{current.installCmd}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleCopy(current.installCmd!, `install-${current.id}`)}
+                            className="shrink-0 ml-3 text-slate-gray hover:text-ink-black text-xs font-sans flex items-center gap-1 bg-paper-white px-2 py-1 rounded border border-[#d8d8dc]"
+                          >
+                            {copiedSnippet === `install-${current.id}` ? (
+                              <>
+                                <CheckIcon className="h-3 w-3 text-emerald-600" />
+                                <span className="text-emerald-600 text-[11px]">Copied</span>
+                              </>
+                            ) : (
+                              <>
+                                <ClipboardDocumentIcon className="h-3 w-3" />
+                                <span className="text-[11px]">Copy</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Code Block Container */}
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-gray">
+                          {sdkTab === 'walkthrough' ? 'Usage Walkthrough' : `Complete Source Code (${current.filename})`}
+                        </div>
+                        <span className="text-[11px] text-slate-gray font-mono">
+                          {sdkTab === 'walkthrough' ? 'Ready to execute' : 'Complete drop-in module'}
+                        </span>
+                      </div>
+
+                      <CodeBlock
+                        code={sdkTab === 'walkthrough' ? snippetCode : fullCode}
+                        filename={sdkTab === 'walkthrough' ? `example.${current.id === 'ts' ? 'ts' : current.id === 'python' ? 'py' : current.id === 'go' ? 'go' : current.id === 'java' ? 'java' : current.id === 'rust' ? 'rs' : current.id === 'php' ? 'php' : 'sh'}` : current.filename}
+                        id={`sdk-${current.id}-${sdkTab}`}
+                        copiedSnippet={copiedSnippet}
+                        onCopy={handleCopy}
+                      />
+                    </div>
+
+                    {/* Highlights / Features Checklist */}
+                    <div className="space-y-2 pt-2 border-t border-[#ececec]">
+                      <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-gray">
+                        Client Architecture & Guarantees
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        {current.highlights.map((h, i) => (
+                          <div key={i} className="p-3 bg-mist-gray/60 rounded-[12px] text-xs flex items-start gap-2">
+                            <CheckIcon className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
+                            <span className="text-ink-black font-medium leading-relaxed">{h}</span>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   </div>
-                </div>
-              )
-            })()}
-          </section>
+                )
+              })()}
+            </section>
 
-          {/* SECTION: Rate Limits & Reliability */}
-          <section id="rate-limits" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
-            <h2 className="font-serif text-2xl sm:text-3xl text-ink-black font-normal">
-              Rate Limiting & 429 Drops
-            </h2>
-            <p className="text-sm text-slate-gray leading-relaxed">
-              DistriKV enforces hardware-isolated token-bucket rate limiting per tenant. Each tenant has two quota parameters:
-            </p>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-              <div className="p-4 bg-mist-gray rounded-cards">
-                <span className="font-semibold text-ink-black block">Sustained RPS Quota</span>
-                <span className="text-slate-gray mt-1 block">Maximum sustained queries per second allowed continuously. Tokens refill steadily every millisecond.</span>
-              </div>
-              <div className="p-4 bg-mist-gray rounded-cards">
-                <span className="font-semibold text-ink-black block">Burst Allowance</span>
-                <span className="text-slate-gray mt-1 block">Maximum instantaneous burst capacity absorbed before dropping excess queries with HTTP 429.</span>
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">Recommended Client Retry Pattern</div>
-              <p className="text-xs text-slate-gray leading-relaxed">
-                When encountering <code className="font-mono text-ink-black bg-mist-gray px-1 rounded">429 Too Many Requests</code>, 
-                clients should employ exponential backoff with jitter (e.g. 50ms, 100ms, 200ms + random offset) rather than hard failure.
+            {/* SECTION: Rate Limits & Reliability */}
+            <section id="rate-limits" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
+              <h2 className="font-serif text-2xl sm:text-3xl text-ink-black font-normal">
+                Rate Limiting & 429 Drops
+              </h2>
+              <p className="text-sm text-slate-gray leading-relaxed">
+                DistriKV enforces hardware-isolated token-bucket rate limiting per tenant. Each tenant has two quota parameters:
               </p>
-            </div>
-          </section>
 
-          {/* SECTION: Error Codes Reference */}
-          <section id="errors" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
-            <h2 className="font-serif text-2xl sm:text-3xl text-ink-black font-normal">
-              Error Codes & Diagnostics
-            </h2>
-            <p className="text-sm text-slate-gray leading-relaxed">
-              All error responses follow the standard JSON format: <code className="font-mono text-xs">{`{"error": {"code": "...", "message": "..."}}`}</code>.
-            </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                <div className="p-4 bg-mist-gray rounded-cards">
+                  <span className="font-semibold text-ink-black block">Sustained RPS Quota</span>
+                  <span className="text-slate-gray mt-1 block">Maximum sustained queries per second allowed continuously. Tokens refill steadily every millisecond.</span>
+                </div>
+                <div className="p-4 bg-mist-gray rounded-cards">
+                  <span className="font-semibold text-ink-black block">Burst Allowance</span>
+                  <span className="text-slate-gray mt-1 block">Maximum instantaneous burst capacity absorbed before dropping excess queries with HTTP 429.</span>
+                </div>
+              </div>
 
-            <div className="bg-paper-white border border-[#e5e5e7] rounded-cards overflow-hidden">
-              <table className="w-full text-left text-xs border-collapse">
-                <thead>
-                  <tr className="border-b border-[#ececec] bg-fog-white/60 uppercase tracking-wider text-slate-gray font-medium">
-                    <th className="py-3 px-4">HTTP Status</th>
-                    <th className="py-3 px-4">Error Code</th>
-                    <th className="py-3 px-4">Description & Resolution</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#ececec]">
-                  <tr>
-                    <td className="py-3 px-4 font-mono font-bold text-red-600">400 Bad Request</td>
-                    <td className="py-3 px-4 font-mono font-semibold">invalid_key</td>
-                    <td className="py-3 px-4 text-slate-gray">Key contains illegal characters or exceeds maximum allowed length (1024 bytes).</td>
-                  </tr>
-                  <tr>
-                    <td className="py-3 px-4 font-mono font-bold text-red-600">400 Bad Request</td>
-                    <td className="py-3 px-4 font-mono font-semibold">value_required</td>
-                    <td className="py-3 px-4 text-slate-gray">The request body is missing the required "value" string field.</td>
-                  </tr>
-                  <tr>
-                    <td className="py-3 px-4 font-mono font-bold text-red-600">401 Unauthorized</td>
-                    <td className="py-3 px-4 font-mono font-semibold">unauthorized</td>
-                    <td className="py-3 px-4 text-slate-gray">Missing or invalid Authorization header, or revoked API key.</td>
-                  </tr>
-                  <tr>
-                    <td className="py-3 px-4 font-mono font-bold text-red-600">404 Not Found</td>
-                    <td className="py-3 px-4 font-mono font-semibold">not_found</td>
-                    <td className="py-3 px-4 text-slate-gray">The specified key does not exist in your tenant namespace.</td>
-                  </tr>
-                  <tr>
-                    <td className="py-3 px-4 font-mono font-bold text-red-600">409 Conflict</td>
-                    <td className="py-3 px-4 font-mono font-semibold">cas_failed</td>
-                    <td className="py-3 px-4 text-slate-gray">Atomic CAS comparison failed because the current value did not match expected.</td>
-                  </tr>
-                  <tr>
-                    <td className="py-3 px-4 font-mono font-bold text-red-600">413 Too Large</td>
-                    <td className="py-3 px-4 font-mono font-semibold">value_too_large</td>
-                    <td className="py-3 px-4 text-slate-gray">The payload exceeds the maximum gateway limit (1 MB).</td>
-                  </tr>
-                  <tr>
-                    <td className="py-3 px-4 font-mono font-bold text-amber-600">429 Too Many Req</td>
-                    <td className="py-3 px-4 font-mono font-semibold">rate_limited</td>
-                    <td className="py-3 px-4 text-slate-gray">Tenant RPS quota or burst limit exceeded. Backoff and retry.</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </section>
+              <div className="space-y-2">
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">Recommended Client Retry Pattern</div>
+                <p className="text-xs text-slate-gray leading-relaxed">
+                  When encountering <code className="font-mono text-ink-black bg-mist-gray px-1 rounded">429 Too Many Requests</code>,
+                  clients should employ exponential backoff with jitter (e.g. 50ms, 100ms, 200ms + random offset) rather than hard failure.
+                </p>
+              </div>
+            </section>
+
+            {/* SECTION: Error Codes Reference */}
+            <section id="errors" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
+              <h2 className="font-serif text-2xl sm:text-3xl text-ink-black font-normal">
+                Error Codes & Diagnostics
+              </h2>
+              <p className="text-sm text-slate-gray leading-relaxed">
+                All error responses follow the standard JSON format: <code className="font-mono text-xs">{`{"error": {"code": "...", "message": "..."}}`}</code>.
+              </p>
+
+              <div className="bg-paper-white border border-[#e5e5e7] rounded-cards overflow-hidden">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="border-b border-[#ececec] bg-fog-white/60 uppercase tracking-wider text-slate-gray font-medium">
+                      <th className="py-3 px-4">HTTP Status</th>
+                      <th className="py-3 px-4">Error Code</th>
+                      <th className="py-3 px-4">Description & Resolution</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#ececec]">
+                    <tr>
+                      <td className="py-3 px-4 font-mono font-bold text-red-600">400 Bad Request</td>
+                      <td className="py-3 px-4 font-mono font-semibold">invalid_key</td>
+                      <td className="py-3 px-4 text-slate-gray">Key contains illegal characters or exceeds maximum allowed length (1024 bytes).</td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 px-4 font-mono font-bold text-red-600">400 Bad Request</td>
+                      <td className="py-3 px-4 font-mono font-semibold">value_required</td>
+                      <td className="py-3 px-4 text-slate-gray">The request body is missing the required "value" string field.</td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 px-4 font-mono font-bold text-red-600">401 Unauthorized</td>
+                      <td className="py-3 px-4 font-mono font-semibold">unauthorized</td>
+                      <td className="py-3 px-4 text-slate-gray">Missing or invalid Authorization header, or revoked API key.</td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 px-4 font-mono font-bold text-red-600">404 Not Found</td>
+                      <td className="py-3 px-4 font-mono font-semibold">not_found</td>
+                      <td className="py-3 px-4 text-slate-gray">The specified key does not exist in your tenant namespace.</td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 px-4 font-mono font-bold text-red-600">409 Conflict</td>
+                      <td className="py-3 px-4 font-mono font-semibold">cas_failed</td>
+                      <td className="py-3 px-4 text-slate-gray">Atomic CAS comparison failed because the current value did not match expected.</td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 px-4 font-mono font-bold text-red-600">413 Too Large</td>
+                      <td className="py-3 px-4 font-mono font-semibold">value_too_large</td>
+                      <td className="py-3 px-4 text-slate-gray">The payload exceeds the maximum gateway limit (1 MB).</td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 px-4 font-mono font-bold text-amber-600">429 Too Many Req</td>
+                      <td className="py-3 px-4 font-mono font-semibold">rate_limited</td>
+                      <td className="py-3 px-4 text-slate-gray">Tenant RPS quota or burst limit exceeded. Backoff and retry.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
           </div>
         </main>
       </div>

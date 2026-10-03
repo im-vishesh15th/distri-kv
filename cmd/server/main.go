@@ -390,7 +390,12 @@ func run(id, addr, pprofAddr, metricsAddr, dataDir, peersSpec, shardConfigPath s
 			return out
 		})
 		go collector.Run(ctx, 200*time.Millisecond)
-		msrv := &http.Server{Addr: metricsAddr, Handler: collector.Handler(), ReadHeaderTimeout: 5 * time.Second}
+		mmux := http.NewServeMux()
+		mmux.Handle("/tenant-storage", tenantStorageHandler(id, engines, func(gid raft.GroupID) uint64 {
+			return host.Group(gid).Status().LastApplied
+		}))
+		mmux.Handle("/", collector.Handler())
+		msrv := &http.Server{Addr: metricsAddr, Handler: mmux, ReadHeaderTimeout: 5 * time.Second}
 		go func() {
 			log.Info("metrics_http_started", slog.String("addr", metricsAddr))
 			if err := msrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

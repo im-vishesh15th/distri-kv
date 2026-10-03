@@ -23,11 +23,85 @@ import (
 type MemEngine struct {
 	mu   sync.RWMutex
 	data map[string][]byte
+
+	// usage tracks logical bytes (user key + value) and key counts per tenant,
+	// derived from the gateway's "t:<tenant>:<key>" key namespace. It is
+	// maintained on every mutation and rebuilt by Restore, so it is always a
+	// pure function of data (identical on every replica at the same log index).
+	usage map[string]TenantStorage
+}
+
+// TenantStorage is one tenant's logical footprint in an engine.
+type TenantStorage struct {
+	Bytes int64 `json:"bytes"` // sum of len(user key) + len(value)
+	Keys  int64 `json:"keys"`
+}
+
+// storageTenant splits a namespaced storage key ("t:<tenant>:<key>") into the
+// tenant and the size of the user-visible key. ok=false for keys outside the
+// gateway namespace (they are not attributed to any tenant).
+func storageTenant(key string) (tenant string, userKeyLen int, ok bool) {
+	const prefix = "t:"
+	if len(key) <= len(prefix) || key[:len(prefix)] != prefix {
+		return "", 0, false
+	}
+	rest := key[len(prefix):]
+	for i := 0; i < len(rest); i++ {
+		if rest[i] == ':' {
+			return rest[:i], len(rest) - i - 1, true
+		}
+	}
+	return "", 0, false
+}
+
+// setLocked stores value under key and keeps usage in step. Caller holds e.mu.
+func (e *MemEngine) setLocked(key string, value []byte) {
+	if t, kl, ok := storageTenant(key); ok {
+		u := e.usage[t]
+		if old, exists := e.data[key]; exists {
+			u.Bytes -= int64(kl + len(old))
+		} else {
+			u.Keys++
+		}
+		u.Bytes += int64(kl + len(value))
+		e.usage[t] = u
+	}
+	e.data[key] = value
+}
+
+// deleteLocked removes key and keeps usage in step. Caller holds e.mu.
+func (e *MemEngine) deleteLocked(key string) {
+	old, exists := e.data[key]
+	if !exists {
+		return
+	}
+	if t, kl, ok := storageTenant(key); ok {
+		u := e.usage[t]
+		u.Bytes -= int64(kl + len(old))
+		u.Keys--
+		if u.Keys <= 0 {
+			delete(e.usage, t)
+		} else {
+			e.usage[t] = u
+		}
+	}
+	delete(e.data, key)
+}
+
+// TenantStorage returns a copy of the per-tenant footprint.
+func (e *MemEngine) TenantStorage() map[string]TenantStorage {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make(map[string]TenantStorage, len(e.usage))
+	for k, v := range e.usage {
+		out[k] = v
+	}
+	return out
 }
 
 // NewMemEngine returns an empty, ready-to-use in-memory engine.
 func NewMemEngine() *MemEngine {
-	return &MemEngine{data: make(map[string][]byte)}
+	return &MemEngine{data: make(map[string][]byte), usage: make(map[string]TenantStorage)}
 }
 
 // Get returns a copy of the value for key, or ErrKeyNotFound.
@@ -45,7 +119,7 @@ func (e *MemEngine) Get(key string) ([]byte, error) {
 func (e *MemEngine) Put(key string, value []byte) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.data[key] = clone(value)
+	e.setLocked(key, clone(value))
 	return nil
 }
 
@@ -54,7 +128,7 @@ func (e *MemEngine) Put(key string, value []byte) error {
 func (e *MemEngine) Delete(key string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	delete(e.data, key)
+	e.deleteLocked(key)
 	return nil
 }
 
@@ -81,11 +155,11 @@ func (e *MemEngine) Apply(cmd Command) (Result, error) {
 
 	switch cmd.Op {
 	case OpSet:
-		e.data[cmd.Key] = clone(cmd.Value)
+		e.setLocked(cmd.Key, clone(cmd.Value))
 		return Result{Applied: true}, nil
 
 	case OpDelete:
-		delete(e.data, cmd.Key)
+		e.deleteLocked(cmd.Key)
 		return Result{Applied: true}, nil
 
 	case OpCAS:
@@ -121,7 +195,7 @@ func (e *MemEngine) applyCAS(cmd Command) (Result, error) {
 		return Result{Applied: false}, nil
 	}
 
-	e.data[cmd.Key] = clone(cmd.Value)
+	e.setLocked(cmd.Key, clone(cmd.Value))
 	return Result{Applied: true}, nil
 }
 
@@ -152,7 +226,7 @@ func (e *MemEngine) applyIncr(cmd Command) (Result, error) {
 	n += cmd.Delta
 
 	encoded := formatInt64(n)
-	e.data[cmd.Key] = encoded
+	e.setLocked(cmd.Key, encoded)
 	return Result{Applied: true, Value: clone(encoded)}, nil
 }
 
@@ -248,9 +322,20 @@ func (e *MemEngine) Restore(data []byte) error {
 		return fmt.Errorf("kv: restore engine: %d trailing bytes after %d entries", len(data)-off, count)
 	}
 
+	nextUsage := make(map[string]TenantStorage)
+	for k, v := range next {
+		if t, kl, ok := storageTenant(k); ok {
+			u := nextUsage[t]
+			u.Bytes += int64(kl + len(v))
+			u.Keys++
+			nextUsage[t] = u
+		}
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.data = next
+	e.usage = nextUsage
 	return nil
 }
 

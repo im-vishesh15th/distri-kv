@@ -1,0 +1,189 @@
+diff --git a/docker-compose.multigroup.yml b/docker-compose.multigroup.yml
+index 71fc671..52349ae 100644
+--- a/docker-compose.multigroup.yml
++++ b/docker-compose.multigroup.yml
+@@ -26,5 +26,6 @@ services:
+       -bind=:8080 -metrics-addr=:9100
+       -control-bind=:9091 -control-origins=${CONTROL_ORIGINS:-http://localhost:5173}
+       -kv-addrs=distrikv-1:8080,distrikv-2:8080,distrikv-3:8080
++      -node-metrics-urls=http://distrikv-1:9101,http://distrikv-2:9101,http://distrikv-3:9101
+       -shard-config=/etc/distrikv/shard.json
+     volumes: ["./deployments/shard.json:/etc/distrikv/shard.json:ro"]
+diff --git a/internal/gateway/compose_config_test.go b/internal/gateway/compose_config_test.go
+new file mode 100644
+index 0000000..67fe8a9
+--- /dev/null
++++ b/internal/gateway/compose_config_test.go
+@@ -0,0 +1,129 @@
++package gateway
++
++// Regression guard for the compose files. A compose override that defines its own
++// `command:` REPLACES the base command, so any flag added to the base gateway
++// (e.g. -node-metrics-urls, which turns on tenant storage accounting) silently
++// disappears when the override does not repeat it. These tests parse the files as
++// text (no YAML dependency) and fail if that happens again.
++
++import (
++	"os"
++	"regexp"
++	"strings"
++	"testing"
++)
++
++var composeFiles = []string{
++	"../../docker-compose.yml",
++	"../../docker-compose.multigroup.yml",
++	"../../deployments/docker-compose.prod.yml",
++}
++
++const wantNodeMetrics = "-node-metrics-urls=http://distrikv-1:9101,http://distrikv-2:9101,http://distrikv-3:9101"
++
++var (
++	svcRe  = regexp.MustCompile(`^  ([A-Za-z0-9_-]+):\s*$`)
++	flagRe = regexp.MustCompile(`(?:^|\s)(-[a-z][a-z0-9-]*)(?:=|\s|$)`)
++)
++
++// serviceBlocks returns the raw text of each service under the top-level `services:`.
++func serviceBlocks(t *testing.T, path string) map[string]string {
++	t.Helper()
++	raw, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	out := map[string]string{}
++	inServices, cur := false, ""
++	for _, line := range strings.Split(string(raw), "\n") {
++		switch {
++		case strings.HasPrefix(line, "services:"):
++			inServices = true
++		case inServices && line != "" && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "#"):
++			inServices, cur = false, "" // next top-level key (networks:, volumes:, ...)
++		case inServices:
++			if m := svcRe.FindStringSubmatch(line); m != nil {
++				cur = m[1]
++				continue
++			}
++			if cur != "" {
++				out[cur] += line + "\n"
++			}
++		}
++	}
++	return out
++}
++
++// commandFlags returns the set of flag names in a service's `command:` block.
++func commandFlags(block string) map[string]bool {
++	i := strings.Index(block, "command:")
++	if i < 0 {
++		return nil
++	}
++	rest := block[i+len("command:"):]
++	var cmd []string
++	for n, line := range strings.Split(rest, "\n") {
++		if n > 0 && regexp.MustCompile(`^    [a-z_]+:`).MatchString(line) {
++			break // next key of the service
++		}
++		cmd = append(cmd, line)
++	}
++	flags := map[string]bool{}
++	for _, m := range flagRe.FindAllStringSubmatch(strings.Join(cmd, "\n"), -1) {
++		flags[m[1]] = true
++	}
++	return flags
++}
++
++func TestComposeGatewayEnablesStorageSource(t *testing.T) {
++	for _, f := range composeFiles {
++		gw := serviceBlocks(t, f)["gateway"]
++		if gw == "" {
++			t.Fatalf("%s: no gateway service", f)
++		}
++		if !strings.Contains(gw, wantNodeMetrics) {
++			t.Errorf("%s: gateway command lacks %s (tenant storage would be disabled)", f, wantNodeMetrics)
++		}
++	}
++}
++
++// Every flag of the base gateway/node command must survive in the multigroup
++// override, and nothing the override already had may be dropped.
++func TestComposeMultigroupKeepsBaseFlags(t *testing.T) {
++	base := serviceBlocks(t, "../../docker-compose.yml")
++	over := serviceBlocks(t, "../../docker-compose.multigroup.yml")
++	for _, svc := range []string{"gateway", "distrikv-1", "distrikv-2", "distrikv-3"} {
++		bf, of := commandFlags(base[svc]), commandFlags(over[svc])
++		if of == nil {
++			t.Fatalf("multigroup: %s has no command", svc)
++		}
++		for f := range bf {
++			if !of[f] {
++				t.Errorf("multigroup %s command is missing base flag %s", svc, f)
++			}
++		}
++		if !of["-shard-config"] {
++			t.Errorf("multigroup %s lost -shard-config", svc)
++		}
++		if !strings.Contains(over[svc], "shard.json:/etc/distrikv/shard.json:ro") {
++			t.Errorf("multigroup %s lost the shard.json volume mount", svc)
++		}
++	}
++	for _, f := range []string{"-db", "-bind", "-metrics-addr", "-control-bind", "-control-origins", "-kv-addrs", "-shard-config", "-node-metrics-urls"} {
++		if !commandFlags(over["gateway"])[f] {
++			t.Errorf("multigroup gateway lacks %s", f)
++		}
++	}
++}
++
++// The gateway polls <node>:9101, so every node must serve metrics there.
++func TestComposeNodesServeMetricsOn9101(t *testing.T) {
++	for _, f := range composeFiles {
++		blocks := serviceBlocks(t, f)
++		for _, n := range []string{"distrikv-1", "distrikv-2", "distrikv-3"} {
++			if !strings.Contains(blocks[n], "-metrics-addr=:9101") {
++				t.Errorf("%s: %s does not set -metrics-addr=:9101", f, n)
++			}
++		}
++	}
++}
+diff --git a/scripts/e2e_control.sh b/scripts/e2e_control.sh
+index 90a02c2..dbc9559 100755
+--- a/scripts/e2e_control.sh
++++ b/scripts/e2e_control.sh
+@@ -57,6 +57,21 @@ for i in $(seq 1 60); do
+ done
+ ok "control API is up"
+ 
++# --- storage accounting wiring (compose overrides replace `command:` wholesale,
++#     so check what the running gateway really received) -----------------------
++if docker inspect distrikv-gateway >/dev/null 2>&1; then
++  docker inspect distrikv-gateway --format '{{json .Config.Cmd}}' | grep -q -- '-node-metrics-urls=' \
++    && ok "gateway was started with -node-metrics-urls (StorageSource enabled)" \
++    || fail "gateway has no -node-metrics-urls: a compose override replaced its command"
++  for n in 1 2 3; do
++    docker compose exec -T gateway wget -q -O - "http://distrikv-$n:9101/tenant-storage" 2>/dev/null | grep -q '"groups"' \
++      && ok "gateway reaches distrikv-$n:9101/tenant-storage" \
++      || fail "gateway cannot read http://distrikv-$n:9101/tenant-storage (node too old, or -metrics-addr missing)"
++  done
++else
++  echo "skip  storage wiring checks (no local container named distrikv-gateway)"
++fi
++
+ # --- signup (customer A) -------------------------------------------------
+ api "$JAR_A" POST /api/v1/auth/signup "{\"email\":\"a-$SUF@example.com\",\"password\":\"$PW\",\"tenant_id\":\"web-a-$SUF\",\"name\":\"Web A\"}"
+ expect "signup A -> 201" 201 "$HTTP_CODE"
+@@ -102,6 +117,16 @@ expect "revoked key rejected immediately" 401 "$(data "$KEY_A" GET /kv/probe)"
+ api "$JAR_A" GET /api/v1/tenant/usage ""
+ expect "usage -> 200" 200 "$HTTP_CODE"
+ 
++# Storage: the only write by this tenant is PUT /kv/probe = "1": 5 + 1 bytes, 1 key.
++STORAGE_OK=0
++for i in $(seq 1 45); do
++  api "$JAR_A" GET /api/v1/tenant/storage ""
++  if [ "$HTTP_CODE" = 200 ] && printf '%s' "$BODY" | grep -q '"keys":1' && printf '%s' "$BODY" | grep -q '"bytes":6'; then STORAGE_OK=1; break; fi
++  sleep 1
++done
++[ "$STORAGE_OK" = 1 ] && ok "tenant storage = 6 bytes / 1 key via GET /tenant/storage" \
++  || fail "tenant storage never reached bytes=6 keys=1 (last: $HTTP_CODE $BODY)"
++
+ # --- tenant isolation (customer B) ----------------------------------------
+ api "$JAR_B" POST /api/v1/auth/signup "{\"email\":\"b-$SUF@example.com\",\"password\":\"$PW\",\"tenant_id\":\"web-b-$SUF\"}"
+ expect "signup B -> 201" 201 "$HTTP_CODE"

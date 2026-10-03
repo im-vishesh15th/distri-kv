@@ -78,6 +78,7 @@ printf '%s\n' "$PASSWORD" | gatewayctl -db gateway.db create-admin ops@example.c
 | `PUT /me/password` `{current_password, new_password}` | `204` | all *other* sessions are ended |
 | `GET /tenant` | `200 {tenant}` | includes `quota_rps/burst` (0 = default) and `effective_*` |
 | `GET /tenant/usage` | `200 {tenant_id, usage}` | durable totals (`usage.since` is the first stored hour) |
+| `GET /tenant/storage` | `200 {tenant_id, storage:{bytes, keys, groups_reporting, as_of}}` | logical bytes (`len(key)+len(value)`, once, not per replica; not disk/RAM) summed over the data groups; one shared snapshot for all tenants: <=10 s old is served as is, 10-30 s old is served while ONE background refresh runs, older blocks for one shared refresh (never older than 30 s unless the nodes fail, then the last good snapshot is served up to 5 min and `as_of` shows its age); no polling when nobody is viewing; `503 storage_unavailable` / `storage_not_configured` (needs `-node-metrics-urls`) |
 | `GET /tenant/usage/series?range=24h\|7d\|30d` | `200 {tenant_id, series}` | `24h` hourly points; `7d`/`30d` daily points. `400 invalid_range` |
 | `GET /tenant/keys` | `200 {keys:[{prefix,name,status,created_at,expires_at,revoked_at}]}` | `status`: `active` / `expired` / `revoked` |
 | `POST /tenant/keys` `{name, ttl_hours?}` | `201 {key, info}` | `ttl_hours` 0 or absent = no expiry, max 8760; `409 key_limit_reached` (default 10 active keys) |

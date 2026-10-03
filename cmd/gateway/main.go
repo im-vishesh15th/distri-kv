@@ -38,12 +38,13 @@ func main() {
 		tlsKey    = flag.String("tls-key", "", "TLS private key file (needs -tls-cert)")
 		metrics   = flag.String("metrics-addr", "", "serve Prometheus /metrics on this private address (e.g. :9100); empty disables")
 
-		ctlBind    = flag.String("control-bind", "", "serve the web-console control API on this address (e.g. :9091); empty disables")
-		ctlOrigins = flag.String("control-origins", "", "comma-separated browser origins allowed to call the control API (e.g. https://console.example.com)")
-		ctlSignup  = flag.Bool("control-signup", true, "allow self-service signup through the control API")
-		ctlSecure  = flag.Bool("control-cookie-secure", false, "mark the session cookie Secure (set when the console is served over HTTPS)")
-		ctlXFF     = flag.Bool("control-trust-xff", false, "use the last X-Forwarded-For hop as the client IP (only behind your own proxy)")
-		ctlTTL     = flag.Duration("control-session-ttl", 24*time.Hour, "console login session lifetime")
+		ctlBind     = flag.String("control-bind", "", "serve the web-console control API on this address (e.g. :9091); empty disables")
+		ctlOrigins  = flag.String("control-origins", "", "comma-separated browser origins allowed to call the control API (e.g. https://console.example.com)")
+		ctlSignup   = flag.Bool("control-signup", true, "allow self-service signup through the control API")
+		ctlSecure   = flag.Bool("control-cookie-secure", false, "mark the session cookie Secure (set when the console is served over HTTPS)")
+		ctlXFF      = flag.Bool("control-trust-xff", false, "use the last X-Forwarded-For hop as the client IP (only behind your own proxy)")
+		nodeMetrics = flag.String("node-metrics-urls", "", "comma-separated PRIVATE node metrics base URLs (e.g. http://distrikv-1:9101,http://distrikv-2:9101) used for per-tenant storage usage; empty disables")
+		ctlTTL      = flag.Duration("control-session-ttl", 24*time.Hour, "console login session lifetime")
 	)
 	flag.Parse()
 
@@ -91,6 +92,11 @@ func main() {
 	}, store, pool)
 	defer gw.Close()
 
+	var storageFn func(context.Context, string) (gateway.StorageUsage, error)
+	if *nodeMetrics != "" {
+		storageFn = gateway.NewStorageSource(strings.Split(*nodeMetrics, ",")).Usage
+	}
+
 	if *ctlBind != "" {
 		var origins []string
 		for _, o := range strings.Split(*ctlOrigins, ",") {
@@ -111,6 +117,7 @@ func main() {
 			DefaultRateBurst:  *burst,
 			MaxConcurrent:     *maxConc,
 			Usage:             gw.Metrics().Usage,
+			Storage:           storageFn,
 			UsageSeries:       gw.Metrics().Series,
 			Logger:            slog.New(slog.NewJSONHandler(os.Stderr, nil)),
 		}, store)

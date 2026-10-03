@@ -45,6 +45,13 @@ export interface Usage {
   concurrency_limited: number
 }
 
+export interface StorageUsage {
+  bytes: number
+  keys: number
+  groups_reporting: number
+  as_of: string
+}
+
 export interface UsagePoint {
   t: string
   requests: number

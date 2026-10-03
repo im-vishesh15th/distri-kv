@@ -6,16 +6,18 @@ import {
   BoltIcon,
   ShieldCheckIcon,
   ClockIcon,
+  CircleStackIcon,
   ArrowRightIcon,
 } from '@heroicons/react/24/outline'
 import { Link } from 'react-router-dom'
-import { format } from 'date-fns'
+import { format, formatDistanceToNowStrict } from 'date-fns'
 import { StatCard } from '../../components/ui/StatCard'
 import { Card } from '../../components/ui/Card'
 import { Badge } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
 import { PageHeader } from '../../components/ui/PageHeader'
-import { Tenant, Usage, UsageSeries, ApiKey } from '../../types/api'
+import { Tenant, Usage, UsageSeries, ApiKey, StorageUsage } from '../../types/api'
+import { formatBytes, bytesToGB } from '../../utils/format'
 import {
   AreaChart,
   Area,
@@ -57,6 +59,24 @@ export function DashboardPage() {
     },
     enabled: !!user,
     refetchInterval: 30_000,
+  })
+
+  const {
+    data: storage,
+    isLoading: isStorageLoading,
+    isError: isStorageError,
+  } = useQuery({
+    queryKey: ['storage'],
+    queryFn: async () => {
+      const response = await api.get('/tenant/storage')
+      return response.data.storage as StorageUsage
+    },
+    enabled: !!user,
+    // Polls only while the tab is visible (React Query default), never faster than
+    // the gateway's own snapshot cache can answer; refetches on tab focus too.
+    refetchInterval: 30_000,
+    staleTime: 15_000,
+    retry: false,
   })
 
   const { data: keys, isLoading: isKeysLoading } = useQuery({
@@ -117,13 +137,28 @@ export function DashboardPage() {
       />
 
       {/* Top Stat Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-5">
         <StatCard
           label="Active API Keys"
           value={`${activeKeys} / ${totalKeys}`}
           helperText={`Limit: ${tenant?.max_keys || 10} keys`}
           icon={<KeyIcon className="h-5 w-5" />}
           loading={isKeysLoading}
+        />
+
+        <StatCard
+          label="Data Stored"
+          value={isStorageError ? 'Unavailable' : formatBytes(storage?.bytes ?? 0)}
+          helperText={
+            isStorageError
+              ? 'Storage usage is temporarily unavailable'
+              : `${bytesToGB(storage?.bytes ?? 0)} GB · ${(storage?.keys ?? 0).toLocaleString()} keys` +
+                (storage?.as_of
+                  ? ` · updated ${formatDistanceToNowStrict(new Date(storage.as_of), { addSuffix: true })}`
+                  : '')
+          }
+          icon={<CircleStackIcon className="h-5 w-5" />}
+          loading={isStorageLoading}
         />
 
         <StatCard

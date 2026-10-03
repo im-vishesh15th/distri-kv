@@ -111,6 +111,7 @@ services:
       -control-cookie-secure=true
       -control-trust-xff=true
       -kv-addrs=distrikv-1:8080,distrikv-2:8080,distrikv-3:8080
+      -node-metrics-urls=http://distrikv-1:9101,http://distrikv-2:9101,http://distrikv-3:9101
       -shard-config=/etc/distrikv/shard.json
     volumes:
       - gateway-data:/var/lib/gateway # SQLite: tenants, hashed API keys, console users. BACK THIS UP.

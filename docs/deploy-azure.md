@@ -121,6 +121,28 @@ cd ~/DistriKV && ./scripts/deploy_vm.sh --no-build
 until all five containers are healthy and prints the status. It never deletes
 data. Updating later: `git pull && ./scripts/deploy_vm.sh` (or Option B again).
 
+### Updating a running deployment (e.g. to get the storage-usage feature)
+
+The nodes and gateway images change, but volumes are kept. Do it one node at a time so a
+majority (2 of 3) stays up and no group loses quorum:
+
+```bash
+cd ~/DistriKV && git pull
+alias dkc='docker compose -f deployments/docker-compose.prod.yml --env-file deployments/.env'
+dkc build                                   # or load a pre-built image (Option B), then skip this
+for n in 1 2 3; do
+  dkc up -d --no-deps --force-recreate distrikv-$n
+  until [ "$(docker inspect -f '{{.State.Health.Status}}' distrikv-$n)" = healthy ]; do sleep 3; done
+  sleep 10    # let it catch up before touching the next node
+done
+dkc up -d --no-deps --force-recreate gateway reverse-proxy
+./scripts/healthcheck_prod.sh
+```
+
+Never use `down -v`. Existing nodes that have not been updated yet simply do not report storage;
+the dashboard shows "Unavailable" until at least one node runs the new binary. Storage numbers
+are rebuilt from the Raft log/snapshot at start, so nothing needs migrating.
+
 ## 4. Verify
 
 ```bash

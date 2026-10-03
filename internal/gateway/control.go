@@ -56,7 +56,8 @@ type ControlConfig struct {
 	DefaultRateRPS   float64
 	DefaultRateBurst int
 	MaxConcurrent    int
-	Usage            func(tenantID string) Usage // data-plane counters (Gateway.Metrics().Usage)
+	Usage            func(tenantID string) Usage                                      // data-plane counters (Gateway.Metrics().Usage)
+	Storage          func(ctx context.Context, tenantID string) (StorageUsage, error) // nil = not configured
 	UsageSeries      func(tenantID, rng string) (UsageSeries, error)
 	Logger           *slog.Logger // audit log; nil = off
 	now              func() time.Time
@@ -310,6 +311,7 @@ func (c *ControlAPI) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/tenant", methods(map[string]http.HandlerFunc{http.MethodGet: c.tenantH(c.getTenant)}))
 	mux.HandleFunc("/api/v1/tenant/usage", methods(map[string]http.HandlerFunc{http.MethodGet: c.tenantH(c.tenantUsage)}))
 	mux.HandleFunc("/api/v1/tenant/usage/series", methods(map[string]http.HandlerFunc{http.MethodGet: c.tenantH(c.tenantUsageSeries)}))
+	mux.HandleFunc("/api/v1/tenant/storage", methods(map[string]http.HandlerFunc{http.MethodGet: c.tenantH(c.tenantStorage)}))
 	mux.HandleFunc("/api/v1/tenant/keys", methods(map[string]http.HandlerFunc{
 		http.MethodGet:  c.tenantH(c.listKeys),
 		http.MethodPost: c.tenantH(c.createKey),
@@ -786,6 +788,21 @@ func (c *ControlAPI) tenantUsageSeries(w http.ResponseWriter, r *http.Request, _
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tenant_id": t.ID, "series": s})
+}
+
+func (c *ControlAPI) tenantStorage(w http.ResponseWriter, r *http.Request, _ *authed, t Tenant) {
+	if c.cfg.Storage == nil {
+		writeError(w, http.StatusServiceUnavailable, "storage_not_configured", "storage accounting is not configured on this gateway")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	u, err := c.cfg.Storage(ctx, t.ID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "storage usage is temporarily unavailable; try again shortly")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tenant_id": t.ID, "storage": u})
 }
 
 func (c *ControlAPI) listKeysFor(r *http.Request, tenantID string) ([]keyDTO, error) {

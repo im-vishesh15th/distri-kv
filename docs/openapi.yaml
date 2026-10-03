@@ -244,6 +244,33 @@ paths:
                   tenant_id: {type: string}
                   usage: {$ref: "#/components/schemas/Usage"}
         "401": {$ref: "#/components/responses/Err"}
+  /tenant/storage:
+    get:
+      tags: [customer]
+      summary: Logical data stored by the caller's tenant
+      description: >
+        Sum of len(key)+len(value) over all of the tenant's keys, counted once (not per replica),
+        summed over the data groups. Not disk or RAM usage. One shared snapshot for all tenants, never older than 30 s unless the nodes are failing (as_of shows its age). 503 when the nodes
+        cannot be reached (never a fake zero).
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Storage footprint
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant_id: {type: string}
+                  storage:
+                    type: object
+                    properties:
+                      bytes: {type: integer, format: int64}
+                      keys: {type: integer, format: int64}
+                      groups_reporting: {type: integer}
+                      as_of: {type: string, format: date-time}
+        "401": {$ref: "#/components/responses/Err"}
+        "503": {$ref: "#/components/responses/Err"}
   /tenant/usage/series:
     get:
       tags: [customer]

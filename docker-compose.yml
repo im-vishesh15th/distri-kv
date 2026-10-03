@@ -61,6 +61,7 @@ services:
       -bind=:8080 -metrics-addr=:9100
       -control-bind=:9091 -control-origins=${CONTROL_ORIGINS:-http://localhost:5173}
       -kv-addrs=distrikv-1:8080,distrikv-2:8080,distrikv-3:8080
+      -node-metrics-urls=http://distrikv-1:9101,http://distrikv-2:9101,http://distrikv-3:9101
     ports:
       - "${GATEWAY_PORT:-8080}:8080"   # the public data plane
       # Console control API: loopback only. Put your web console / reverse proxy

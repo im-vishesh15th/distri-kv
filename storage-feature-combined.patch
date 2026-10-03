@@ -1,0 +1,1141 @@
+diff --git a/cmd/gateway/main.go b/cmd/gateway/main.go
+index ba1483c..1854002 100644
+--- a/cmd/gateway/main.go
++++ b/cmd/gateway/main.go
+@@ -38,12 +38,13 @@ func main() {
+ 		tlsKey    = flag.String("tls-key", "", "TLS private key file (needs -tls-cert)")
+ 		metrics   = flag.String("metrics-addr", "", "serve Prometheus /metrics on this private address (e.g. :9100); empty disables")
+ 
+-		ctlBind    = flag.String("control-bind", "", "serve the web-console control API on this address (e.g. :9091); empty disables")
+-		ctlOrigins = flag.String("control-origins", "", "comma-separated browser origins allowed to call the control API (e.g. https://console.example.com)")
+-		ctlSignup  = flag.Bool("control-signup", true, "allow self-service signup through the control API")
+-		ctlSecure  = flag.Bool("control-cookie-secure", false, "mark the session cookie Secure (set when the console is served over HTTPS)")
+-		ctlXFF     = flag.Bool("control-trust-xff", false, "use the last X-Forwarded-For hop as the client IP (only behind your own proxy)")
+-		ctlTTL     = flag.Duration("control-session-ttl", 24*time.Hour, "console login session lifetime")
++		ctlBind     = flag.String("control-bind", "", "serve the web-console control API on this address (e.g. :9091); empty disables")
++		ctlOrigins  = flag.String("control-origins", "", "comma-separated browser origins allowed to call the control API (e.g. https://console.example.com)")
++		ctlSignup   = flag.Bool("control-signup", true, "allow self-service signup through the control API")
++		ctlSecure   = flag.Bool("control-cookie-secure", false, "mark the session cookie Secure (set when the console is served over HTTPS)")
++		ctlXFF      = flag.Bool("control-trust-xff", false, "use the last X-Forwarded-For hop as the client IP (only behind your own proxy)")
++		nodeMetrics = flag.String("node-metrics-urls", "", "comma-separated PRIVATE node metrics base URLs (e.g. http://distrikv-1:9101,http://distrikv-2:9101) used for per-tenant storage usage; empty disables")
++		ctlTTL      = flag.Duration("control-session-ttl", 24*time.Hour, "console login session lifetime")
+ 	)
+ 	flag.Parse()
+ 
+@@ -91,6 +92,11 @@ func main() {
+ 	}, store, pool)
+ 	defer gw.Close()
+ 
++	var storageFn func(context.Context, string) (gateway.StorageUsage, error)
++	if *nodeMetrics != "" {
++		storageFn = gateway.NewStorageSource(strings.Split(*nodeMetrics, ",")).Usage
++	}
++
+ 	if *ctlBind != "" {
+ 		var origins []string
+ 		for _, o := range strings.Split(*ctlOrigins, ",") {
+@@ -111,6 +117,7 @@ func main() {
+ 			DefaultRateBurst:  *burst,
+ 			MaxConcurrent:     *maxConc,
+ 			Usage:             gw.Metrics().Usage,
++			Storage:           storageFn,
+ 			UsageSeries:       gw.Metrics().Series,
+ 			Logger:            slog.New(slog.NewJSONHandler(os.Stderr, nil)),
+ 		}, store)
+diff --git a/cmd/server/main.go b/cmd/server/main.go
+index 5eac204..92d72e8 100644
+--- a/cmd/server/main.go
++++ b/cmd/server/main.go
+@@ -390,7 +390,12 @@ func run(id, addr, pprofAddr, metricsAddr, dataDir, peersSpec, shardConfigPath s
+ 			return out
+ 		})
+ 		go collector.Run(ctx, 200*time.Millisecond)
+-		msrv := &http.Server{Addr: metricsAddr, Handler: collector.Handler(), ReadHeaderTimeout: 5 * time.Second}
++		mmux := http.NewServeMux()
++		mmux.Handle("/tenant-storage", tenantStorageHandler(id, engines, func(gid raft.GroupID) uint64 {
++			return host.Group(gid).Status().LastApplied
++		}))
++		mmux.Handle("/", collector.Handler())
++		msrv := &http.Server{Addr: metricsAddr, Handler: mmux, ReadHeaderTimeout: 5 * time.Second}
+ 		go func() {
+ 			log.Info("metrics_http_started", slog.String("addr", metricsAddr))
+ 			if err := msrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+diff --git a/cmd/server/tenantstorage.go b/cmd/server/tenantstorage.go
+new file mode 100644
+index 0000000..2bf11f7
+--- /dev/null
++++ b/cmd/server/tenantstorage.go
+@@ -0,0 +1,54 @@
++package main
++
++import (
++	"encoding/json"
++	"net/http"
++	"strconv"
++
++	"distrikv/internal/kv"
++	"distrikv/internal/raft"
++)
++
++// tenantStorageReporter is implemented by kv.MemEngine.
++type tenantStorageReporter interface {
++	TenantStorage() map[string]kv.TenantStorage
++}
++
++type groupStorage struct {
++	Applied uint64                      `json:"applied"` // last applied Raft index when sampled
++	Tenants map[string]kv.TenantStorage `json:"tenants"`
++}
++
++type nodeStorage struct {
++	Node   string                  `json:"node"`
++	Groups map[string]groupStorage `json:"groups"`
++}
++
++// tenantStorageHandler serves GET /tenant-storage on the node's private
++// metrics port: the logical bytes/keys each tenant occupies in every DATA group
++// this node hosts (the metadata group is skipped). The gateway polls all nodes
++// and, per group, keeps the node with the highest applied index, so a lagging
++// replica never lowers the number.
++func tenantStorageHandler(node string, engines map[raft.GroupID]kv.Engine, applied func(raft.GroupID) uint64) http.Handler {
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodGet {
++			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
++			return
++		}
++		out := nodeStorage{Node: node, Groups: map[string]groupStorage{}}
++		for gid, eng := range engines {
++			if gid == metadataGroupID {
++				continue
++			}
++			rep, ok := eng.(tenantStorageReporter)
++			if !ok {
++				continue
++			}
++			ap := applied(gid) // read before the engine so the engine is never older than `applied`
++			out.Groups[strconv.FormatUint(uint64(gid), 10)] = groupStorage{Applied: ap, Tenants: rep.TenantStorage()}
++		}
++		w.Header().Set("Content-Type", "application/json")
++		w.Header().Set("Cache-Control", "no-store")
++		_ = json.NewEncoder(w).Encode(out)
++	})
++}
+diff --git a/console/src/pages/dashboard/DashboardPage.tsx b/console/src/pages/dashboard/DashboardPage.tsx
+index 0d4e926..90be683 100644
+--- a/console/src/pages/dashboard/DashboardPage.tsx
++++ b/console/src/pages/dashboard/DashboardPage.tsx
+@@ -6,16 +6,18 @@ import {
+   BoltIcon,
+   ShieldCheckIcon,
+   ClockIcon,
++  CircleStackIcon,
+   ArrowRightIcon,
+ } from '@heroicons/react/24/outline'
+ import { Link } from 'react-router-dom'
+-import { format } from 'date-fns'
++import { format, formatDistanceToNowStrict } from 'date-fns'
+ import { StatCard } from '../../components/ui/StatCard'
+ import { Card } from '../../components/ui/Card'
+ import { Badge } from '../../components/ui/Badge'
+ import { Button } from '../../components/ui/Button'
+ import { PageHeader } from '../../components/ui/PageHeader'
+-import { Tenant, Usage, UsageSeries, ApiKey } from '../../types/api'
++import { Tenant, Usage, UsageSeries, ApiKey, StorageUsage } from '../../types/api'
++import { formatBytes, bytesToGB } from '../../utils/format'
+ import {
+   AreaChart,
+   Area,
+@@ -59,6 +61,24 @@ export function DashboardPage() {
+     refetchInterval: 30_000,
+   })
+ 
++  const {
++    data: storage,
++    isLoading: isStorageLoading,
++    isError: isStorageError,
++  } = useQuery({
++    queryKey: ['storage'],
++    queryFn: async () => {
++      const response = await api.get('/tenant/storage')
++      return response.data.storage as StorageUsage
++    },
++    enabled: !!user,
++    // Polls only while the tab is visible (React Query default), never faster than
++    // the gateway's own snapshot cache can answer; refetches on tab focus too.
++    refetchInterval: 30_000,
++    staleTime: 15_000,
++    retry: false,
++  })
++
+   const { data: keys, isLoading: isKeysLoading } = useQuery({
+     queryKey: ['tenantKeys'],
+     queryFn: async () => {
+@@ -117,7 +137,7 @@ export function DashboardPage() {
+       />
+ 
+       {/* Top Stat Cards */}
+-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
++      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-5">
+         <StatCard
+           label="Active API Keys"
+           value={`${activeKeys} / ${totalKeys}`}
+@@ -126,6 +146,21 @@ export function DashboardPage() {
+           loading={isKeysLoading}
+         />
+ 
++        <StatCard
++          label="Data Stored"
++          value={isStorageError ? 'Unavailable' : formatBytes(storage?.bytes ?? 0)}
++          helperText={
++            isStorageError
++              ? 'Storage usage is temporarily unavailable'
++              : `${bytesToGB(storage?.bytes ?? 0)} GB · ${(storage?.keys ?? 0).toLocaleString()} keys` +
++                (storage?.as_of
++                  ? ` · updated ${formatDistanceToNowStrict(new Date(storage.as_of), { addSuffix: true })}`
++                  : '')
++          }
++          icon={<CircleStackIcon className="h-5 w-5" />}
++          loading={isStorageLoading}
++        />
++
+         <StatCard
+           label="Total Requests"
+           value={usage?.requests?.toLocaleString() || '0'}
+diff --git a/console/src/types/api.ts b/console/src/types/api.ts
+index 14fb8b8..da4e622 100644
+--- a/console/src/types/api.ts
++++ b/console/src/types/api.ts
+@@ -45,6 +45,13 @@ export interface Usage {
+   concurrency_limited: number
+ }
+ 
++export interface StorageUsage {
++  bytes: number
++  keys: number
++  groups_reporting: number
++  as_of: string
++}
++
+ export interface UsagePoint {
+   t: string
+   requests: number
+diff --git a/console/src/utils/format.ts b/console/src/utils/format.ts
+new file mode 100644
+index 0000000..e22bda5
+--- /dev/null
++++ b/console/src/utils/format.ts
+@@ -0,0 +1,19 @@
++// Decimal (SI) units, so "1 GB" is exactly 1,000,000,000 bytes.
++const UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const
++
++export function formatBytes(bytes: number): string {
++  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
++  let i = 0
++  let v = bytes
++  while (v >= 1000 && i < UNITS.length - 1) {
++    v /= 1000
++    i++
++  }
++  const digits = i === 0 ? 0 : v >= 100 ? 0 : v >= 10 ? 1 : 2
++  return `${v.toFixed(digits)} ${UNITS[i]}`
++}
++
++// Exact gigabytes with enough precision to see small tenants move.
++export function bytesToGB(bytes: number): string {
++  return (bytes / 1e9).toFixed(4)
++}
+diff --git a/deployments/docker-compose.prod.yml b/deployments/docker-compose.prod.yml
+index 0931bad..e150a0e 100644
+--- a/deployments/docker-compose.prod.yml
++++ b/deployments/docker-compose.prod.yml
+@@ -111,6 +111,7 @@ services:
+       -control-cookie-secure=true
+       -control-trust-xff=true
+       -kv-addrs=distrikv-1:8080,distrikv-2:8080,distrikv-3:8080
++      -node-metrics-urls=http://distrikv-1:9101,http://distrikv-2:9101,http://distrikv-3:9101
+       -shard-config=/etc/distrikv/shard.json
+     volumes:
+       - gateway-data:/var/lib/gateway # SQLite: tenants, hashed API keys, console users. BACK THIS UP.
+diff --git a/docker-compose.yml b/docker-compose.yml
+index aa13692..a7dff3f 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -61,6 +61,7 @@ services:
+       -bind=:8080 -metrics-addr=:9100
+       -control-bind=:9091 -control-origins=${CONTROL_ORIGINS:-http://localhost:5173}
+       -kv-addrs=distrikv-1:8080,distrikv-2:8080,distrikv-3:8080
++      -node-metrics-urls=http://distrikv-1:9101,http://distrikv-2:9101,http://distrikv-3:9101
+     ports:
+       - "${GATEWAY_PORT:-8080}:8080"   # the public data plane
+       # Console control API: loopback only. Put your web console / reverse proxy
+diff --git a/docs/control-api.md b/docs/control-api.md
+index f4510af..5310349 100644
+--- a/docs/control-api.md
++++ b/docs/control-api.md
+@@ -78,6 +78,7 @@ printf '%s\n' "$PASSWORD" | gatewayctl -db gateway.db create-admin ops@example.c
+ | `PUT /me/password` `{current_password, new_password}` | `204` | all *other* sessions are ended |
+ | `GET /tenant` | `200 {tenant}` | includes `quota_rps/burst` (0 = default) and `effective_*` |
+ | `GET /tenant/usage` | `200 {tenant_id, usage}` | durable totals (`usage.since` is the first stored hour) |
++| `GET /tenant/storage` | `200 {tenant_id, storage:{bytes, keys, groups_reporting, as_of}}` | logical bytes (`len(key)+len(value)`, once, not per replica; not disk/RAM) summed over the data groups; one shared snapshot for all tenants: <=10 s old is served as is, 10-30 s old is served while ONE background refresh runs, older blocks for one shared refresh (never older than 30 s unless the nodes fail, then the last good snapshot is served up to 5 min and `as_of` shows its age); no polling when nobody is viewing; `503 storage_unavailable` / `storage_not_configured` (needs `-node-metrics-urls`) |
+ | `GET /tenant/usage/series?range=24h\|7d\|30d` | `200 {tenant_id, series}` | `24h` hourly points; `7d`/`30d` daily points. `400 invalid_range` |
+ | `GET /tenant/keys` | `200 {keys:[{prefix,name,status,created_at,expires_at,revoked_at}]}` | `status`: `active` / `expired` / `revoked` |
+ | `POST /tenant/keys` `{name, ttl_hours?}` | `201 {key, info}` | `ttl_hours` 0 or absent = no expiry, max 8760; `409 key_limit_reached` (default 10 active keys) |
+diff --git a/docs/deploy-azure.md b/docs/deploy-azure.md
+index 4549adf..3e9022e 100644
+--- a/docs/deploy-azure.md
++++ b/docs/deploy-azure.md
+@@ -121,6 +121,28 @@ cd ~/DistriKV && ./scripts/deploy_vm.sh --no-build
+ until all five containers are healthy and prints the status. It never deletes
+ data. Updating later: `git pull && ./scripts/deploy_vm.sh` (or Option B again).
+ 
++### Updating a running deployment (e.g. to get the storage-usage feature)
++
++The nodes and gateway images change, but volumes are kept. Do it one node at a time so a
++majority (2 of 3) stays up and no group loses quorum:
++
++```bash
++cd ~/DistriKV && git pull
++alias dkc='docker compose -f deployments/docker-compose.prod.yml --env-file deployments/.env'
++dkc build                                   # or load a pre-built image (Option B), then skip this
++for n in 1 2 3; do
++  dkc up -d --no-deps --force-recreate distrikv-$n
++  until [ "$(docker inspect -f '{{.State.Health.Status}}' distrikv-$n)" = healthy ]; do sleep 3; done
++  sleep 10    # let it catch up before touching the next node
++done
++dkc up -d --no-deps --force-recreate gateway reverse-proxy
++./scripts/healthcheck_prod.sh
++```
++
++Never use `down -v`. Existing nodes that have not been updated yet simply do not report storage;
++the dashboard shows "Unavailable" until at least one node runs the new binary. Storage numbers
++are rebuilt from the Raft log/snapshot at start, so nothing needs migrating.
++
+ ## 4. Verify
+ 
+ ```bash
+diff --git a/docs/openapi.yaml b/docs/openapi.yaml
+index 98ed2e4..c06c396 100644
+--- a/docs/openapi.yaml
++++ b/docs/openapi.yaml
+@@ -244,6 +244,33 @@ paths:
+                   tenant_id: {type: string}
+                   usage: {$ref: "#/components/schemas/Usage"}
+         "401": {$ref: "#/components/responses/Err"}
++  /tenant/storage:
++    get:
++      tags: [customer]
++      summary: Logical data stored by the caller's tenant
++      description: >
++        Sum of len(key)+len(value) over all of the tenant's keys, counted once (not per replica),
++        summed over the data groups. Not disk or RAM usage. One shared snapshot for all tenants, never older than 30 s unless the nodes are failing (as_of shows its age). 503 when the nodes
++        cannot be reached (never a fake zero).
++      security: [{session: []}]
++      responses:
++        "200":
++          description: Storage footprint
++          content:
++            application/json:
++              schema:
++                type: object
++                properties:
++                  tenant_id: {type: string}
++                  storage:
++                    type: object
++                    properties:
++                      bytes: {type: integer, format: int64}
++                      keys: {type: integer, format: int64}
++                      groups_reporting: {type: integer}
++                      as_of: {type: string, format: date-time}
++        "401": {$ref: "#/components/responses/Err"}
++        "503": {$ref: "#/components/responses/Err"}
+   /tenant/usage/series:
+     get:
+       tags: [customer]
+diff --git a/internal/gateway/control.go b/internal/gateway/control.go
+index e81ace0..be06307 100644
+--- a/internal/gateway/control.go
++++ b/internal/gateway/control.go
+@@ -56,7 +56,8 @@ type ControlConfig struct {
+ 	DefaultRateRPS   float64
+ 	DefaultRateBurst int
+ 	MaxConcurrent    int
+-	Usage            func(tenantID string) Usage // data-plane counters (Gateway.Metrics().Usage)
++	Usage            func(tenantID string) Usage                                      // data-plane counters (Gateway.Metrics().Usage)
++	Storage          func(ctx context.Context, tenantID string) (StorageUsage, error) // nil = not configured
+ 	UsageSeries      func(tenantID, rng string) (UsageSeries, error)
+ 	Logger           *slog.Logger // audit log; nil = off
+ 	now              func() time.Time
+@@ -310,6 +311,7 @@ func (c *ControlAPI) Handler() http.Handler {
+ 	mux.HandleFunc("/api/v1/tenant", methods(map[string]http.HandlerFunc{http.MethodGet: c.tenantH(c.getTenant)}))
+ 	mux.HandleFunc("/api/v1/tenant/usage", methods(map[string]http.HandlerFunc{http.MethodGet: c.tenantH(c.tenantUsage)}))
+ 	mux.HandleFunc("/api/v1/tenant/usage/series", methods(map[string]http.HandlerFunc{http.MethodGet: c.tenantH(c.tenantUsageSeries)}))
++	mux.HandleFunc("/api/v1/tenant/storage", methods(map[string]http.HandlerFunc{http.MethodGet: c.tenantH(c.tenantStorage)}))
+ 	mux.HandleFunc("/api/v1/tenant/keys", methods(map[string]http.HandlerFunc{
+ 		http.MethodGet:  c.tenantH(c.listKeys),
+ 		http.MethodPost: c.tenantH(c.createKey),
+@@ -788,6 +790,21 @@ func (c *ControlAPI) tenantUsageSeries(w http.ResponseWriter, r *http.Request, _
+ 	writeJSON(w, http.StatusOK, map[string]any{"tenant_id": t.ID, "series": s})
+ }
+ 
++func (c *ControlAPI) tenantStorage(w http.ResponseWriter, r *http.Request, _ *authed, t Tenant) {
++	if c.cfg.Storage == nil {
++		writeError(w, http.StatusServiceUnavailable, "storage_not_configured", "storage accounting is not configured on this gateway")
++		return
++	}
++	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
++	defer cancel()
++	u, err := c.cfg.Storage(ctx, t.ID)
++	if err != nil {
++		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "storage usage is temporarily unavailable; try again shortly")
++		return
++	}
++	writeJSON(w, http.StatusOK, map[string]any{"tenant_id": t.ID, "storage": u})
++}
++
+ func (c *ControlAPI) listKeysFor(r *http.Request, tenantID string) ([]keyDTO, error) {
+ 	keys, err := c.store.ListKeys(r.Context(), tenantID)
+ 	if err != nil {
+diff --git a/internal/gateway/storage.go b/internal/gateway/storage.go
+new file mode 100644
+index 0000000..47329a2
+--- /dev/null
++++ b/internal/gateway/storage.go
+@@ -0,0 +1,235 @@
++package gateway
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"strings"
++	"sync"
++	"time"
++)
++
++// StorageUsage is a tenant's logical data footprint across all data groups.
++//
++// Bytes counts len(user key) + len(value) once per key. It is NOT disk usage,
++// RAM usage, or replicated bytes (the data exists on 3 replicas), and it does
++// not include Raft log/snapshot overhead. AsOf is when the nodes were polled.
++type StorageUsage struct {
++	Bytes  int64     `json:"bytes"`
++	Keys   int64     `json:"keys"`
++	Groups int       `json:"groups_reporting"` // data groups that contributed
++	AsOf   time.Time `json:"as_of"`
++}
++
++// ErrStorageUnavailable means no node answered with usable data.
++var ErrStorageUnavailable = errors.New("gateway: storage usage unavailable")
++
++// Freshness policy (one shared snapshot for ALL tenants, so load does not grow
++// with tenants, browser tabs or dashboard refreshes):
++//
++//	age <= storageFreshFor : serve the cached snapshot, no work
++//	age <= storageHardTTL  : serve the cached snapshot AND start ONE background refresh
++//	age >  storageHardTTL  : wait (<= request deadline) for ONE refresh; callers share it
++//
++// With no viewers there is no polling at all. A returned value is never older
++// than storageHardTTL unless the nodes are failing; in that case the last good
++// snapshot is served for up to storageFailStale (its as_of shows its real age),
++// and refresh attempts are spaced storageRetryGap apart.
++const (
++	storageFreshFor  = 10 * time.Second
++	storageHardTTL   = 30 * time.Second
++	storageFailStale = 5 * time.Minute
++	storageRetryGap  = 5 * time.Second
++	storageNodeTO    = 1500 * time.Millisecond
++)
++
++type nodeStorageDoc struct {
++	Node   string `json:"node"`
++	Groups map[string]struct {
++		Applied uint64 `json:"applied"`
++		Tenants map[string]struct {
++			Bytes int64 `json:"bytes"`
++			Keys  int64 `json:"keys"`
++		} `json:"tenants"`
++	} `json:"groups"`
++}
++
++type storageFlight struct {
++	done chan struct{}
++	err  error
++}
++
++// StorageSource polls the nodes' private /tenant-storage endpoint. Per data
++// group it uses the replica with the highest applied Raft index, then sums
++// groups.
++type StorageSource struct {
++	urls   []string
++	client *http.Client
++	now    func() time.Time
++
++	mu       sync.Mutex
++	hasCache bool
++	fetched  time.Time
++	cache    map[string]StorageUsage // by tenant
++	groups   int
++	nextTry  time.Time // do not start another refresh before this (after a failure)
++	inflight *storageFlight
++}
++
++// NewStorageSource takes node metrics base URLs, e.g. "http://distrikv-1:9101".
++func NewStorageSource(baseURLs []string) *StorageSource {
++	var urls []string
++	for _, u := range baseURLs {
++		if u = strings.TrimRight(strings.TrimSpace(u), "/"); u != "" {
++			urls = append(urls, u+"/tenant-storage")
++		}
++	}
++	return &StorageSource{urls: urls, client: &http.Client{Timeout: storageNodeTO}, now: time.Now}
++}
++
++func (s *StorageSource) fetchNode(ctx context.Context, url string) (*nodeStorageDoc, error) {
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
++	if err != nil {
++		return nil, err
++	}
++	resp, err := s.client.Do(req)
++	if err != nil {
++		return nil, err
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		return nil, fmt.Errorf("%s: status %d", url, resp.StatusCode)
++	}
++	var doc nodeStorageDoc
++	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&doc); err != nil {
++		return nil, fmt.Errorf("%s: %w", url, err)
++	}
++	return &doc, nil
++}
++
++// poll asks every node IN PARALLEL (a dead node costs one timeout, not one per
++// node) and aggregates. It holds no lock.
++func (s *StorageSource) poll() (map[string]StorageUsage, int, error) {
++	ctx, cancel := context.WithTimeout(context.Background(), 2*storageNodeTO)
++	defer cancel()
++	docs := make([]*nodeStorageDoc, len(s.urls))
++	var wg sync.WaitGroup
++	for i, u := range s.urls {
++		wg.Add(1)
++		go func(i int, u string) {
++			defer wg.Done()
++			if d, err := s.fetchNode(ctx, u); err == nil {
++				docs[i] = d
++			}
++		}(i, u)
++	}
++	wg.Wait()
++
++	type best struct {
++		applied uint64
++		tenants map[string]StorageUsage
++	}
++	perGroup := map[string]best{}
++	for _, doc := range docs {
++		if doc == nil {
++			continue
++		}
++		for g, gs := range doc.Groups {
++			if b, ok := perGroup[g]; ok && b.applied >= gs.Applied {
++				continue
++			}
++			m := make(map[string]StorageUsage, len(gs.Tenants))
++			for t, v := range gs.Tenants {
++				m[t] = StorageUsage{Bytes: v.Bytes, Keys: v.Keys}
++			}
++			perGroup[g] = best{applied: gs.Applied, tenants: m}
++		}
++	}
++	if len(perGroup) == 0 {
++		return nil, 0, ErrStorageUnavailable
++	}
++	total := map[string]StorageUsage{}
++	for _, b := range perGroup {
++		for t, v := range b.tenants {
++			u := total[t]
++			u.Bytes += v.Bytes
++			u.Keys += v.Keys
++			total[t] = u
++		}
++	}
++	return total, len(perGroup), nil
++}
++
++// startRefreshLocked returns the in-flight refresh, starting one if needed.
++func (s *StorageSource) startRefreshLocked() *storageFlight {
++	if s.inflight != nil {
++		return s.inflight
++	}
++	f := &storageFlight{done: make(chan struct{})}
++	s.inflight = f
++	go func() {
++		total, groups, err := s.poll()
++		s.mu.Lock()
++		if err == nil {
++			s.cache, s.groups, s.hasCache, s.fetched = total, groups, true, s.now()
++			s.nextTry = time.Time{}
++		} else {
++			s.nextTry = s.now().Add(storageRetryGap) // keep the last good snapshot
++		}
++		s.inflight = nil
++		f.err = err
++		s.mu.Unlock()
++		close(f.done)
++	}()
++	return f
++}
++
++func (s *StorageSource) serveLocked(tenantID string) StorageUsage {
++	u := s.cache[tenantID]
++	u.Groups, u.AsOf = s.groups, s.fetched.UTC()
++	return u
++}
++
++// Usage returns the tenant's footprint. A tenant with no data reports zeros.
++func (s *StorageSource) Usage(ctx context.Context, tenantID string) (StorageUsage, error) {
++	if s == nil || len(s.urls) == 0 {
++		return StorageUsage{}, ErrStorageUnavailable
++	}
++	s.mu.Lock()
++	now := s.now()
++	age := now.Sub(s.fetched)
++	switch {
++	case s.hasCache && age <= storageFreshFor:
++		defer s.mu.Unlock()
++		return s.serveLocked(tenantID), nil
++	case s.hasCache && age <= storageHardTTL:
++		if !now.Before(s.nextTry) {
++			s.startRefreshLocked()
++		}
++		defer s.mu.Unlock()
++		return s.serveLocked(tenantID), nil
++	case now.Before(s.nextTry): // recent failure: do not hammer dead nodes
++		defer s.mu.Unlock()
++		if s.hasCache && age <= storageFailStale {
++			return s.serveLocked(tenantID), nil
++		}
++		return StorageUsage{}, ErrStorageUnavailable
++	}
++
++	f := s.startRefreshLocked()
++	s.mu.Unlock()
++	select {
++	case <-f.done:
++	case <-ctx.Done():
++		return StorageUsage{}, ctx.Err()
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if f.err == nil || (s.hasCache && s.now().Sub(s.fetched) <= storageFailStale) {
++		return s.serveLocked(tenantID), nil
++	}
++	return StorageUsage{}, ErrStorageUnavailable
++}
+diff --git a/internal/gateway/storage_test.go b/internal/gateway/storage_test.go
+new file mode 100644
+index 0000000..d78f957
+--- /dev/null
++++ b/internal/gateway/storage_test.go
+@@ -0,0 +1,227 @@
++package gateway
++
++import (
++	"context"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"sync"
++	"testing"
++	"time"
++)
++
++func fakeNode(t *testing.T, doc string) *httptest.Server {
++	t.Helper()
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path != "/tenant-storage" {
++			http.NotFound(w, r)
++			return
++		}
++		_, _ = w.Write([]byte(doc))
++	}))
++	t.Cleanup(srv.Close)
++	return srv
++}
++
++// Per group the replica with the highest applied index wins (a lagging
++// follower must not lower the number); groups are then summed.
++func TestStorageSourceAggregates(t *testing.T) {
++	n1 := fakeNode(t, `{"node":"node1","groups":{
++	  "0":{"applied":50,"tenants":{"acme":{"bytes":1000,"keys":10},"beta":{"bytes":7,"keys":1}}},
++	  "1":{"applied":40,"tenants":{"acme":{"bytes":500,"keys":5}}}}}`)
++	n2 := fakeNode(t, `{"node":"node2","groups":{
++	  "0":{"applied":30,"tenants":{"acme":{"bytes":9999,"keys":99}}},
++	  "1":{"applied":45,"tenants":{"acme":{"bytes":600,"keys":6}}}}}`)
++	dead := httptest.NewServer(http.NotFoundHandler())
++	dead.Close()
++
++	s := NewStorageSource([]string{n1.URL, n2.URL, dead.URL})
++	u, err := s.Usage(context.Background(), "acme")
++	if err != nil {
++		t.Fatal(err)
++	}
++	// group 0 from node1 (applied 50): 1000/10; group 1 from node2 (applied 45): 600/6.
++	if u.Bytes != 1600 || u.Keys != 16 || u.Groups != 2 || u.AsOf.IsZero() {
++		t.Fatalf("acme: %+v", u)
++	}
++	if b, _ := s.Usage(context.Background(), "beta"); b.Bytes != 7 || b.Keys != 1 {
++		t.Fatalf("beta: %+v", b)
++	}
++	if z, err := s.Usage(context.Background(), "nobody"); err != nil || z.Bytes != 0 || z.Keys != 0 {
++		t.Fatalf("tenant without data should be zero, got %+v %v", z, err)
++	}
++}
++
++func waitFor(t *testing.T, what string, cond func() bool) {
++	t.Helper()
++	for i := 0; i < 200; i++ {
++		if cond() {
++			return
++		}
++		time.Sleep(10 * time.Millisecond)
++	}
++	t.Fatalf("timed out waiting for %s", what)
++}
++
++// Fresh window: no fetches. Soft window: serve the old snapshot at once and
++// refresh ONCE in the background. Hard window: callers share one blocking refresh.
++func TestStorageSourceFreshnessPolicy(t *testing.T) {
++	var mu sync.Mutex
++	calls, bytes := 0, 5
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		mu.Lock()
++		calls++
++		b := bytes
++		mu.Unlock()
++		fmt.Fprintf(w, `{"groups":{"0":{"applied":1,"tenants":{"acme":{"bytes":%d,"keys":1}}}}}`, b)
++	}))
++	defer srv.Close()
++	get := func() (int, int) { mu.Lock(); defer mu.Unlock(); return calls, bytes }
++	set := func(b int) { mu.Lock(); bytes = b; mu.Unlock() }
++
++	var cmu sync.Mutex
++	now := time.Now()
++	clock := func() time.Time { cmu.Lock(); defer cmu.Unlock(); return now }
++	advance := func(d time.Duration) { cmu.Lock(); now = now.Add(d); cmu.Unlock() }
++	s := NewStorageSource([]string{srv.URL})
++	s.now = clock
++	ctx := context.Background()
++
++	u, _ := s.Usage(ctx, "acme") // cold: blocking refresh
++	if u.Bytes != 5 {
++		t.Fatalf("cold: %+v", u)
++	}
++	for i := 0; i < 5; i++ {
++		_, _ = s.Usage(ctx, "acme")
++	}
++	if c, _ := get(); c != 1 {
++		t.Fatalf("fresh window must not fetch, calls=%d", c)
++	}
++
++	set(9)
++	advance(15 * time.Second) // soft window
++	u, _ = s.Usage(ctx, "acme")
++	if u.Bytes != 5 {
++		t.Fatalf("soft window must answer from cache immediately, got %d", u.Bytes)
++	}
++	waitFor(t, "background refresh", func() bool { c, _ := get(); return c == 2 })
++	waitFor(t, "fresh value", func() bool { u, _ := s.Usage(ctx, "acme"); return u.Bytes == 9 })
++
++	set(12)
++	advance(31 * time.Second) // hard window: blocks, returns the NEW value
++	var wg sync.WaitGroup
++	for i := 0; i < 20; i++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			if u, err := s.Usage(ctx, "acme"); err != nil || u.Bytes != 12 {
++				t.Errorf("hard window: %+v %v", u, err)
++			}
++		}()
++	}
++	wg.Wait()
++	if c, _ := get(); c != 3 {
++		t.Fatalf("20 concurrent callers must share ONE refresh, calls=%d", c)
++	}
++}
++
++// If the nodes fail, keep serving the last good snapshot (with its real age in
++// as_of) for a while, do not hammer the dead nodes, then give up.
++func TestStorageSourceServesStaleOnFailure(t *testing.T) {
++	var mu sync.Mutex
++	up, calls := true, 0
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		mu.Lock()
++		ok := up
++		calls++
++		mu.Unlock()
++		if !ok {
++			http.Error(w, "down", http.StatusServiceUnavailable)
++			return
++		}
++		_, _ = w.Write([]byte(`{"groups":{"0":{"applied":1,"tenants":{"acme":{"bytes":5,"keys":1}}}}}`))
++	}))
++	defer srv.Close()
++	var cmu sync.Mutex
++	now := time.Now()
++	s := NewStorageSource([]string{srv.URL})
++	s.now = func() time.Time { cmu.Lock(); defer cmu.Unlock(); return now }
++	advance := func(d time.Duration) { cmu.Lock(); now = now.Add(d); cmu.Unlock() }
++	ctx := context.Background()
++
++	first, err := s.Usage(ctx, "acme")
++	if err != nil {
++		t.Fatal(err)
++	}
++	mu.Lock()
++	up = false
++	mu.Unlock()
++
++	advance(40 * time.Second) // past the hard TTL, nodes down
++	u, err := s.Usage(ctx, "acme")
++	if err != nil || u.Bytes != 5 || !u.AsOf.Equal(first.AsOf) {
++		t.Fatalf("expected stale snapshot with original as_of, got %+v %v", u, err)
++	}
++	mu.Lock()
++	c := calls
++	mu.Unlock()
++	for i := 0; i < 5; i++ {
++		_, _ = s.Usage(ctx, "acme")
++	}
++	mu.Lock()
++	if calls != c {
++		t.Fatalf("retry gap violated: %d extra calls", calls-c)
++	}
++	mu.Unlock()
++
++	advance(6 * time.Minute) // older than the stale limit
++	advance(0)
++	if _, err := s.Usage(ctx, "acme"); err != ErrStorageUnavailable {
++		t.Fatalf("beyond the stale limit want ErrStorageUnavailable, got %v", err)
++	}
++}
++
++func TestStorageSourceUnavailable(t *testing.T) {
++	dead := httptest.NewServer(http.NotFoundHandler())
++	dead.Close()
++	if _, err := NewStorageSource([]string{dead.URL}).Usage(context.Background(), "acme"); err != ErrStorageUnavailable {
++		t.Fatalf("want ErrStorageUnavailable, got %v", err)
++	}
++	if _, err := NewStorageSource(nil).Usage(context.Background(), "acme"); err != ErrStorageUnavailable {
++		t.Fatalf("unconfigured: %v", err)
++	}
++}
++
++func TestControlTenantStorageEndpoint(t *testing.T) {
++	e := newCtl(t, func(c *ControlConfig) {
++		c.Storage = func(_ context.Context, tenant string) (StorageUsage, error) {
++			return StorageUsage{Bytes: 3 << 30, Keys: 42, Groups: 3}, nil
++		}
++	})
++	a := e.signup("a@x.io", "tenant-a")
++	r := e.do("GET", "/api/v1/tenant/storage", nil, withCookie(a.cookie))
++	if r.Code != 200 {
++		t.Fatalf("storage: %d %s", r.Code, r.Body.String())
++	}
++	st := r.json()["storage"].(map[string]any)
++	if st["bytes"] != float64(3<<30) || st["keys"] != float64(42) || r.json()["tenant_id"] != "tenant-a" {
++		t.Fatalf("body: %s", r.Body.String())
++	}
++	if r := e.do("GET", "/api/v1/tenant/storage", nil); r.Code != 401 {
++		t.Fatalf("unauthenticated: %d", r.Code)
++	}
++
++	// Not configured / failing source => 503 with a stable code, never a fake zero.
++	e2 := newCtl(t, nil)
++	a2 := e2.signup("b@x.io", "tenant-b")
++	if r := e2.do("GET", "/api/v1/tenant/storage", nil, withCookie(a2.cookie)); r.Code != 503 || r.code() != "storage_not_configured" {
++		t.Fatalf("not configured: %d %s", r.Code, r.Body.String())
++	}
++	e3 := newCtl(t, func(c *ControlConfig) {
++		c.Storage = func(context.Context, string) (StorageUsage, error) { return StorageUsage{}, ErrStorageUnavailable }
++	})
++	a3 := e3.signup("c@x.io", "tenant-c")
++	if r := e3.do("GET", "/api/v1/tenant/storage", nil, withCookie(a3.cookie)); r.Code != 503 || r.code() != "storage_unavailable" {
++		t.Fatalf("source down: %d %s", r.Code, r.Body.String())
++	}
++}
+diff --git a/internal/kv/mem.go b/internal/kv/mem.go
+index 0cd9a0b..bd27150 100644
+--- a/internal/kv/mem.go
++++ b/internal/kv/mem.go
+@@ -23,11 +23,85 @@ import (
+ type MemEngine struct {
+ 	mu   sync.RWMutex
+ 	data map[string][]byte
++
++	// usage tracks logical bytes (user key + value) and key counts per tenant,
++	// derived from the gateway's "t:<tenant>:<key>" key namespace. It is
++	// maintained on every mutation and rebuilt by Restore, so it is always a
++	// pure function of data (identical on every replica at the same log index).
++	usage map[string]TenantStorage
++}
++
++// TenantStorage is one tenant's logical footprint in an engine.
++type TenantStorage struct {
++	Bytes int64 `json:"bytes"` // sum of len(user key) + len(value)
++	Keys  int64 `json:"keys"`
++}
++
++// storageTenant splits a namespaced storage key ("t:<tenant>:<key>") into the
++// tenant and the size of the user-visible key. ok=false for keys outside the
++// gateway namespace (they are not attributed to any tenant).
++func storageTenant(key string) (tenant string, userKeyLen int, ok bool) {
++	const prefix = "t:"
++	if len(key) <= len(prefix) || key[:len(prefix)] != prefix {
++		return "", 0, false
++	}
++	rest := key[len(prefix):]
++	for i := 0; i < len(rest); i++ {
++		if rest[i] == ':' {
++			return rest[:i], len(rest) - i - 1, true
++		}
++	}
++	return "", 0, false
++}
++
++// setLocked stores value under key and keeps usage in step. Caller holds e.mu.
++func (e *MemEngine) setLocked(key string, value []byte) {
++	if t, kl, ok := storageTenant(key); ok {
++		u := e.usage[t]
++		if old, exists := e.data[key]; exists {
++			u.Bytes -= int64(kl + len(old))
++		} else {
++			u.Keys++
++		}
++		u.Bytes += int64(kl + len(value))
++		e.usage[t] = u
++	}
++	e.data[key] = value
++}
++
++// deleteLocked removes key and keeps usage in step. Caller holds e.mu.
++func (e *MemEngine) deleteLocked(key string) {
++	old, exists := e.data[key]
++	if !exists {
++		return
++	}
++	if t, kl, ok := storageTenant(key); ok {
++		u := e.usage[t]
++		u.Bytes -= int64(kl + len(old))
++		u.Keys--
++		if u.Keys <= 0 {
++			delete(e.usage, t)
++		} else {
++			e.usage[t] = u
++		}
++	}
++	delete(e.data, key)
++}
++
++// TenantStorage returns a copy of the per-tenant footprint.
++func (e *MemEngine) TenantStorage() map[string]TenantStorage {
++	e.mu.RLock()
++	defer e.mu.RUnlock()
++	out := make(map[string]TenantStorage, len(e.usage))
++	for k, v := range e.usage {
++		out[k] = v
++	}
++	return out
+ }
+ 
+ // NewMemEngine returns an empty, ready-to-use in-memory engine.
+ func NewMemEngine() *MemEngine {
+-	return &MemEngine{data: make(map[string][]byte)}
++	return &MemEngine{data: make(map[string][]byte), usage: make(map[string]TenantStorage)}
+ }
+ 
+ // Get returns a copy of the value for key, or ErrKeyNotFound.
+@@ -45,7 +119,7 @@ func (e *MemEngine) Get(key string) ([]byte, error) {
+ func (e *MemEngine) Put(key string, value []byte) error {
+ 	e.mu.Lock()
+ 	defer e.mu.Unlock()
+-	e.data[key] = clone(value)
++	e.setLocked(key, clone(value))
+ 	return nil
+ }
+ 
+@@ -54,7 +128,7 @@ func (e *MemEngine) Put(key string, value []byte) error {
+ func (e *MemEngine) Delete(key string) error {
+ 	e.mu.Lock()
+ 	defer e.mu.Unlock()
+-	delete(e.data, key)
++	e.deleteLocked(key)
+ 	return nil
+ }
+ 
+@@ -81,11 +155,11 @@ func (e *MemEngine) Apply(cmd Command) (Result, error) {
+ 
+ 	switch cmd.Op {
+ 	case OpSet:
+-		e.data[cmd.Key] = clone(cmd.Value)
++		e.setLocked(cmd.Key, clone(cmd.Value))
+ 		return Result{Applied: true}, nil
+ 
+ 	case OpDelete:
+-		delete(e.data, cmd.Key)
++		e.deleteLocked(cmd.Key)
+ 		return Result{Applied: true}, nil
+ 
+ 	case OpCAS:
+@@ -121,7 +195,7 @@ func (e *MemEngine) applyCAS(cmd Command) (Result, error) {
+ 		return Result{Applied: false}, nil
+ 	}
+ 
+-	e.data[cmd.Key] = clone(cmd.Value)
++	e.setLocked(cmd.Key, clone(cmd.Value))
+ 	return Result{Applied: true}, nil
+ }
+ 
+@@ -152,7 +226,7 @@ func (e *MemEngine) applyIncr(cmd Command) (Result, error) {
+ 	n += cmd.Delta
+ 
+ 	encoded := formatInt64(n)
+-	e.data[cmd.Key] = encoded
++	e.setLocked(cmd.Key, encoded)
+ 	return Result{Applied: true, Value: clone(encoded)}, nil
+ }
+ 
+@@ -248,9 +322,20 @@ func (e *MemEngine) Restore(data []byte) error {
+ 		return fmt.Errorf("kv: restore engine: %d trailing bytes after %d entries", len(data)-off, count)
+ 	}
+ 
++	nextUsage := make(map[string]TenantStorage)
++	for k, v := range next {
++		if t, kl, ok := storageTenant(k); ok {
++			u := nextUsage[t]
++			u.Bytes += int64(kl + len(v))
++			u.Keys++
++			nextUsage[t] = u
++		}
++	}
++
+ 	e.mu.Lock()
+ 	defer e.mu.Unlock()
+ 	e.data = next
++	e.usage = nextUsage
+ 	return nil
+ }
+ 
+diff --git a/internal/kv/storage_usage_test.go b/internal/kv/storage_usage_test.go
+new file mode 100644
+index 0000000..128c24a
+--- /dev/null
++++ b/internal/kv/storage_usage_test.go
+@@ -0,0 +1,102 @@
++package kv
++
++import (
++	"reflect"
++	"testing"
++)
++
++func TestTenantStorageAccounting(t *testing.T) {
++	e := NewMemEngine()
++	// "t:acme:k1" -> user key "k1" (2 bytes) + value 5 = 7
++	_ = e.Put("t:acme:k1", []byte("hello"))
++	_ = e.Put("t:acme:k2", []byte("xx"))   // 2 + 2 = 4
++	_ = e.Put("t:beta:k1", []byte("y"))    // 2 + 1 = 3
++	_ = e.Put("plain-key", []byte("zzzz")) // outside the gateway namespace: ignored
++
++	want := map[string]TenantStorage{"acme": {Bytes: 11, Keys: 2}, "beta": {Bytes: 3, Keys: 1}}
++	if got := e.TenantStorage(); !reflect.DeepEqual(got, want) {
++		t.Fatalf("after puts: %v want %v", got, want)
++	}
++
++	// Overwrite adjusts bytes, not the key count.
++	_ = e.Put("t:acme:k1", []byte("hi")) // 2+2 = 4 (was 7)
++	if g := e.TenantStorage()["acme"]; g.Bytes != 8 || g.Keys != 2 {
++		t.Fatalf("after overwrite: %+v", g)
++	}
++
++	// Delete removes bytes and the key; deleting twice / a missing key is a no-op.
++	_ = e.Delete("t:acme:k2")
++	_ = e.Delete("t:acme:k2")
++	_ = e.Delete("t:acme:never")
++	if g := e.TenantStorage()["acme"]; g.Bytes != 4 || g.Keys != 1 {
++		t.Fatalf("after delete: %+v", g)
++	}
++	_ = e.Delete("t:beta:k1")
++	if _, ok := e.TenantStorage()["beta"]; ok {
++		t.Fatal("tenant with no keys should disappear from usage")
++	}
++
++	// Apply paths: set, CAS (only on success), incr, delete.
++	_, _ = e.Apply(Command{Op: OpSet, Key: "t:gamma:c", Value: []byte("1")}) // 2
++	if r, _ := e.Apply(Command{Op: OpCAS, Key: "t:gamma:c", Expected: []byte("nope"), Value: []byte("2222")}); r.Applied {
++		t.Fatal("CAS should have failed")
++	}
++	if g := e.TenantStorage()["gamma"]; g.Bytes != 2 || g.Keys != 1 {
++		t.Fatalf("failed CAS changed usage: %+v", g)
++	}
++	_, _ = e.Apply(Command{Op: OpCAS, Key: "t:gamma:c", Expected: []byte("1"), Value: []byte("2222")}) // 1+4 = 5
++	_, _ = e.Apply(Command{Op: OpIncr, Key: "t:gamma:n", Delta: 12})                                   // 1+2 = 3
++	if g := e.TenantStorage()["gamma"]; g.Bytes != 8 || g.Keys != 2 {
++		t.Fatalf("after cas+incr: %+v", g)
++	}
++	_, _ = e.Apply(Command{Op: OpDelete, Key: "t:gamma:c"})
++	if g := e.TenantStorage()["gamma"]; g.Bytes != 3 || g.Keys != 1 {
++		t.Fatalf("after apply delete: %+v", g)
++	}
++}
++
++// Snapshot -> Restore must reproduce the same usage (a node restarting from a
++// snapshot, or a follower installing one, reports identical numbers).
++func TestTenantStorageSurvivesSnapshotRestore(t *testing.T) {
++	a := NewMemEngine()
++	for _, k := range []string{"t:acme:a", "t:acme:bb", "t:beta:c", "loose"} {
++		_ = a.Put(k, []byte("12345"))
++	}
++	snap, err := a.Snapshot()
++	if err != nil {
++		t.Fatal(err)
++	}
++	b := NewMemEngine()
++	_ = b.Put("t:stale:x", []byte("stale")) // must be replaced by Restore
++	if err := b.Restore(snap); err != nil {
++		t.Fatal(err)
++	}
++	if !reflect.DeepEqual(a.TenantStorage(), b.TenantStorage()) {
++		t.Fatalf("usage differs after restore: %v vs %v", a.TenantStorage(), b.TenantStorage())
++	}
++	if _, ok := b.TenantStorage()["stale"]; ok {
++		t.Fatal("stale tenant survived Restore")
++	}
++}
++
++func TestStorageTenantParsing(t *testing.T) {
++	cases := []struct {
++		key    string
++		tenant string
++		klen   int
++		ok     bool
++	}{
++		{"t:acme:k", "acme", 1, true},
++		{"t:acme:a:b:c", "acme", 5, true}, // user keys may contain ':'
++		{"t:acme:", "acme", 0, true},
++		{"t:acme", "", 0, false},
++		{"acme:k", "", 0, false},
++		{"t:", "", 0, false},
++	}
++	for _, c := range cases {
++		tn, kl, ok := storageTenant(c.key)
++		if tn != c.tenant || kl != c.klen || ok != c.ok {
++			t.Errorf("%q -> (%q,%d,%v) want (%q,%d,%v)", c.key, tn, kl, ok, c.tenant, c.klen, c.ok)
++		}
++	}
++}

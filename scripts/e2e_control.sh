@@ -57,6 +57,21 @@ for i in $(seq 1 60); do
 done
 ok "control API is up"
 
+# --- storage accounting wiring (compose overrides replace `command:` wholesale,
+#     so check what the running gateway really received) -----------------------
+if docker inspect distrikv-gateway >/dev/null 2>&1; then
+  docker inspect distrikv-gateway --format '{{json .Config.Cmd}}' | grep -q -- '-node-metrics-urls=' \
+    && ok "gateway was started with -node-metrics-urls (StorageSource enabled)" \
+    || fail "gateway has no -node-metrics-urls: a compose override replaced its command"
+  for n in 1 2 3; do
+    docker compose exec -T gateway wget -q -O - "http://distrikv-$n:9101/tenant-storage" 2>/dev/null | grep -q '"groups"' \
+      && ok "gateway reaches distrikv-$n:9101/tenant-storage" \
+      || fail "gateway cannot read http://distrikv-$n:9101/tenant-storage (node too old, or -metrics-addr missing)"
+  done
+else
+  echo "skip  storage wiring checks (no local container named distrikv-gateway)"
+fi
+
 # --- signup (customer A) -------------------------------------------------
 api "$JAR_A" POST /api/v1/auth/signup "{\"email\":\"a-$SUF@example.com\",\"password\":\"$PW\",\"tenant_id\":\"web-a-$SUF\",\"name\":\"Web A\"}"
 expect "signup A -> 201" 201 "$HTTP_CODE"
@@ -101,6 +116,16 @@ expect "revoked key rejected immediately" 401 "$(data "$KEY_A" GET /kv/probe)"
 
 api "$JAR_A" GET /api/v1/tenant/usage ""
 expect "usage -> 200" 200 "$HTTP_CODE"
+
+# Storage: the only write by this tenant is PUT /kv/probe = "1": 5 + 1 bytes, 1 key.
+STORAGE_OK=0
+for i in $(seq 1 45); do
+  api "$JAR_A" GET /api/v1/tenant/storage ""
+  if [ "$HTTP_CODE" = 200 ] && printf '%s' "$BODY" | grep -q '"keys":1' && printf '%s' "$BODY" | grep -q '"bytes":6'; then STORAGE_OK=1; break; fi
+  sleep 1
+done
+[ "$STORAGE_OK" = 1 ] && ok "tenant storage = 6 bytes / 1 key via GET /tenant/storage" \
+  || fail "tenant storage never reached bytes=6 keys=1 (last: $HTTP_CODE $BODY)"
 
 # --- tenant isolation (customer B) ----------------------------------------
 api "$JAR_B" POST /api/v1/auth/signup "{\"email\":\"b-$SUF@example.com\",\"password\":\"$PW\",\"tenant_id\":\"web-b-$SUF\"}"

@@ -13,6 +13,7 @@ import { useAuth } from '../../context/AuthContext'
 
 type SectionId =
   | 'overview'
+  | 'integrate'
   | 'architecture'
   | 'quickstart'
   | 'auth'
@@ -22,6 +23,8 @@ type SectionId =
   | 'op-counters'
   | 'op-delete'
   | 'op-usage'
+  | 'op-usage-series'
+  | 'use-cases'
   | 'sdk-curl'
   | 'sdk-ts'
   | 'sdk-python'
@@ -35,29 +38,32 @@ type SectionId =
 interface DocSection {
   id: SectionId
   title: string
-  group: 'Getting Started' | 'Authentication' | 'API Reference' | 'Language SDKs' | 'Reliability'
+  group: 'Getting Started' | 'Authentication' | 'API Reference' | 'Business Use Cases' | 'Language Integrations' | 'Reliability'
 }
 
 const SECTIONS: DocSection[] = [
   { id: 'overview', title: 'Introduction & Concepts', group: 'Getting Started' },
+  { id: 'integrate', title: 'How Businesses Integrate DistriKV', group: 'Getting Started' },
   { id: 'architecture', title: 'Architecture & Ports', group: 'Getting Started' },
   { id: 'quickstart', title: '2-Minute Quickstart', group: 'Getting Started' },
   { id: 'auth', title: 'API Keys & Bearer Tokens', group: 'Authentication' },
   { id: 'op-put', title: 'PUT /kv/{key} (Write)', group: 'API Reference' },
   { id: 'op-get', title: 'GET /kv/{key} (Read)', group: 'API Reference' },
   { id: 'op-cas', title: 'POST /kv (Atomic CAS)', group: 'API Reference' },
-  { id: 'op-counters', title: 'POST /kv (Incr / Decr)', group: 'API Reference' },
+  { id: 'op-counters', title: 'POST /kv (Counters)', group: 'API Reference' },
   { id: 'op-delete', title: 'DELETE /kv/{key} (Delete)', group: 'API Reference' },
   { id: 'op-usage', title: 'GET /v1/usage (Telemetry)', group: 'API Reference' },
-  { id: 'sdk-curl', title: 'cURL / Shell', group: 'Language SDKs' },
-  { id: 'sdk-ts', title: 'TypeScript / Node.js', group: 'Language SDKs' },
-  { id: 'sdk-python', title: 'Python', group: 'Language SDKs' },
-  { id: 'sdk-go', title: 'Go', group: 'Language SDKs' },
-  { id: 'sdk-java', title: 'Java / Kotlin', group: 'Language SDKs' },
-  { id: 'sdk-rust', title: 'Rust', group: 'Language SDKs' },
-  { id: 'sdk-php', title: 'PHP', group: 'Language SDKs' },
-  { id: 'rate-limits', title: 'Rate Limiting & 429 Drops', group: 'Reliability' },
-  { id: 'errors', title: 'Error Codes Reference', group: 'Reliability' },
+  { id: 'op-usage-series', title: 'GET /tenant/usage/series', group: 'API Reference' },
+  { id: 'use-cases', title: 'Common Use Cases', group: 'Business Use Cases' },
+  { id: 'sdk-curl', title: 'cURL / Shell', group: 'Language Integrations' },
+  { id: 'sdk-ts', title: 'TypeScript / Node.js', group: 'Language Integrations' },
+  { id: 'sdk-python', title: 'Python', group: 'Language Integrations' },
+  { id: 'sdk-go', title: 'Go', group: 'Language Integrations' },
+  { id: 'sdk-java', title: 'Java / Kotlin', group: 'Language Integrations' },
+  { id: 'sdk-rust', title: 'Rust', group: 'Language Integrations' },
+  { id: 'sdk-php', title: 'PHP', group: 'Language Integrations' },
+  { id: 'rate-limits', title: 'Rate Limiting', group: 'Reliability' },
+  { id: 'errors', title: 'Error Codes', group: 'Reliability' },
 ]
 
 interface CodeBlockProps {
@@ -132,6 +138,8 @@ interface SdkLanguageMeta {
   badge: string
   installCmd?: string
   installLabel?: string
+  setup: string[]
+  via: string
   filename: string
   runtime: string
   highlights: string[]
@@ -142,15 +150,21 @@ const SDK_LANGUAGES: SdkLanguageMeta[] = [
     id: 'ts',
     name: 'TypeScript / Node.js',
     pill: '⚡️ TypeScript',
-    badge: 'Fetch / ESM / CJS',
-    installCmd: 'npm install @distrikv/client # or pnpm add / yarn add / bun add',
-    installLabel: 'Package Installation',
+    badge: 'fetch / ESM / CJS',
+    installCmd: '# Nothing to install: uses the fetch built into Node 18+',
+    installLabel: 'Dependencies',
+    setup: [
+      'Copy the client from the "Copy-paste Client" tab into distrikv.ts in your project.',
+      'Import it: import { DistriKVClient } from "./distrikv"',
+      'Read the key from process.env.DISTRIKV_API_KEY on your server.',
+    ],
+    via: 'the built-in fetch API',
     filename: 'distrikv.ts',
-    runtime: 'Node 18+, Bun, Deno, Cloudflare Workers, Next.js',
+    runtime: 'Node 18+, Bun, Deno, Next.js route handlers (server-side)',
     highlights: [
       'Typed responses with generics client.get<T>(key)',
-      'Native fetch with connection keep-alive reuse',
-      'Automatic JSON serialization for objects and strings',
+      'Keys are URL-encoded with encodeURIComponent',
+      'Throws DistriKVError with the HTTP status and error code',
     ],
   },
   {
@@ -158,14 +172,20 @@ const SDK_LANGUAGES: SdkLanguageMeta[] = [
     name: 'Python',
     pill: '🐍 Python',
     badge: 'Python 3.8+',
-    installCmd: 'pip install requests # or poetry add requests',
-    installLabel: 'Package Installation',
+    installCmd: 'pip install requests',
+    installLabel: 'Dependencies',
+    setup: [
+      'Install the HTTP dependency: pip install requests',
+      'Copy the client from the "Copy-paste Client" tab into distrikv.py.',
+      'Use it: from distrikv import DistriKVClient (key from os.environ["DISTRIKV_API_KEY"])',
+    ],
+    via: 'the requests library',
     filename: 'distrikv.py',
-    runtime: 'CPython 3.8+, PyPy, FastAPI, Django, Flask',
+    runtime: 'CPython 3.8+, FastAPI, Django, Flask (server-side)',
     highlights: [
-      'Idiomatic Python with connection pooling support',
-      'Automatic dict-to-JSON serialization on write',
-      'Graceful None return on missing keys (HTTP 404)',
+      'Reuses connections with requests.Session',
+      'Keys are encoded with urllib.parse.quote(key, safe="")',
+      'Returns None on a missing key (HTTP 404)',
     ],
   },
   {
@@ -173,14 +193,20 @@ const SDK_LANGUAGES: SdkLanguageMeta[] = [
     name: 'Go',
     pill: '🐹 Go',
     badge: 'Go 1.18+',
-    installCmd: 'go get github.com/distrikv/client-go # or use standard library',
-    installLabel: 'Go Module',
+    installCmd: '# Standard library only (net/http). No DistriKV SDK required.',
+    installLabel: 'Dependencies',
+    setup: [
+      'Copy the client from the "Copy-paste Client" tab into client.go in your package.',
+      'No go get needed: it uses only the standard library.',
+      'Read the key with os.Getenv("DISTRIKV_API_KEY").',
+    ],
+    via: "Go's standard net/http package",
     filename: 'client.go',
     runtime: 'Go 1.18+, microservices, Kubernetes controllers',
     highlights: [
-      'Zero external dependencies (pure standard library net/http)',
-      'Context-aware cancellation and request deadlines',
-      'High-concurrency thread-safe client structure',
+      'Zero external dependencies (net/http only)',
+      'Context-aware cancellation; keys escaped with url.PathEscape',
+      'Typed *APIError carrying status and error code',
     ],
   },
   {
@@ -188,14 +214,20 @@ const SDK_LANGUAGES: SdkLanguageMeta[] = [
     name: 'Java / Kotlin',
     pill: '☕️ Java / Kotlin',
     badge: 'Java 11+',
-    installCmd: '// Built-in java.net.http (Zero external dependencies needed!)',
-    installLabel: 'Standard Library',
+    installCmd: '// Maven/Gradle: com.fasterxml.jackson.core:jackson-databind (HTTP client is built into Java 11+)',
+    installLabel: 'Dependencies',
+    setup: [
+      'Add jackson-databind to your build (for JSON parsing).',
+      'Copy the client from the "Copy-paste Client" tab into DistriKV.java.',
+      'Read the key with System.getenv("DISTRIKV_API_KEY").',
+    ],
+    via: 'the built-in java.net.http client',
     filename: 'DistriKV.java',
-    runtime: 'Java 11, 17, 21, Kotlin, Spring Boot, Quarkus',
+    runtime: 'Java 11, 17, 21, Kotlin on the JVM, Spring Boot, Quarkus',
     highlights: [
-      'Modern java.net.http.HttpClient with HTTP/2 support',
-      'Native connect & read timeouts with connection pool',
-      'Fully compatible with Android (API 26+) and Spring Boot',
+      'java.net.http.HttpClient with connect and request timeouts',
+      'Keys are percent-encoded with URLEncoder',
+      'Throws ApiException with the HTTP status and error code',
     ],
   },
   {
@@ -205,12 +237,18 @@ const SDK_LANGUAGES: SdkLanguageMeta[] = [
     badge: '2021 Edition',
     installCmd: 'cargo add reqwest --features json && cargo add tokio --features full && cargo add serde_json',
     installLabel: 'Cargo Dependencies',
+    setup: [
+      'Add the Cargo dependencies above.',
+      'Copy the client from the "Copy-paste Client" tab into src/distrikv.rs and declare mod distrikv;',
+      'Read the key with std::env::var("DISTRIKV_API_KEY").',
+    ],
+    via: 'the reqwest HTTP client',
     filename: 'distrikv.rs',
-    runtime: 'Tokio async runtime, Axum, Actix-web, distributed agents',
+    runtime: 'Tokio async runtime, Axum, Actix-web',
     highlights: [
-      'Async/await powered by Reqwest & Tokio connection pool',
-      'Strong type safety with Result<Option<String>, reqwest::Error>',
-      'Deterministic memory usage with zero garbage collection',
+      'Async client built on reqwest and tokio',
+      'Keys are percent-encoded as a single path segment via url::Url',
+      'Result<Option<String>, _> makes a missing key explicit',
     ],
   },
   {
@@ -218,29 +256,41 @@ const SDK_LANGUAGES: SdkLanguageMeta[] = [
     name: 'PHP',
     pill: '🐘 PHP',
     badge: 'PHP 8.0+',
-    installCmd: '# Standard ext-curl and ext-json extensions in php.ini',
+    installCmd: '# Requires the ext-curl and ext-json extensions (enabled by default in most PHP builds)',
     installLabel: 'PHP Extensions',
+    setup: [
+      'Make sure ext-curl and ext-json are enabled.',
+      'Copy the client from the "Copy-paste Client" tab into distrikv.php.',
+      'Use it with require_once and getenv("DISTRIKV_API_KEY").',
+    ],
+    via: 'PHP cURL',
     filename: 'distrikv.php',
-    runtime: 'PHP 8.0+, Laravel, Symfony, WordPress',
+    runtime: 'PHP 8.0+, Laravel, Symfony, WordPress (server-side)',
     highlights: [
-      'Lightweight curl-based client with custom headers',
-      'Automatic JSON decoding and encoding',
-      'Clean null return on HTTP 404',
+      'Keys are encoded with rawurlencode',
+      'Request timeout set; cURL errors raise exceptions',
+      'Returns null on a missing key (HTTP 404)',
     ],
   },
   {
     id: 'curl',
     name: 'cURL / Shell',
     pill: '💻 cURL / CLI',
-    badge: 'HTTP/1.1 REST',
-    installCmd: 'export DKV_KEY="dkv_live_YOUR_API_KEY"',
+    badge: 'HTTPS REST',
+    installCmd: 'export DISTRIKV_API_KEY="dkv_live_YOUR_API_KEY"',
     installLabel: 'Environment Setup',
+    setup: [
+      'Export your API key in the shell (never paste it into scripts you commit).',
+      'Call https://distrikv.visheshgupta.dev over HTTPS.',
+      'For a gateway running locally, use http://localhost:8080 instead.',
+    ],
+    via: 'plain HTTPS requests',
     filename: 'curl-examples.sh',
     runtime: 'POSIX Bash, Zsh, PowerShell, CI/CD scripts',
     highlights: [
-      'Direct HTTP/1.1 REST calls to Port :8080',
+      'HTTPS REST calls to distrikv.visheshgupta.dev',
       'Standard Bearer token authorization header',
-      'Zero SDK compile steps for instant debugging & testing',
+      'No code or compile step: ideal for testing and debugging',
     ],
   },
 ]
@@ -565,26 +615,82 @@ export function DocumentationPage() {
                 DistriKV Developer Guide
               </h1>
               <p className="text-base text-slate-gray leading-relaxed">
-                DistriKV is a fault-tolerant, horizontally scalable distributed key-value store engineered in Go.
-                It provides <strong>sub-millisecond p99 latency</strong> with strict linearizability through Raft consensus,
-                hardware-isolated multi-tenant rate limiting, and zero cross-tenant tail latency degradation.
+                DistriKV is a fault-tolerant distributed key-value store engineered in Go. It provides strongly consistent
+                key-value operations through Raft consensus, multi-Raft sharding, atomic operations, tenant-scoped
+                authentication, and per-tenant rate limiting.
               </p>
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
                 <div className="p-4 rounded-cards bg-mist-gray border border-[#ececec]">
-                  <div className="text-xs text-slate-gray uppercase font-semibold">Port 8080</div>
-                  <div className="text-sm font-semibold text-ink-black mt-1">Data Plane Gateway</div>
-                  <div className="text-xs text-slate-gray mt-1">GET / PUT / CAS / DELETE for applications</div>
+                  <div className="text-xs text-slate-gray uppercase font-semibold">HTTPS :443</div>
+                  <div className="text-sm font-semibold text-ink-black mt-1">Public API Endpoint</div>
+                  <div className="text-xs text-slate-gray mt-1 break-all">{`https://distrikv.visheshgupta.dev`}</div>
                 </div>
                 <div className="p-4 rounded-cards bg-mist-gray border border-[#ececec]">
-                  <div className="text-xs text-slate-gray uppercase font-semibold">Port 9091</div>
-                  <div className="text-sm font-semibold text-ink-black mt-1">Control Plane API</div>
-                  <div className="text-xs text-slate-gray mt-1">Console telemetry, user auth, & key mgmt</div>
+                  <div className="text-xs text-slate-gray uppercase font-semibold">Authentication</div>
+                  <div className="text-sm font-semibold text-ink-black mt-1">Tenant API Keys</div>
+                  <div className="text-xs text-slate-gray mt-1">Bearer token, used from your backend only</div>
                 </div>
                 <div className="p-4 rounded-cards bg-mist-gray border border-[#ececec]">
                   <div className="text-xs text-slate-gray uppercase font-semibold">Consensus</div>
-                  <div className="text-sm font-semibold text-ink-black mt-1">Raft Quorum (2N/2+1)</div>
-                  <div className="text-xs text-slate-gray mt-1">Strict ordering and automated failover</div>
+                  <div className="text-sm font-semibold text-ink-black mt-1">Raft majority: floor(N/2) + 1</div>
+                  <div className="text-xs text-slate-gray mt-1">3 nodes → majority 2 · 5 nodes → majority 3</div>
+                </div>
+              </div>
+            </section>
+
+            {/* SECTION: How Businesses Integrate DistriKV */}
+            <section id="integrate" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
+              <h2 className="font-serif text-2xl sm:text-3xl text-ink-black font-normal">
+                How Businesses Integrate DistriKV
+              </h2>
+              <p className="text-sm text-slate-gray leading-relaxed">
+                A business does <strong>not</strong> install DistriKV into its application server. Your backend, written in
+                any language, calls the hosted DistriKV HTTPS API, and DistriKV runs the distributed cluster behind it.
+              </p>
+
+              <CodeBlock
+                code={`Your Backend
+    |
+    | HTTPS
+    v
+DistriKV API
+    |
+    v
+DistriKV distributed cluster`}
+                filename="integration-flow.txt"
+                id="integrate-flow"
+                copiedSnippet={copiedSnippet}
+                onCopy={handleCopy}
+              />
+
+              <div className="flex flex-wrap gap-2 text-xs">
+                {['Python backend', 'Node.js backend', 'Java backend', 'Go backend', 'Rust backend', 'PHP backend'].map((l) => (
+                  <span key={l} className="px-3 py-1 rounded-full bg-mist-gray text-ink-black font-medium">{l}</span>
+                ))}
+              </div>
+              <p className="text-sm text-slate-gray leading-relaxed">
+                All of them talk to the same HTTPS REST API. DistriKV does not require an official SDK; see{' '}
+                <button
+                  type="button"
+                  className="underline text-ink-black"
+                  onClick={() => document.getElementById('sdk-hub')?.scrollIntoView({ behavior: 'smooth' })}
+                >
+                  Language Integrations
+                </button>{' '}
+                for copy-paste clients.
+              </p>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                <div className="p-4 rounded-cards bg-mist-gray border border-[#ececec]">
+                  <div className="text-slate-gray uppercase font-semibold">Production</div>
+                  <code className="block mt-1 font-mono text-ink-black break-all">https://distrikv.visheshgupta.dev</code>
+                  <div className="text-slate-gray mt-1">The endpoint your backend uses. HTTPS on port 443.</div>
+                </div>
+                <div className="p-4 rounded-cards bg-mist-gray border border-[#ececec]">
+                  <div className="text-slate-gray uppercase font-semibold">Local development only</div>
+                  <code className="block mt-1 font-mono text-ink-black">http://localhost:8080</code>
+                  <div className="text-slate-gray mt-1">Only when you run the gateway on your own machine. Never expose :8080 as a production endpoint.</div>
                 </div>
               </div>
             </section>
@@ -592,38 +698,46 @@ export function DocumentationPage() {
             {/* SECTION: Architecture & Ports */}
             <section id="architecture" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
               <h2 className="font-serif text-2xl sm:text-3xl text-ink-black font-normal">
-                Network Topology & Ports
+                Production Architecture
               </h2>
               <p className="text-sm text-slate-gray leading-relaxed">
-                DistriKV separates traffic into public data ingress and loopback control planes.
-                Your applications communicate exclusively with the <strong>Edge Gateway</strong> on port <code className="font-mono text-xs bg-mist-gray px-1.5 py-0.5 rounded">8080</code>.
+                Your applications only ever talk to the public HTTPS endpoint. They never connect directly to internal
+                Raft nodes, and internal ports (such as the gateway's <code className="font-mono text-xs bg-mist-gray px-1.5 py-0.5 rounded">:8080</code>) are not part of the public API.
               </p>
 
               <CodeBlock
-                code={`+-------------------------------------------------------------+
-| CLIENT APPLICATION (Node.js, Python, Go, Java, Rust, cURL)  |
-+-------------------------------------------------------------+
-                             │
-            HTTP/1.1 (Auth: Bearer dkv_live_...)
-                             ▼
-+─────────────────────────────────────────────────────────────+
-| EDGE GATEWAY (Port :8080)                                   |
-| • Argon2/SHA-256 Key Verification                           |
-| • Token-Bucket RPS & Burst Rate Limiting per Tenant         |
-| • Namespace Partitioning (tenant_id:user_key)               |
-+─────────────────────────────────────────────────────────────+
-                             │  gRPC / Internal Raft Protocol
-                             ▼
-┌───────────────┬─────────────────────────────┬───────────────┐
-│ DISTRIKV-1    │ DISTRIKV-2 (Raft Leader)    │ DISTRIKV-3    │
-│ Append Log    │ Atomic Quorum Commit        │ Append Log    │
-│ State Machine │ Multi-Threaded State Apply  │ State Machine │
-└───────────────┴─────────────────────────────┴───────────────┘`}
-                filename="network-topology.txt"
+                code={`Customer Backend
+(Node.js / Python / Go / Java / Rust / PHP)
+        |
+        | HTTPS :443
+        v
+https://distrikv.visheshgupta.dev
+        |
+        v
+Caddy / Edge Gateway
+        |
+        v
+DistriKV Gateway
+  - API-key verification (SHA-256 hash lookup)
+  - Per-tenant token-bucket rate limiting
+  - Every key is namespaced by tenant
+        |
+        v
+Sharding / Router
+        |
+        v
+Multi-Raft cluster`}
+                filename="production-architecture.txt"
                 id="arch-ascii"
                 copiedSnippet={copiedSnippet}
                 onCopy={handleCopy}
               />
+
+              <div className="p-4 rounded-cards bg-mist-gray border border-[#ececec] text-xs text-slate-gray leading-relaxed">
+                <div className="font-semibold text-ink-black mb-1">Raft majority: floor(N/2) + 1</div>
+                A write is committed once a majority of a Raft group's replicas have stored it. With 3 nodes the majority
+                is 2; with 5 nodes it is 3. A group keeps accepting writes while a majority is available.
+              </div>
             </section>
 
             {/* SECTION: Durable Analytics Architecture */}
@@ -632,53 +746,54 @@ export function DocumentationPage() {
                 Durable Analytics Architecture
               </h2>
               <p className="text-sm text-slate-gray leading-relaxed">
-                DistriKV's analytics pipeline is designed for durability. Unlike many systems that lose in-memory counters on restart,
-                DistriKV persists usage metrics to hourly SQLite buckets that survive gateway restarts and crashes.
+                Usage counters are kept in memory for speed and periodically written to hourly buckets in SQLite, so your
+                usage history survives gateway restarts.
               </p>
 
               <div className="space-y-4">
                 <div className="bg-mist-gray p-4 rounded-cards border border-[#ececec]">
                   <h3 className="text-h-sm mb-3 text-ink-black">How It Works</h3>
                   <ul className="space-y-2 text-sm text-slate-gray list-disc list-inside">
-                    <li><strong>In-Memory Counters:</strong> Live traffic increments in-memory counters (requests, rate limits, concurrency limits) per tenant and operation.</li>
-                    <li><strong>Hourly Flushing:</strong> Every hour, deltas are flushed to SQLite as <code className="font-mono text-xs bg-mist-gray px-1 rounded">usageDelta</code> rows with tenant, operation, status, and count.</li>
-                    <li><strong>Crash-Safe Persistence:</strong> Flush uses SQLite's <code className="font-mono text-xs bg-mist-gray px-1 rounded">VACUUM INTO</code> for atomic file replacement — no partial writes on crash.</li>
-                    <li><strong>Reconciliation on Restart:</strong> On startup, the gateway loads the latest snapshot, then replays unflushed WAL entries to reconstruct exact state.</li>
-                    <li><strong>Series API:</strong> The <code className="font-mono text-xs bg-mist-gray px-1 rounded">/tenant/usage/series</code> endpoint reads hourly buckets to produce zero-filled time series for charts.</li>
+                    <li><strong>In-memory counters:</strong> every request increments counters per tenant, operation and status, plus rate-limit and concurrency-limit counters.</li>
+                    <li><strong>Periodic flush:</strong> every 15 seconds, and on graceful shutdown, the new counts are added to the current hourly bucket in the <code className="font-mono text-xs bg-mist-gray px-1 rounded">usage_buckets</code> table.</li>
+                    <li><strong>Totals:</strong> <code className="font-mono text-xs bg-mist-gray px-1 rounded">/v1/usage</code> returns stored buckets plus any counts not yet flushed. <code className="font-mono text-xs bg-mist-gray px-1 rounded">since</code> is the first stored hour.</li>
+                    <li><strong>Series API:</strong> <code className="font-mono text-xs bg-mist-gray px-1 rounded">/tenant/usage/series</code> reads the hourly buckets and returns a zero-filled time series for charts.</li>
                   </ul>
                 </div>
 
                 <div className="bg-mist-gray p-4 rounded-cards border border-[#ececec]">
-                  <h3 className="text-h-sm mb-3 text-ink-black">Durability Guarantees</h3>
+                  <h3 className="text-h-sm mb-3 text-ink-black">Durability Behavior</h3>
                   <table className="w-full text-xs text-left border-collapse">
                     <thead>
                       <tr className="border-b border-[#ececec]">
                         <th className="py-2 px-3 font-semibold text-ink-black">Scenario</th>
-                        <th className="py-3 px-3 font-semibold text-ink-black">Behavior</th>
+                        <th className="py-2 px-3 font-semibold text-ink-black">Behavior</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[#ececec]">
                       <tr>
                         <td className="py-2 px-3 text-slate-gray font-mono">Graceful shutdown</td>
-                        <td className="py-2 px-3 text-slate-gray">All pending deltas flushed before exit</td>
-                      </tr>
-                      <tr>
-                        <td className="py-2 px-3 text-slate-gray font-mono">Crash / power loss</td>
-                        <td className="py-2 px-3 text-slate-gray">Last hourly bucket preserved; unflushed deltas replayed from WAL on restart</td>
+                        <td className="py-2 px-3 text-slate-gray">Pending counts are flushed before exit</td>
                       </tr>
                       <tr>
                         <td className="py-2 px-3 text-slate-gray font-mono">Gateway restart</td>
-                        <td className="py-2 px-3 text-slate-gray">Counters restored from SQLite; <code className="font-mono text-xs bg-mist-gray px-1 rounded">/v1/usage</code> shows correct totals</td>
+                        <td className="py-2 px-3 text-slate-gray">Totals and series are read back from SQLite</td>
                       </tr>
                       <tr>
-                        <td className="py-2 px-3 text-slate-gray font-mono">Hourly boundary</td>
-                        <td className="py-2 px-3 text-slate-gray">Flush triggered at minute 0; atomic <code className="font-mono text-xs bg-mist-gray px-1 rounded">VACUUM INTO</code> ensures no partial writes</td>
+                        <td className="py-2 px-3 text-slate-gray font-mono">Crash / power loss</td>
+                        <td className="py-2 px-3 text-slate-gray">Flushed buckets are preserved; counts since the last flush (up to about 15 seconds) can be lost</td>
+                      </tr>
+                      <tr>
+                        <td className="py-2 px-3 text-slate-gray font-mono">Prometheus /metrics</td>
+                        <td className="py-2 px-3 text-slate-gray">Process-local; resets when the gateway restarts</td>
                       </tr>
                     </tbody>
                   </table>
                 </div>
               </div>
             </section>
+
+            {/* SECTION: Quickstart */}
             <section id="quickstart" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
               <h2 className="font-serif text-2xl sm:text-3xl text-ink-black font-normal">
                 2-Minute Quickstart
@@ -694,7 +809,7 @@ export function DocumentationPage() {
                     <span>Get your API Key</span>
                   </div>
                   <p className="text-xs text-slate-gray pl-7">
-                    Log in to the console and visit <strong>API Keys</strong> (<code className="font-mono text-[11px] bg-mist-gray px-1 rounded">/keys</code>) to generate a key. It begins with <code className="font-mono text-[11px] bg-mist-gray px-1 rounded">dkv_live_...</code>.
+                    Log in to the console and visit <strong>API Keys</strong> (<code className="font-mono text-[11px] bg-mist-gray px-1 rounded">/keys</code>) to generate a key. It begins with <code className="font-mono text-[11px] bg-mist-gray px-1 rounded">dkv_live_...</code>. Then export it in your shell: <code className="font-mono text-[11px] bg-mist-gray px-1 rounded">export DISTRIKV_API_KEY="dkv_live_YOUR_API_KEY"</code>
                   </p>
                 </div>
 
@@ -705,8 +820,8 @@ export function DocumentationPage() {
                   </div>
                   <div className="pl-7">
                     <CodeBlock
-                      code={`curl -X PUT "http://localhost:8080/kv/user:profile:1001" \\
-  -H "Authorization: Bearer $DKV_KEY" \\
+                      code={`curl -X PUT "https://distrikv.visheshgupta.dev/kv/user:profile:1001" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{"value":"{\\"name\\":\\"Alice\\",\\"role\\":\\"engineer\\"}"}'`}
                       filename="quickstart-put.sh"
@@ -723,12 +838,12 @@ export function DocumentationPage() {
                 <div className="p-4 rounded-cards bg-paper-white border border-[#e4e4e6] space-y-2">
                   <div className="flex items-center gap-2 text-xs font-semibold text-ink-black">
                     <span className="h-5 w-5 rounded-full bg-ink-black text-paper-white flex items-center justify-center text-[11px]">3</span>
-                    <span>Read back with Linearizability (<code className="font-mono">GET /kv/:key</code>)</span>
+                    <span>Read it back (<code className="font-mono">GET /kv/:key</code>)</span>
                   </div>
                   <div className="pl-7">
                     <CodeBlock
-                      code={`curl -X GET "http://localhost:8080/kv/user:profile:1001" \\
-  -H "Authorization: Bearer $DKV_KEY"`}
+                      code={`curl -X GET "https://distrikv.visheshgupta.dev/kv/user:profile:1001" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY"`}
                       filename="quickstart-get.sh"
                       id="quick-get"
                       copiedSnippet={copiedSnippet}
@@ -740,6 +855,9 @@ export function DocumentationPage() {
                   </div>
                 </div>
               </div>
+              <p className="text-xs text-slate-gray">
+                Running the gateway locally for development? Use <code className="font-mono text-[11px] bg-mist-gray px-1 rounded">http://localhost:8080</code> instead of the production URL.
+              </p>
             </section>
 
             {/* SECTION: Authentication */}
@@ -748,26 +866,42 @@ export function DocumentationPage() {
                 Authentication & API Keys
               </h2>
               <p className="text-sm text-slate-gray leading-relaxed">
-                Every request to the data plane gateway must include your API key in the standard HTTP header:
+                Every request to the data plane must include your API key in the standard HTTP header. Store the key in an environment variable named <code className="font-mono text-xs bg-mist-gray px-1.5 py-0.5 rounded">DISTRIKV_API_KEY</code>:
               </p>
 
-              <div className="bg-mist-gray p-4 rounded-cards font-mono text-xs text-ink-black border border-[#e0e0e2]">
-                Authorization: Bearer dkv_live_&lt;KEY_SECRET&gt;
-              </div>
+              <CodeBlock
+                code={`export DISTRIKV_API_KEY="dkv_live_YOUR_API_KEY"
+
+Authorization: Bearer $DISTRIKV_API_KEY`}
+                filename="auth-header.sh"
+                id="auth-header"
+                copiedSnippet={copiedSnippet}
+                onCopy={handleCopy}
+              />
 
               <div className="space-y-2 text-xs text-slate-gray leading-relaxed">
                 <div className="flex items-start gap-2">
                   <span className="font-bold text-ink-black shrink-0">• Key Format:</span>
-                  <span>All live keys start with the prefix <code className="font-mono text-ink-black bg-mist-gray px-1 py-0.5 rounded">dkv_live_</code> followed by 64 hex characters.</span>
+                  <span>Live keys start with <code className="font-mono text-ink-black bg-mist-gray px-1 py-0.5 rounded">dkv_live_</code> followed by 64 hex characters.</span>
                 </div>
                 <div className="flex items-start gap-2">
                   <span className="font-bold text-ink-black shrink-0">• Key Prefix ID:</span>
-                  <span>The first 16 characters (e.g. <code className="font-mono text-ink-black bg-mist-gray px-1 py-0.5 rounded">dkv_live_317765c9</code>) serve as a public identifier for lookup and rotation, while the remainder is securely hashed with Argon2id.</span>
+                  <span>The first 17 characters (e.g. <code className="font-mono text-ink-black bg-mist-gray px-1 py-0.5 rounded">dkv_live_317765c9</code>) are a public identifier used to list, rotate and revoke a key. Only a SHA-256 hash of the full key is stored.</span>
                 </div>
                 <div className="flex items-start gap-2">
-                  <span className="font-bold text-ink-black shrink-0">• Security:</span>
-                  <span>The full secret key is only shown once at creation time. If lost, rotate the key in the console or generate a replacement.</span>
+                  <span className="font-bold text-ink-black shrink-0">• Shown once:</span>
+                  <span>The full secret is displayed only when the key is created or rotated. If it is lost, rotate the key in the console.</span>
                 </div>
+              </div>
+
+              <div className="p-4 rounded-cards bg-blush-peach/40 text-sienna-brown text-xs leading-relaxed space-y-1">
+                <div className="font-semibold">Keep your API key safe</div>
+                <ul className="list-disc list-inside space-y-1">
+                  <li>API keys authenticate your tenant: anyone holding a key can read and write your data.</li>
+                  <li>Keep keys server-side. Never put them in frontend, browser or mobile app code.</li>
+                  <li>Never commit keys to Git; load them from environment variables or a secrets manager.</li>
+                  <li>Rotate or revoke a key immediately if it may have been exposed.</li>
+                </ul>
               </div>
             </section>
 
@@ -786,7 +920,7 @@ export function DocumentationPage() {
                 <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">Request Body Schema</div>
                 <div className="bg-paper-white border border-[#e4e4e6] rounded-cards p-4 text-xs font-mono">
                   {`{
-  "value": string   // Required. String, JSON text, or base64 binary (max 1MB)
+  "value": string   // Required. UTF-8 string or JSON text (max 256 KiB)
 }`}
                 </div>
               </div>
@@ -794,8 +928,8 @@ export function DocumentationPage() {
               <div className="space-y-3">
                 <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">cURL Example</div>
                 <CodeBlock
-                  code={`curl -X PUT "http://localhost:8080/kv/cache:session:402" \\
-  -H "Authorization: Bearer $DKV_KEY" \\
+                  code={`curl -X PUT "https://distrikv.visheshgupta.dev/kv/cache:session:402" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{"value":"{\\"user_id\\":\\"usr_99\\",\\"role\\":\\"admin\\"}"}'`}
                   filename="put-record.sh"
@@ -819,14 +953,14 @@ export function DocumentationPage() {
               </div>
               <p className="text-sm text-slate-gray leading-relaxed">
                 Retrieves the stored value for <code className="font-mono text-xs bg-mist-gray px-1 rounded">:key</code>.
-                Reads are strictly linearizable through the Raft leader quorum, guaranteeing that stale reads never occur.
+                Reads are served through the Raft leader and are strongly consistent.
               </p>
 
               <div className="space-y-3">
                 <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">cURL Example</div>
                 <CodeBlock
-                  code={`curl -X GET "http://localhost:8080/kv/cache:session:402" \\
-  -H "Authorization: Bearer $DKV_KEY"`}
+                  code={`curl -X GET "https://distrikv.visheshgupta.dev/kv/cache:session:402" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY"`}
                   filename="get-record.sh"
                   id="op-get-curl"
                   copiedSnippet={copiedSnippet}
@@ -877,8 +1011,8 @@ export function DocumentationPage() {
               <div className="space-y-3">
                 <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">cURL Example</div>
                 <CodeBlock
-                  code={`curl -X POST "http://localhost:8080/kv" \\
-  -H "Authorization: Bearer $DKV_KEY" \\
+                  code={`curl -X POST "https://distrikv.visheshgupta.dev/kv" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{"op":"cas","key":"lock:cron_job","expected":"idle","value":"running"}'`}
                   filename="cas-request.sh"
@@ -890,14 +1024,17 @@ export function DocumentationPage() {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                 <div className="p-3 bg-mist-gray rounded-[12px]">
-                  <div className="text-slate-gray font-semibold mb-1">Match Success: 200 OK</div>
-                  <code className="font-mono text-[#1a7f37]">{`{"ok": true}`}</code>
+                  <div className="text-slate-gray font-semibold mb-1">Swap applied: 200 OK</div>
+                  <code className="font-mono text-[#1a7f37]">{`{"applied": true}`}</code>
                 </div>
                 <div className="p-3 bg-mist-gray rounded-[12px]">
-                  <div className="text-slate-gray font-semibold mb-1">Mismatch: 409 Conflict</div>
-                  <code className="font-mono text-[#cf222e]">{`{"error": {"code": "cas_failed"}}`}</code>
+                  <div className="text-slate-gray font-semibold mb-1">Value differed: 200 OK</div>
+                  <code className="font-mono text-ink-black">{`{"applied": false}`}</code>
                 </div>
               </div>
+              <p className="text-xs text-slate-gray">
+                A failed comparison is not an HTTP error: always check the <code className="font-mono bg-mist-gray px-1 rounded">applied</code> field.
+              </p>
             </section>
 
             {/* SECTION: Atomic Counters */}
@@ -907,19 +1044,19 @@ export function DocumentationPage() {
                 <code className="text-base font-mono font-semibold text-ink-black">/kv (Atomic Increment / Decrement)</code>
               </div>
               <p className="text-sm text-slate-gray leading-relaxed">
-                Atomically increments or decrements an integer counter key with zero locking overhead.
+                Atomically increments or decrements an integer counter. The operation is applied as a single replicated command, so concurrent callers never lose updates. <code className="font-mono text-xs bg-mist-gray px-1 rounded">delta</code> defaults to 1 and must be a positive integer.
               </p>
 
               <CodeBlock
                 code={`# Atomic Increment by 5
-curl -X POST "http://localhost:8080/kv" \\
-  -H "Authorization: Bearer $DKV_KEY" \\
+curl -X POST "https://distrikv.visheshgupta.dev/kv" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{"op":"incr","key":"metrics:pageviews","delta":5}'
 
 # Atomic Decrement by 1
-curl -X POST "http://localhost:8080/kv" \\
-  -H "Authorization: Bearer $DKV_KEY" \\
+curl -X POST "https://distrikv.visheshgupta.dev/kv" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{"op":"decr","key":"inventory:seats_left","delta":1}'`}
                 filename="counter-ops.sh"
@@ -927,6 +1064,17 @@ curl -X POST "http://localhost:8080/kv" \\
                 copiedSnippet={copiedSnippet}
                 onCopy={handleCopy}
               />
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                <div className="p-3 bg-mist-gray rounded-[12px]">
+                  <div className="text-slate-gray font-semibold mb-1">Success: 200 OK (returns the new value)</div>
+                  <code className="font-mono text-[#1a7f37]">{`{"value": 5}`}</code>
+                </div>
+                <div className="p-3 bg-mist-gray rounded-[12px]">
+                  <div className="text-slate-gray font-semibold mb-1">Stored value is not an integer: 409</div>
+                  <code className="font-mono text-[#cf222e]">{`{"error": {"code": "not_integer"}}`}</code>
+                </div>
+              </div>
             </section>
 
             {/* SECTION: DELETE /kv/{key} */}
@@ -940,8 +1088,8 @@ curl -X POST "http://localhost:8080/kv" \\
               </p>
 
               <CodeBlock
-                code={`curl -X DELETE "http://localhost:8080/kv/cache:session:402" \\
-  -H "Authorization: Bearer $DKV_KEY"`}
+                code={`curl -X DELETE "https://distrikv.visheshgupta.dev/kv/cache:session:402" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY"`}
                 filename="delete-key.sh"
                 id="op-del-curl"
                 copiedSnippet={copiedSnippet}
@@ -956,14 +1104,13 @@ curl -X POST "http://localhost:8080/kv" \\
                 <code className="text-base font-mono font-semibold text-ink-black">/v1/usage (Live Telemetry)</code>
               </div>
               <p className="text-sm text-slate-gray leading-relaxed">
-                Returns real-time telemetry counters for your tenant since gateway initialization.
-                <strong>With durable analytics enabled, this data persists across gateway restarts</strong> —
-                counters are flushed to hourly SQLite buckets and survive gateway restarts.
+                Returns usage counters for your tenant. Counters are flushed to hourly SQLite buckets every 15 seconds and on shutdown,
+                so <strong>totals persist across gateway restarts</strong>. <code className="font-mono text-xs bg-mist-gray px-1 rounded">since</code> is the first stored hour.
               </p>
 
               <CodeBlock
-                code={`curl -X GET "http://localhost:8080/v1/usage" \\
-  -H "Authorization: Bearer $DKV_KEY"`}
+                code={`curl -X GET "https://distrikv.visheshgupta.dev/v1/usage" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY"`}
                 filename="get-telemetry.sh"
                 id="op-usage-curl"
                 copiedSnippet={copiedSnippet}
@@ -994,7 +1141,7 @@ curl -X POST "http://localhost:8080/kv" \\
               </div>
               <p className="text-sm text-slate-gray leading-relaxed">
                 Returns a zero-filled time-series of usage metrics for charting.
-                Data is sourced from hourly SQLite buckets and survives gateway restarts.
+                Data is sourced from hourly SQLite buckets and survives gateway restarts. Authenticated with your API key like the other data-plane routes.
                 Supports <code className="font-mono text-xs bg-mist-gray px-1 rounded">range</code> parameter:
                 <code className="font-mono text-xs bg-mist-gray px-1 rounded">24h</code> (hourly),
                 <code className="font-mono text-xs bg-mist-gray px-1 rounded">7d</code> (daily),
@@ -1005,16 +1152,16 @@ curl -X POST "http://localhost:8080/kv" \\
                 <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">cURL Examples</div>
                 <CodeBlock
                   code={`# 24h hourly series (default)
-curl -X GET "http://localhost:8080/tenant/usage/series" \\
-  -H "Authorization: Bearer $DKV_KEY"
+curl -X GET "https://distrikv.visheshgupta.dev/tenant/usage/series" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY"
 
 # 7d daily series
-curl -X GET "http://localhost:8080/tenant/usage/series?range=7d" \\
-  -H "Authorization: Bearer $DKV_KEY"
+curl -X GET "https://distrikv.visheshgupta.dev/tenant/usage/series?range=7d" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY"
 
 # 30d daily series
-curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
-  -H "Authorization: Bearer $DKV_KEY"`}
+curl -X GET "https://distrikv.visheshgupta.dev/tenant/usage/series?range=30d" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY"`}
                   filename="get-usage-series.sh"
                   id="op-usage-series-curl"
                   copiedSnippet={copiedSnippet}
@@ -1029,13 +1176,14 @@ curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
   "tenant_id": "acme-corp",
   "series": {
     "range": "24h",
-    "step": "1h",
+    "step": "hour",
     "points": [
       { "t": "2026-10-01T12:00:00Z", "requests": 123, "by_op": { "get": 80, "put": 43 }, "rate_limited": 0, "concurrency_limited": 0 },
       { "t": "2026-10-01T13:00:00Z", "requests": 145, "by_op": { "get": 95, "put": 50 }, "rate_limited": 2, "concurrency_limited": 0 },
       { "t": "2026-10-01T14:00:00Z", "requests": 98, "by_op": { "get": 60, "put": 38 }, "rate_limited": 0, "concurrency_limited": 0 }
     ]
-  }`}
+  }
+}`}
                   filename="usage-series-24h.json"
                   id="usage-series-24h"
                   copiedSnippet={copiedSnippet}
@@ -1049,12 +1197,13 @@ curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
   "tenant_id": "acme-corp",
   "series": {
     "range": "7d",
-    "step": "1d",
+    "step": "day",
     "points": [
       { "t": "2026-09-25T00:00:00Z", "requests": 2847, "by_op": { "get": 1890, "put": 957 }, "rate_limited": 5, "concurrency_limited": 0 },
       { "t": "2026-09-26T00:00:00Z", "requests": 3124, "by_op": { "get": 2010, "put": 1114 }, "rate_limited": 8, "concurrency_limited": 1 }
     ]
-  }`}
+  }
+}`}
                     filename="usage-series-7d.json"
                     id="usage-series-7d"
                     copiedSnippet={copiedSnippet}
@@ -1064,7 +1213,82 @@ curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
               </div>
             </section>
 
-            {/* SECTION: Language SDKs */}
+            {/* SECTION: Common Use Cases */}
+            <section id="use-cases" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
+              <h2 className="font-serif text-2xl sm:text-3xl text-ink-black font-normal">
+                Common Use Cases
+              </h2>
+              <p className="text-sm text-slate-gray leading-relaxed">
+                These patterns use only the documented API: <code className="font-mono text-xs bg-mist-gray px-1 rounded">PUT</code> / <code className="font-mono text-xs bg-mist-gray px-1 rounded">GET</code> / <code className="font-mono text-xs bg-mist-gray px-1 rounded">DELETE /kv/:key</code> and <code className="font-mono text-xs bg-mist-gray px-1 rounded">POST /kv</code>.
+              </p>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                <div className="p-4 rounded-cards bg-mist-gray border border-[#ececec]">
+                  <div className="text-sm font-semibold text-ink-black">Distributed sessions</div>
+                  <p className="text-slate-gray mt-1 leading-relaxed">Store session data under <code className="font-mono">session:&lt;id&gt;</code> so every app server sees the same session. There is no built-in TTL, so keep an <code className="font-mono">expires_at</code> field in the value and check it in your code.</p>
+                </div>
+                <div className="p-4 rounded-cards bg-mist-gray border border-[#ececec]">
+                  <div className="text-sm font-semibold text-ink-black">Feature flags</div>
+                  <p className="text-slate-gray mt-1 leading-relaxed">Keep flags such as <code className="font-mono">flag:new_checkout</code> in one place and read them from any service.</p>
+                </div>
+                <div className="p-4 rounded-cards bg-mist-gray border border-[#ececec]">
+                  <div className="text-sm font-semibold text-ink-black">Shared application state</div>
+                  <p className="text-slate-gray mt-1 leading-relaxed">Share small pieces of state (job status, leader markers) between processes and machines.</p>
+                </div>
+                <div className="p-4 rounded-cards bg-mist-gray border border-[#ececec]">
+                  <div className="text-sm font-semibold text-ink-black">Fast configuration / state storage</div>
+                  <p className="text-slate-gray mt-1 leading-relaxed">Read and write configuration values with a single HTTPS call per key.</p>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="text-sm font-semibold text-ink-black">Distributed lock</div>
+                <p className="text-sm text-slate-gray leading-relaxed">
+                  Compare-and-swap can be used as a building block for distributed coordination. Omitting <code className="font-mono text-xs bg-mist-gray px-1 rounded">expected</code> (or sending <code className="font-mono text-xs bg-mist-gray px-1 rounded">null</code>) means "only if the key does not exist", so exactly one caller gets <code className="font-mono text-xs bg-mist-gray px-1 rounded">{`{"applied": true}`}</code>.
+                </p>
+                <CodeBlock
+                  code={`POST /kv
+
+{
+  "op": "cas",
+  "key": "lock:invoice_sync",
+  "expected": null,
+  "value": "worker-1"
+}
+
+// 200 {"applied": true}   -> worker-1 holds the lock
+// 200 {"applied": false}  -> someone else already holds it`}
+                  filename="distributed-lock.json"
+                  id="usecase-lock"
+                  copiedSnippet={copiedSnippet}
+                  onCopy={handleCopy}
+                />
+                <p className="text-xs text-slate-gray leading-relaxed">
+                  Release it with <code className="font-mono bg-mist-gray px-1 rounded">DELETE /kv/lock:invoice_sync</code>. A lock has no automatic expiry: if a holder crashes the key stays, so store an owner and timestamp in the value and decide in your code when a stale lock may be taken over. This is a coordination primitive, not a complete lock service.
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                <div className="text-sm font-semibold text-ink-black">Atomic counter</div>
+                <CodeBlock
+                  code={`POST /kv
+
+{
+  "op": "incr",
+  "key": "metrics:pageviews",
+  "delta": 1
+}
+
+// 200 {"value": 1042}`}
+                  filename="atomic-counter.json"
+                  id="usecase-counter"
+                  copiedSnippet={copiedSnippet}
+                  onCopy={handleCopy}
+                />
+              </div>
+            </section>
+
+            {/* SECTION: Language Integrations */}
             <section id="sdk-hub" className="space-y-6 scroll-mt-20 pt-6 border-t border-[#ececec]">
               {/* Anchors for sidebar bookmarks and direct URL hashes */}
               <div id="sdk-curl" className="scroll-mt-24" />
@@ -1078,14 +1302,23 @@ curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
               <div>
                 <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-mist-gray text-ink-black text-xs font-semibold mb-2">
                   <CodeBracketIcon className="h-3.5 w-3.5" />
-                  <span>Production Language Guides</span>
+                  <span>Language Integrations</span>
                 </div>
                 <h2 className="font-serif text-3xl sm:text-4xl text-ink-black font-normal">
-                  Complete Language Implementations
+                  Language Integrations
                 </h2>
                 <p className="text-sm text-slate-gray mt-2 leading-relaxed">
-                  Production-ready, copy-pasteable client code for all major backend environments. Select your language below to inspect installation instructions, quick usage examples, and full drop-in client classes:
+                  DistriKV does not require an official SDK. The API is a standard HTTPS REST API, so any backend language with an HTTP client can integrate with DistriKV. The examples below provide lightweight copy-paste clients.
                 </p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                <div className="p-3 bg-mist-gray rounded-[12px] text-slate-gray leading-relaxed">
+                  <span className="font-semibold text-ink-black">Endpoints.</span> Production: <code className="font-mono text-ink-black">https://distrikv.visheshgupta.dev</code>. Local development only: <code className="font-mono text-ink-black">http://localhost:8080</code>.
+                </div>
+                <div className="p-3 bg-blush-peach/40 rounded-[12px] text-sienna-brown leading-relaxed">
+                  <span className="font-semibold">API keys stay on the server.</span> Read <code className="font-mono">DISTRIKV_API_KEY</code> from the environment. Never ship it in browser code or commit it to Git.
+                </div>
               </div>
 
               {/* Language Selector Pills */}
@@ -1140,6 +1373,7 @@ curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
                           </span>
                         </div>
                         <p className="text-xs text-slate-gray mt-1">Runtime target: {current.runtime}</p>
+                        <p className="text-xs text-slate-gray mt-1">Calls the DistriKV HTTPS REST API using {current.via}. No official SDK or package required.</p>
                       </div>
 
                       {/* Code mode toggle */}
@@ -1162,7 +1396,7 @@ curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
                             : 'text-slate-gray hover:text-ink-black'
                             }`}
                         >
-                          📦 Full Client File ({current.filename})
+                          📦 Copy-paste Client ({current.filename})
                         </button>
                       </div>
                     </div>
@@ -1196,6 +1430,13 @@ curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
                       </div>
                     )}
 
+                    {/* Setup steps */}
+                    <ol className="list-decimal list-inside space-y-1 text-xs text-slate-gray leading-relaxed">
+                      {current.setup.map((step, i) => (
+                        <li key={i}>{step}</li>
+                      ))}
+                    </ol>
+
                     {/* Code Block Container */}
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
@@ -1203,7 +1444,7 @@ curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
                           {sdkTab === 'walkthrough' ? 'Usage Walkthrough' : `Complete Source Code (${current.filename})`}
                         </div>
                         <span className="text-[11px] text-slate-gray font-mono">
-                          {sdkTab === 'walkthrough' ? 'Ready to execute' : 'Complete drop-in module'}
+                          {sdkTab === 'walkthrough' ? 'Ready to execute' : 'Copy into your project'}
                         </span>
                       </div>
 
@@ -1219,7 +1460,7 @@ curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
                     {/* Highlights / Features Checklist */}
                     <div className="space-y-2 pt-2 border-t border-[#ececec]">
                       <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-gray">
-                        Client Architecture & Guarantees
+                        Client Notes
                       </div>
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                         {current.highlights.map((h, i) => (
@@ -1238,10 +1479,10 @@ curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
             {/* SECTION: Rate Limits & Reliability */}
             <section id="rate-limits" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
               <h2 className="font-serif text-2xl sm:text-3xl text-ink-black font-normal">
-                Rate Limiting & 429 Drops
+                Rate Limiting
               </h2>
               <p className="text-sm text-slate-gray leading-relaxed">
-                DistriKV enforces hardware-isolated token-bucket rate limiting per tenant. Each tenant has two quota parameters:
+                DistriKV enforces per-tenant token-bucket rate limiting. Each tenant has two quota parameters:
               </p>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
@@ -1259,7 +1500,7 @@ curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
                 <div className="text-xs font-semibold uppercase tracking-wider text-slate-gray">Recommended Client Retry Pattern</div>
                 <p className="text-xs text-slate-gray leading-relaxed">
                   When encountering <code className="font-mono text-ink-black bg-mist-gray px-1 rounded">429 Too Many Requests</code>,
-                  clients should employ exponential backoff with jitter (e.g. 50ms, 100ms, 200ms + random offset) rather than hard failure.
+                  clients should honor the <code className="font-mono text-ink-black bg-mist-gray px-1 rounded">Retry-After</code> response header, and use exponential backoff with jitter (e.g. 50ms, 100ms, 200ms + random offset) rather than failing hard. A separate <code className="font-mono text-ink-black bg-mist-gray px-1 rounded">429 too_many_concurrent_requests</code> means too many of your requests were in flight at once.
                 </p>
               </div>
             </section>
@@ -1267,7 +1508,7 @@ curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
             {/* SECTION: Error Codes Reference */}
             <section id="errors" className="space-y-4 scroll-mt-20 pt-6 border-t border-[#ececec]">
               <h2 className="font-serif text-2xl sm:text-3xl text-ink-black font-normal">
-                Error Codes & Diagnostics
+                Error Codes
               </h2>
               <p className="text-sm text-slate-gray leading-relaxed">
                 All error responses follow the standard JSON format: <code className="font-mono text-xs">{`{"error": {"code": "...", "message": "..."}}`}</code>.
@@ -1286,12 +1527,17 @@ curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
                     <tr>
                       <td className="py-3 px-4 font-mono font-bold text-red-600">400 Bad Request</td>
                       <td className="py-3 px-4 font-mono font-semibold">invalid_key</td>
-                      <td className="py-3 px-4 text-slate-gray">Key contains illegal characters or exceeds maximum allowed length (1024 bytes).</td>
+                      <td className="py-3 px-4 text-slate-gray">Key must be 1–512 bytes of valid UTF-8.</td>
                     </tr>
                     <tr>
                       <td className="py-3 px-4 font-mono font-bold text-red-600">400 Bad Request</td>
                       <td className="py-3 px-4 font-mono font-semibold">value_required</td>
                       <td className="py-3 px-4 text-slate-gray">The request body is missing the required "value" string field.</td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 px-4 font-mono font-bold text-red-600">400 Bad Request</td>
+                      <td className="py-3 px-4 font-mono font-semibold">invalid_json / unknown_op / invalid_delta</td>
+                      <td className="py-3 px-4 text-slate-gray">Malformed JSON, an op other than set/cas/incr/decr, or a non-positive delta.</td>
                     </tr>
                     <tr>
                       <td className="py-3 px-4 font-mono font-bold text-red-600">401 Unauthorized</td>
@@ -1305,18 +1551,43 @@ curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
                     </tr>
                     <tr>
                       <td className="py-3 px-4 font-mono font-bold text-red-600">409 Conflict</td>
-                      <td className="py-3 px-4 font-mono font-semibold">cas_failed</td>
-                      <td className="py-3 px-4 text-slate-gray">Atomic CAS comparison failed because the current value did not match expected.</td>
+                      <td className="py-3 px-4 font-mono font-semibold">not_integer</td>
+                      <td className="py-3 px-4 text-slate-gray">incr/decr on a key whose stored value is not an integer.</td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 px-4 font-mono font-bold text-red-600">409 Conflict</td>
+                      <td className="py-3 px-4 font-mono font-semibold">overflow</td>
+                      <td className="py-3 px-4 text-slate-gray">incr/decr would overflow a 64-bit integer.</td>
                     </tr>
                     <tr>
                       <td className="py-3 px-4 font-mono font-bold text-red-600">413 Too Large</td>
                       <td className="py-3 px-4 font-mono font-semibold">value_too_large</td>
-                      <td className="py-3 px-4 text-slate-gray">The payload exceeds the maximum gateway limit (1 MB).</td>
+                      <td className="py-3 px-4 text-slate-gray">The value exceeds the maximum size (256 KiB).</td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 px-4 font-mono font-bold text-red-600">413 Too Large</td>
+                      <td className="py-3 px-4 font-mono font-semibold">body_too_large</td>
+                      <td className="py-3 px-4 text-slate-gray">The request body exceeds the gateway limit (1 MiB).</td>
                     </tr>
                     <tr>
                       <td className="py-3 px-4 font-mono font-bold text-amber-600">429 Too Many Req</td>
                       <td className="py-3 px-4 font-mono font-semibold">rate_limited</td>
-                      <td className="py-3 px-4 text-slate-gray">Tenant RPS quota or burst limit exceeded. Backoff and retry.</td>
+                      <td className="py-3 px-4 text-slate-gray">Tenant RPS quota or burst limit exceeded. Honor Retry-After, then retry.</td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 px-4 font-mono font-bold text-amber-600">429 Too Many Req</td>
+                      <td className="py-3 px-4 font-mono font-semibold">too_many_concurrent_requests</td>
+                      <td className="py-3 px-4 text-slate-gray">Too many requests in flight for your tenant. Retry shortly.</td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 px-4 font-mono font-bold text-amber-600">503 Unavailable</td>
+                      <td className="py-3 px-4 font-mono font-semibold">unavailable</td>
+                      <td className="py-3 px-4 text-slate-gray">The cluster is temporarily unavailable (for example, no Raft majority). Retry with backoff.</td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 px-4 font-mono font-bold text-amber-600">504 Gateway Timeout</td>
+                      <td className="py-3 px-4 font-mono font-semibold">timeout</td>
+                      <td className="py-3 px-4 text-slate-gray">The cluster did not answer in time. Retry with backoff.</td>
                     </tr>
                   </tbody>
                 </table>
@@ -1329,46 +1600,65 @@ curl -X GET "http://localhost:8080/tenant/usage/series?range=30d" \\
   )
 }
 
-// ─── Complete Language SDK Examples ──────────────────────────
+// ─── Complete Language Integration Examples ─────────────────────────
+// These are lightweight copy-paste clients over the HTTPS REST API; no official package exists.
 
-const tsExample = `// distrikv.ts — Complete TypeScript Client
+const tsExample = `// distrikv.ts — save this file in your project. No npm package is needed:
+// it uses the fetch API built into Node 18+, Bun, Deno and edge runtimes.
+export class DistriKVError extends Error {
+  constructor(
+    public status: number,
+    public code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "DistriKVError";
+  }
+}
+
 export class DistriKVClient {
   private endpoint: string;
-  private apiKey: string;
 
-  constructor(endpoint = 'http://localhost:8080', apiKey = '') {
-    this.endpoint = endpoint.replace(/\\/$/, '');
-    this.apiKey = apiKey;
+  constructor(
+    endpoint: string,
+    private apiKey: string,
+  ) {
+    this.endpoint = endpoint.replace(/\\/$/, "");
   }
 
-  private async request(path: string, options: RequestInit = {}) {
+  private async request(path: string, init: RequestInit = {}): Promise<any> {
     const res = await fetch(\`\${this.endpoint}\${path}\`, {
-      ...options,
+      ...init,
+      signal: AbortSignal.timeout(5000),
       headers: {
-        'Authorization': \`Bearer \${this.apiKey}\`,
-        'Content-Type': 'application/json',
-        ...options.headers,
+        Authorization: \`Bearer \${this.apiKey}\`,
+        "Content-Type": "application/json",
+        ...init.headers,
       },
     });
-
     if (res.status === 204) return null;
-    const body = await res.json();
-    if (!res.ok) throw new Error(body?.error?.message || \`HTTP \${res.status}\`);
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      throw new DistriKVError(
+        res.status,
+        body?.error?.code ?? "error",
+        body?.error?.message ?? \`HTTP \${res.status}\`,
+      );
+    }
     return body;
   }
 
-  // Write a key
-  async put(key: string, value: any): Promise<boolean> {
-    const payload = typeof value === 'string' ? value : JSON.stringify(value);
-    const data = await this.request(\`/kv/\${encodeURIComponent(key)}\`, {
-      method: 'PUT',
+  // Write a key. Non-string values are stored as JSON text.
+  async put(key: string, value: unknown): Promise<void> {
+    const payload = typeof value === "string" ? value : JSON.stringify(value);
+    await this.request(\`/kv/\${encodeURIComponent(key)}\`, {
+      method: "PUT",
       body: JSON.stringify({ value: payload }),
     });
-    return data?.ok === true;
   }
 
-  // Read a key
-  async get<T = any>(key: string): Promise<T | null> {
+  // Read a key. Returns null if it does not exist. JSON text is parsed.
+  async get<T = unknown>(key: string): Promise<T | null> {
     try {
       const data = await this.request(\`/kv/\${encodeURIComponent(key)}\`);
       try {
@@ -1376,116 +1666,148 @@ export class DistriKVClient {
       } catch {
         return data.value as T;
       }
-    } catch (err: any) {
-      if (err.message?.includes('not_found') || err.message?.includes('404')) return null;
+    } catch (err) {
+      if (err instanceof DistriKVError && err.status === 404) return null;
       throw err;
     }
   }
 
-  // Atomic Compare-And-Swap (CAS)
+  // Atomic compare-and-swap. expected = null means "only if the key is absent".
+  // Resolves to true if the swap was applied, false if the current value differed.
   async cas(key: string, expected: string | null, value: string): Promise<boolean> {
-    try {
-      const data = await this.request('/kv', {
-        method: 'POST',
-        body: JSON.stringify({ op: 'cas', key, expected, value }),
-      });
-      return data?.ok === true;
-    } catch (err: any) {
-      if (err.message?.includes('cas_failed')) return false;
-      throw err;
-    }
+    const body: Record<string, unknown> = { op: "cas", key, value };
+    if (expected !== null) body.expected = expected;
+    const data = await this.request("/kv", { method: "POST", body: JSON.stringify(body) });
+    return data.applied === true;
   }
 
-  // Atomic Increment
-  async incr(key: string, delta = 1): Promise<boolean> {
-    const data = await this.request('/kv', {
-      method: 'POST',
-      body: JSON.stringify({ op: 'incr', key, delta }),
+  // Atomic counters. Resolve to the new value.
+  async incr(key: string, delta = 1): Promise<number> {
+    const data = await this.request("/kv", {
+      method: "POST",
+      body: JSON.stringify({ op: "incr", key, delta }),
     });
-    return data?.ok === true;
+    return data.value;
   }
 
-  // Evict key
+  async decr(key: string, delta = 1): Promise<number> {
+    const data = await this.request("/kv", {
+      method: "POST",
+      body: JSON.stringify({ op: "decr", key, delta }),
+    });
+    return data.value;
+  }
+
+  // Delete a key (idempotent).
   async delete(key: string): Promise<void> {
-    await this.request(\`/kv/\${encodeURIComponent(key)}\`, { method: 'DELETE' });
+    await this.request(\`/kv/\${encodeURIComponent(key)}\`, { method: "DELETE" });
   }
 }`
 
-const pythonExample = `# distrikv.py — Complete Python Client
-import requests
+const pythonExample = `# distrikv.py — save this file next to your code. No DistriKV package is needed;
+# it only depends on the "requests" HTTP library (pip install requests).
 import json
 from typing import Any, Optional
+from urllib.parse import quote
+
+import requests
+
+
+class DistriKVError(Exception):
+    def __init__(self, status: int, code: str, message: str):
+        super().__init__(f"{status} {code}: {message}")
+        self.status = status
+        self.code = code
+
 
 class DistriKVClient:
-    def __init__(self, endpoint: str = "http://localhost:8080", api_key: str = ""):
+    def __init__(self, endpoint: str, api_key: str, timeout: float = 5.0):
         self.endpoint = endpoint.rstrip("/")
-        self.headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
+        self.timeout = timeout
+        self.session = requests.Session()
+        self.session.headers.update({"Authorization": f"Bearer {api_key}"})
 
-    def put(self, key: str, value: Any) -> bool:
-        """Stores a string or JSON-serializable value."""
-        val_str = value if isinstance(value, str) else json.dumps(value)
-        r = requests.put(
-            f"{self.endpoint}/kv/{key}",
-            json={"value": val_str},
-            headers=self.headers
+    def _request(self, method: str, path: str, body: Optional[dict] = None) -> Optional[dict]:
+        r = self.session.request(
+            method, f"{self.endpoint}{path}", json=body, timeout=self.timeout
         )
-        r.raise_for_status()
-        return r.json().get("ok") is True
+        if r.status_code == 204:
+            return None
+        try:
+            data = r.json()
+        except ValueError:
+            data = {}
+        if not r.ok:
+            err = data.get("error", {})
+            raise DistriKVError(r.status_code, err.get("code", "error"), err.get("message", r.reason))
+        return data
+
+    @staticmethod
+    def _path(key: str) -> str:
+        return f"/kv/{quote(key, safe='')}"  # percent-encode ':' '/' '?' etc.
+
+    def put(self, key: str, value: Any) -> None:
+        """Stores a string; other values are stored as JSON text."""
+        text = value if isinstance(value, str) else json.dumps(value)
+        self._request("PUT", self._path(key), {"value": text})
 
     def get(self, key: str) -> Optional[Any]:
-        """Reads a key, returning parsed JSON or string. Returns None on 404."""
-        r = requests.get(f"{self.endpoint}/kv/{key}", headers=self.headers)
-        if r.status_code == 404:
-            return None
-        r.raise_for_status()
-        val = r.json().get("value")
+        """Returns the parsed JSON (or raw string). None if the key does not exist."""
         try:
-            return json.loads(val)
+            data = self._request("GET", self._path(key))
+        except DistriKVError as e:
+            if e.status == 404:
+                return None
+            raise
+        try:
+            return json.loads(data["value"])
         except (ValueError, TypeError):
-            return val
+            return data["value"]
 
     def cas(self, key: str, expected: Optional[str], value: str) -> bool:
-        """Atomic Compare-And-Swap. Returns True on success, False on conflict."""
-        payload = {"op": "cas", "key": key, "value": value}
+        """Atomic compare-and-swap. expected=None means 'only if the key is absent'.
+        Returns True if applied, False if the current value differed."""
+        body = {"op": "cas", "key": key, "value": value}
         if expected is not None:
-            payload["expected"] = expected
-        r = requests.post(f"{self.endpoint}/kv", json=payload, headers=self.headers)
-        if r.status_code == 409:
-            return False
-        r.raise_for_status()
-        return r.json().get("ok") is True
+            body["expected"] = expected
+        return self._request("POST", "/kv", body)["applied"] is True
 
-    def incr(self, key: str, delta: int = 1) -> bool:
-        """Atomic integer counter increment."""
-        r = requests.post(
-            f"{self.endpoint}/kv",
-            json={"op": "incr", "key": key, "delta": delta},
-            headers=self.headers
-        )
-        r.raise_for_status()
-        return r.json().get("ok") is True
+    def incr(self, key: str, delta: int = 1) -> int:
+        """Atomic increment. Returns the new value."""
+        return self._request("POST", "/kv", {"op": "incr", "key": key, "delta": delta})["value"]
+
+    def decr(self, key: str, delta: int = 1) -> int:
+        """Atomic decrement. Returns the new value."""
+        return self._request("POST", "/kv", {"op": "decr", "key": key, "delta": delta})["value"]
 
     def delete(self, key: str) -> None:
-        """Evicts a key idempotently."""
-        r = requests.delete(f"{self.endpoint}/kv/{key}", headers=self.headers)
-        if r.status_code != 204:
-            r.raise_for_status()`
+        self._request("DELETE", self._path(key))`
 
-const goExample = `// client.go — Native Go Implementation
+const goExample = `// client.go — standard library only (net/http). No DistriKV SDK is required.
 package main
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
+
+type APIError struct {
+	Status  int
+	Code    string
+	Message string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("distrikv: %d %s: %s", e.Status, e.Code, e.Message)
+}
 
 type Client struct {
 	endpoint string
@@ -1495,340 +1817,637 @@ type Client struct {
 
 func NewClient(endpoint, apiKey string) *Client {
 	return &Client{
-		endpoint: endpoint,
+		endpoint: strings.TrimRight(endpoint, "/"),
 		apiKey:   apiKey,
 		http:     &http.Client{Timeout: 5 * time.Second},
 	}
 }
 
-func (c *Client) Put(ctx context.Context, key, value string) error {
-	payload, _ := json.Marshal(map[string]string{"value": value})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPut, c.endpoint+"/kv/"+key, bytes.NewReader(payload))
+func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
+	var body io.Reader
+	if in != nil {
+		b, err := json.Marshal(in)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.endpoint+path, body)
+	if err != nil {
+		return err
+	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("distrikv error: %s", resp.Status)
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		var e struct {
+			Error struct {
+				Code    string \`json:"code"\`
+				Message string \`json:"message"\`
+			} \`json:"error"\`
+		}
+		_ = json.Unmarshal(data, &e)
+		return &APIError{resp.StatusCode, e.Error.Code, e.Error.Message}
+	}
+	if out != nil && len(data) > 0 {
+		return json.Unmarshal(data, out)
 	}
 	return nil
 }
 
-func (c *Client) Get(ctx context.Context, key string) (string, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+"/kv/"+key, nil)
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+func kvPath(key string) string { return "/kv/" + url.PathEscape(key) }
 
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return "", err
+func (c *Client) Put(ctx context.Context, key, value string) error {
+	return c.do(ctx, http.MethodPut, kvPath(key), map[string]string{"value": value}, nil)
+}
+
+// Get returns found=false (and no error) when the key does not exist.
+func (c *Client) Get(ctx context.Context, key string) (value string, found bool, err error) {
+	var out struct {
+		Value string \`json:"value"\`
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return "", nil // key absent
+	if err := c.do(ctx, http.MethodGet, kvPath(key), nil, &out); err != nil {
+		var ae *APIError
+		if errors.As(err, &ae) && ae.Status == http.StatusNotFound {
+			return "", false, nil
+		}
+		return "", false, err
 	}
-	body, _ := io.ReadAll(resp.Body)
-	var out struct{ Value string \`json:"value"\` }
-	json.Unmarshal(body, &out)
-	return out.Value, nil
+	return out.Value, true, nil
+}
+
+// CAS sets key to value only if its current value equals *expected
+// (expected == nil means "only if the key is absent"). applied=false means
+// the current value differed; that is not an error.
+func (c *Client) CAS(ctx context.Context, key string, expected *string, value string) (applied bool, err error) {
+	body := map[string]any{"op": "cas", "key": key, "value": value}
+	if expected != nil {
+		body["expected"] = *expected
+	}
+	var out struct {
+		Applied bool \`json:"applied"\`
+	}
+	err = c.do(ctx, http.MethodPost, "/kv", body, &out)
+	return out.Applied, err
+}
+
+// Incr / Decr atomically change an integer counter and return the new value.
+func (c *Client) Incr(ctx context.Context, key string, delta int64) (int64, error) {
+	return c.counter(ctx, "incr", key, delta)
+}
+
+func (c *Client) Decr(ctx context.Context, key string, delta int64) (int64, error) {
+	return c.counter(ctx, "decr", key, delta)
+}
+
+func (c *Client) counter(ctx context.Context, op, key string, delta int64) (int64, error) {
+	var out struct {
+		Value int64 \`json:"value"\`
+	}
+	err := c.do(ctx, http.MethodPost, "/kv", map[string]any{"op": op, "key": key, "delta": delta}, &out)
+	return out.Value, err
+}
+
+func (c *Client) Delete(ctx context.Context, key string) error {
+	return c.do(ctx, http.MethodDelete, kvPath(key), nil, nil)
 }`
 
-const javaExample = `// DistriKV.java — Modern Java 11+ HttpClient
+const javaExample = `// DistriKV.java — Java 11+. HTTP uses the built-in java.net.http client.
+// JSON uses Jackson: com.fasterxml.jackson.core:jackson-databind (any recent version).
+// No DistriKV SDK is required.
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
+import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
+import java.net.http.HttpResponse.BodyHandlers;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.HashMap;
+import java.util.Map;
 
 public class DistriKV {
+    public static class ApiException extends RuntimeException {
+        public final int status;
+        public final String code;
+
+        public ApiException(int status, String code, String message) {
+            super(status + " " + code + ": " + message);
+            this.status = status;
+            this.code = code;
+        }
+    }
+
+    private static final ObjectMapper JSON = new ObjectMapper();
     private final String endpoint;
     private final String apiKey;
-    private final HttpClient client;
+    private final HttpClient client =
+        HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
 
     public DistriKV(String endpoint, String apiKey) {
-        this.endpoint = endpoint.replaceAll("/$", "");
+        this.endpoint = endpoint.replaceAll("/+$", "");
         this.apiKey = apiKey;
-        this.client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
     }
 
-    public boolean put(String key, String value) throws Exception {
-        String json = "{\\"value\\": \\"" + value.replace("\\"", "\\\\\\"") + "\\"}";
-        HttpRequest request = HttpRequest.newBuilder()
-            .uri(URI.create(endpoint + "/kv/" + key))
-            .header("Authorization", "Bearer " + apiKey)
-            .header("Content-Type", "application/json")
-            .PUT(HttpRequest.BodyPublishers.ofString(json))
-            .build();
-
-        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        return response.statusCode() == 200;
+    // Percent-encode a key so it is safe as a single URL path segment.
+    private static String enc(String key) {
+        return URLEncoder.encode(key, StandardCharsets.UTF_8).replace("+", "%20");
     }
 
-    public String get(String key) throws Exception {
-        HttpRequest request = HttpRequest.newBuilder()
-            .uri(URI.create(endpoint + "/kv/" + key))
-            .header("Authorization", "Bearer " + apiKey)
-            .GET()
-            .build();
+    private JsonNode send(String method, String path, Map<String, Object> body)
+            throws IOException, InterruptedException {
+        HttpRequest.Builder b = HttpRequest.newBuilder()
+            .uri(URI.create(endpoint + path))
+            .timeout(Duration.ofSeconds(5))
+            .header("Authorization", "Bearer " + apiKey);
+        if (body != null) {
+            b.header("Content-Type", "application/json")
+                .method(method, BodyPublishers.ofString(JSON.writeValueAsString(body)));
+        } else {
+            b.method(method, BodyPublishers.noBody());
+        }
+        HttpResponse<String> res = client.send(b.build(), BodyHandlers.ofString());
+        String text = res.body();
+        JsonNode node = JSON.readTree((text == null || text.isEmpty()) ? "{}" : text);
+        if (res.statusCode() >= 300) {
+            JsonNode err = node.path("error");
+            throw new ApiException(
+                res.statusCode(),
+                err.path("code").asText("error"),
+                err.path("message").asText("request failed"));
+        }
+        return node;
+    }
 
-        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        return response.statusCode() == 200 ? response.body() : null;
+    public void put(String key, String value) throws IOException, InterruptedException {
+        send("PUT", "/kv/" + enc(key), Map.<String, Object>of("value", value));
+    }
+
+    /** Returns null if the key does not exist. */
+    public String get(String key) throws IOException, InterruptedException {
+        try {
+            return send("GET", "/kv/" + enc(key), null).path("value").asText();
+        } catch (ApiException e) {
+            if (e.status == 404) return null;
+            throw e;
+        }
+    }
+
+    /** Atomic compare-and-swap. expected == null means "only if the key is absent". */
+    public boolean cas(String key, String expected, String value)
+            throws IOException, InterruptedException {
+        Map<String, Object> m = new HashMap<>();
+        m.put("op", "cas");
+        m.put("key", key);
+        m.put("value", value);
+        if (expected != null) m.put("expected", expected);
+        return send("POST", "/kv", m).path("applied").asBoolean();
+    }
+
+    public long incr(String key, long delta) throws IOException, InterruptedException {
+        return counter("incr", key, delta);
+    }
+
+    public long decr(String key, long delta) throws IOException, InterruptedException {
+        return counter("decr", key, delta);
+    }
+
+    private long counter(String op, String key, long delta) throws IOException, InterruptedException {
+        return send("POST", "/kv", Map.<String, Object>of("op", op, "key", key, "delta", delta))
+            .path("value").asLong();
+    }
+
+    public void delete(String key) throws IOException, InterruptedException {
+        send("DELETE", "/kv/" + enc(key), null);
     }
 }`
 
-const rustExample = `// distrikv.rs — Modern Rust with Reqwest & Tokio
-use reqwest::{header, Client, StatusCode};
-use serde_json::json;
+const rustExample = `// distrikv.rs — uses the reqwest HTTP client. No DistriKV SDK is required.
+// Cargo.toml:
+//   reqwest = { version = "0.12", features = ["json"] }
+//   tokio = { version = "1", features = ["full"] }
+//   serde_json = "1"
+use reqwest::{Client, Method, StatusCode, Url};
+use serde_json::{json, Value};
+use std::error::Error;
+use std::time::Duration;
 
 pub struct DistriKV {
-    endpoint: String,
+    base: Url,
     api_key: String,
     client: Client,
 }
 
 impl DistriKV {
-    pub fn new(endpoint: &str, api_key: &str) -> Self {
-        Self {
-            endpoint: endpoint.trim_end_matches('/').to_string(),
+    pub fn new(endpoint: &str, api_key: &str) -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            base: Url::parse(endpoint)?,
             api_key: api_key.to_string(),
-            client: Client::new(),
+            client: Client::builder().timeout(Duration::from_secs(5)).build()?,
+        })
+    }
+
+    // Builds {base}/kv or {base}/kv/{key}; the key is percent-encoded as one path segment.
+    fn kv_url(&self, key: Option<&str>) -> Url {
+        let mut url = self.base.clone();
+        {
+            let mut segments = url
+                .path_segments_mut()
+                .expect("endpoint must be an http(s) URL");
+            segments.pop_if_empty().push("kv");
+            if let Some(k) = key {
+                segments.push(k);
+            }
         }
+        url
     }
 
-    pub async fn put(&self, key: &str, value: &str) -> Result<bool, reqwest::Error> {
-        let url = format!("{}/kv/{}", self.endpoint, key);
-        let res = self.client.put(&url)
-            .header(header::AUTHORIZATION, format!("Bearer {}", self.api_key))
-            .json(&json!({ "value": value }))
-            .send().await?;
-        Ok(res.status() == StatusCode::OK)
+    async fn send(
+        &self,
+        method: Method,
+        url: Url,
+        body: Option<Value>,
+    ) -> Result<(StatusCode, Value), Box<dyn Error>> {
+        let mut req = self.client.request(method, url).bearer_auth(&self.api_key);
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+        let res = req.send().await?;
+        let status = res.status();
+        let text = res.text().await?;
+        Ok((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
     }
 
-    pub async fn get(&self, key: &str) -> Result<Option<String>, reqwest::Error> {
-        let url = format!("{}/kv/{}", self.endpoint, key);
-        let res = self.client.get(&url)
-            .header(header::AUTHORIZATION, format!("Bearer {}", self.api_key))
-            .send().await?;
-        
-        if res.status() == StatusCode::NOT_FOUND {
+    fn check(status: StatusCode, body: &Value) -> Result<(), Box<dyn Error>> {
+        if status.is_success() {
+            return Ok(());
+        }
+        let code = body["error"]["code"].as_str().unwrap_or("error");
+        Err(format!("distrikv: {} {}", status.as_u16(), code).into())
+    }
+
+    pub async fn put(&self, key: &str, value: &str) -> Result<(), Box<dyn Error>> {
+        let url = self.kv_url(Some(key));
+        let (status, body) = self.send(Method::PUT, url, Some(json!({ "value": value }))).await?;
+        Self::check(status, &body)
+    }
+
+    /// Returns Ok(None) if the key does not exist.
+    pub async fn get(&self, key: &str) -> Result<Option<String>, Box<dyn Error>> {
+        let (status, body) = self.send(Method::GET, self.kv_url(Some(key)), None).await?;
+        if status == StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        let body: serde_json::Value = res.json().await?;
-        Ok(body.get("value").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        Self::check(status, &body)?;
+        Ok(body["value"].as_str().map(String::from))
+    }
+
+    /// Atomic compare-and-swap. \`expected = None\` means "only if the key is absent".
+    pub async fn cas(&self, key: &str, expected: Option<&str>, value: &str) -> Result<bool, Box<dyn Error>> {
+        let mut op = json!({ "op": "cas", "key": key, "value": value });
+        if let Some(e) = expected {
+            op["expected"] = json!(e);
+        }
+        let (status, body) = self.send(Method::POST, self.kv_url(None), Some(op)).await?;
+        Self::check(status, &body)?;
+        Ok(body["applied"].as_bool().unwrap_or(false))
+    }
+
+    /// Atomic counters (delta must be positive). Return the new value.
+    pub async fn incr(&self, key: &str, delta: i64) -> Result<i64, Box<dyn Error>> {
+        self.counter("incr", key, delta).await
+    }
+
+    pub async fn decr(&self, key: &str, delta: i64) -> Result<i64, Box<dyn Error>> {
+        self.counter("decr", key, delta).await
+    }
+
+    async fn counter(&self, op: &str, key: &str, delta: i64) -> Result<i64, Box<dyn Error>> {
+        let payload = json!({ "op": op, "key": key, "delta": delta });
+        let (status, body) = self.send(Method::POST, self.kv_url(None), Some(payload)).await?;
+        Self::check(status, &body)?;
+        body["value"].as_i64().ok_or_else(|| "missing value".into())
+    }
+
+    pub async fn delete(&self, key: &str) -> Result<(), Box<dyn Error>> {
+        let (status, body) = self.send(Method::DELETE, self.kv_url(Some(key)), None).await?;
+        Self::check(status, &body)
     }
 }`
 
 const phpExample = `<?php
-// distrikv.php — Modern PHP 8+ Client
-class DistriKV {
-    private string $endpoint;
-    private string $apiKey;
-
-    public function __construct(string $endpoint = 'http://localhost:8080', string $apiKey = '') {
-        $this->endpoint = rtrim($endpoint, '/');
-        $this->apiKey = $apiKey;
-    }
-
-    public function put(string $key, string $value): bool {
-        $ch = curl_init("{$this->endpoint}/kv/{$key}");
-        curl_setopt_array($ch, [
-            CURLOPT_CUSTOMREQUEST => 'PUT',
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => [
-                "Authorization: Bearer {$this->apiKey}",
-                "Content-Type: application/json"
-            ],
-            CURLOPT_POSTFIELDS => json_encode(['value' => $value])
-        ]);
-        $response = curl_exec($ch);
-        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-        return $status === 200;
-    }
-
-    public function get(string $key): ?string {
-        $ch = curl_init("{$this->endpoint}/kv/{$key}");
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => ["Authorization: Bearer {$this->apiKey}"]
-        ]);
-        $response = curl_exec($ch);
-        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-        if ($status === 404) return null;
-        $data = json_decode($response, true);
-        return $data['value'] ?? null;
+// distrikv.php — PHP 8.0+ with ext-curl and ext-json. No DistriKV SDK is required.
+class DistriKVException extends RuntimeException
+{
+    public function __construct(public int $status, public string $errorCode, string $message)
+    {
+        parent::__construct("{$status} {$errorCode}: {$message}", $status);
     }
 }
-`
+
+class DistriKV
+{
+    private string $endpoint;
+
+    public function __construct(string $endpoint, private string $apiKey)
+    {
+        $this->endpoint = rtrim($endpoint, '/');
+    }
+
+    private function request(string $method, string $path, ?array $body = null): array
+    {
+        $headers = ["Authorization: Bearer {$this->apiKey}"];
+        $opts = [
+            CURLOPT_CUSTOMREQUEST  => $method,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 5,
+        ];
+        if ($body !== null) {
+            $headers[] = 'Content-Type: application/json';
+            $opts[CURLOPT_POSTFIELDS] = json_encode($body);
+        }
+        $opts[CURLOPT_HTTPHEADER] = $headers;
+
+        $ch = curl_init($this->endpoint . $path);
+        curl_setopt_array($ch, $opts);
+        $response = curl_exec($ch);
+        if ($response === false) {
+            $error = curl_error($ch);
+            curl_close($ch);
+            throw new RuntimeException("distrikv: {$error}");
+        }
+        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        $data = json_decode($response, true) ?? [];
+        if ($status >= 300) {
+            throw new DistriKVException(
+                $status,
+                $data['error']['code'] ?? 'error',
+                $data['error']['message'] ?? "HTTP {$status}"
+            );
+        }
+        return $data;
+    }
+
+    // rawurlencode() makes the key safe as a single URL path segment.
+    private function kvPath(string $key): string
+    {
+        return '/kv/' . rawurlencode($key);
+    }
+
+    public function put(string $key, string $value): void
+    {
+        $this->request('PUT', $this->kvPath($key), ['value' => $value]);
+    }
+
+    /** Returns null if the key does not exist. */
+    public function get(string $key): ?string
+    {
+        try {
+            return $this->request('GET', $this->kvPath($key))['value'] ?? null;
+        } catch (DistriKVException $e) {
+            if ($e->status === 404) {
+                return null;
+            }
+            throw $e;
+        }
+    }
+
+    /** Atomic compare-and-swap. $expected = null means "only if the key is absent". */
+    public function cas(string $key, ?string $expected, string $value): bool
+    {
+        $body = ['op' => 'cas', 'key' => $key, 'value' => $value];
+        if ($expected !== null) {
+            $body['expected'] = $expected;
+        }
+        return ($this->request('POST', '/kv', $body)['applied'] ?? false) === true;
+    }
+
+    /** Atomic counters; return the new value. */
+    public function incr(string $key, int $delta = 1): int
+    {
+        return $this->request('POST', '/kv', ['op' => 'incr', 'key' => $key, 'delta' => $delta])['value'];
+    }
+
+    public function decr(string $key, int $delta = 1): int
+    {
+        return $this->request('POST', '/kv', ['op' => 'decr', 'key' => $key, 'delta' => $delta])['value'];
+    }
+
+    public function delete(string $key): void
+    {
+        $this->request('DELETE', $this->kvPath($key));
+    }
+}`
 
 const curlExample = `#!/usr/bin/env bash
-# DistriKV Data Plane — Production cURL Reference
-DKV_HOST="http://localhost:8080"
-DKV_KEY="dkv_live_YOUR_API_KEY"
+# DistriKV data plane — cURL reference (plain HTTPS REST; no SDK needed).
+# Production endpoint. For a gateway running locally, use http://localhost:8080 instead.
+DISTRIKV_URL="\${DISTRIKV_URL:-https://distrikv.visheshgupta.dev}"
+: "\${DISTRIKV_API_KEY:?export DISTRIKV_API_KEY first}"
 
-# 1. Store a string or JSON key (PUT)
-curl -s -X PUT "$DKV_HOST/kv/user:profile:1001" \\
-  -H "Authorization: Bearer $DKV_KEY" \\
+# 1. Store a string or JSON text (PUT)
+curl -s -X PUT "$DISTRIKV_URL/kv/user:profile:1001" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{"value":"{\\"name\\":\\"Alice\\",\\"role\\":\\"admin\\"}"}'
 
-# 2. Retrieve key with linearizable consistency (GET)
-curl -s -X GET "$DKV_HOST/kv/user:profile:1001" \\
-  -H "Authorization: Bearer $DKV_KEY"
+# 2. Read it back (GET)
+curl -s "$DISTRIKV_URL/kv/user:profile:1001" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY"
 
-# 3. Atomic Compare-And-Swap (CAS)
-curl -s -X POST "$DKV_HOST/kv" \\
-  -H "Authorization: Bearer $DKV_KEY" \\
+# 3. Atomic compare-and-swap: set only if the key is absent (omit "expected")
+curl -s -X POST "$DISTRIKV_URL/kv" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY" \\
   -H "Content-Type: application/json" \\
-  -d '{
-    "op": "cas",
-    "key": "lock:cron_worker",
-    "expected": "idle",
-    "value": "running"
-  }'
+  -d '{"op":"cas","key":"lock:cron_worker","value":"worker-1"}'
+# -> {"applied":true}   (false if the key already existed)
 
-# 4. Atomic Counter Increment (+5)
-curl -s -X POST "$DKV_HOST/kv" \\
-  -H "Authorization: Bearer $DKV_KEY" \\
+# 4. Atomic counter (+5); the response contains the new value
+curl -s -X POST "$DISTRIKV_URL/kv" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{"op":"incr","key":"metrics:pageviews","delta":5}'
+# -> {"value":5}
 
-# 5. Delete key idempotently (DELETE)
-curl -s -X DELETE "$DKV_HOST/kv/user:profile:1001" \\
-  -H "Authorization: Bearer $DKV_KEY"
+# 5. Delete a key (idempotent, 204 No Content)
+curl -s -X DELETE "$DISTRIKV_URL/kv/user:profile:1001" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY"
 
-# 6. Live Telemetry
-curl -s -X GET "$DKV_HOST/v1/usage" \\
-  -H "Authorization: Bearer $DKV_KEY"`
+# 6. Your usage counters
+curl -s "$DISTRIKV_URL/v1/usage" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY"`
 
 const quickSnippets: Record<string, string> = {
-  ts: `import { DistriKVClient } from './distrikv'
+  ts: `// example.ts — after saving the client above as distrikv.ts
+import { DistriKVClient } from "./distrikv";
 
-const client = new DistriKVClient('http://localhost:8080', 'dkv_live_YOUR_KEY')
+const client = new DistriKVClient(
+  "https://distrikv.visheshgupta.dev",
+  process.env.DISTRIKV_API_KEY!,
+);
 
 async function run() {
-  // 1. Write key (automatic JSON serialization)
-  await client.put('cache:user:101', { name: 'Alice', role: 'admin' })
+  // 1. Write a key (objects are stored as JSON text)
+  await client.put("cache:user:101", { name: "Alice", role: "admin" });
 
-  // 2. Read back with Raft linearizability
-  const user = await client.get('cache:user:101')
-  console.log('User profile:', user) // { name: 'Alice', role: 'admin' }
+  // 2. Read it back
+  const user = await client.get("cache:user:101");
+  console.log("User profile:", user); // { name: 'Alice', role: 'admin' }
 
-  // 3. Atomic Compare-And-Swap (distributed locking)
-  const locked = await client.cas('lock:invoice_sync', 'idle', 'running')
-  if (locked) {
-    console.log('Successfully acquired lock!')
-  }
+  // 3. Atomic compare-and-swap: take a lock only if nobody holds it
+  const locked = await client.cas("lock:invoice_sync", null, "worker-1");
+  if (locked) console.log("Acquired lock");
 
-  // 4. Atomic Counter
-  await client.incr('metrics:visits', 1)
+  // 4. Atomic counter (returns the new value)
+  const visits = await client.incr("metrics:visits", 1);
+  console.log("Visits:", visits);
 }
 
-run().catch(console.error)`,
+run().catch(console.error);`,
 
-  python: `from distrikv import DistriKVClient
+  python: `# example.py — after saving the client above as distrikv.py
+import os
 
-client = DistriKVClient(endpoint="http://localhost:8080", api_key="dkv_live_YOUR_KEY")
+from distrikv import DistriKVClient
 
-# 1. Write structured record
+client = DistriKVClient(
+    "https://distrikv.visheshgupta.dev",
+    os.environ["DISTRIKV_API_KEY"],
+)
+
+# 1. Write a structured record (stored as JSON text)
 client.put("user:profile:1001", {"name": "Bob", "tier": "enterprise"})
 
-# 2. Linearizable read (returns parsed JSON or str)
+# 2. Read it back (returns parsed JSON, or None if the key is missing)
 profile = client.get("user:profile:1001")
 print("User name:", profile["name"])  # "Bob"
 
-# 3. Atomic integer counter
-client.incr("metrics:pageviews", delta=1)
+# 3. Atomic counter (returns the new value)
+print("Pageviews:", client.incr("metrics:pageviews", 1))
 
-# 4. Atomic Compare-And-Swap (CAS)
-success = client.cas("lock:batch_job", expected="idle", value="busy")
-print("Lock acquired:", success)`,
+# 4. Atomic compare-and-swap: take a lock only if nobody holds it
+print("Lock acquired:", client.cas("lock:batch_job", None, "worker-1"))`,
 
-  go: `package main
+  go: `// main.go — in the same package as client.go
+package main
 
 import (
-    "context"
-    "fmt"
-    "time"
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"time"
 )
 
 func main() {
-    client := NewClient("http://localhost:8080", "dkv_live_YOUR_KEY")
-    ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-    defer cancel()
+	client := NewClient("https://distrikv.visheshgupta.dev", os.Getenv("DISTRIKV_API_KEY"))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-    // 1. Write a key
-    if err := client.Put(ctx, "session:token:99", \`{"user_id": 42}\`); err != nil {
-        panic(err)
-    }
+	// 1. Write a key
+	if err := client.Put(ctx, "session:token:99", \`{"user_id": 42}\`); err != nil {
+		log.Fatal(err)
+	}
 
-    // 2. Read back
-    val, err := client.Get(ctx, "session:token:99")
-    if err != nil {
-        panic(err)
-    }
-    fmt.Println("Stored Value:", val)
+	// 2. Read it back (found=false if the key does not exist)
+	val, found, err := client.Get(ctx, "session:token:99")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Stored value:", val, "found:", found)
+
+	// 3. Atomic counter
+	n, err := client.Incr(ctx, "metrics:pageviews", 1)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Pageviews:", n)
 }`,
 
-  java: `// Quick usage of DistriKV Java Client
+  java: `// Main.java — after adding DistriKV.java and jackson-databind to your project
 public class Main {
     public static void main(String[] args) throws Exception {
-        DistriKV client = new DistriKV("http://localhost:8080", "dkv_live_YOUR_KEY");
+        DistriKV client = new DistriKV(
+            "https://distrikv.visheshgupta.dev",
+            System.getenv("DISTRIKV_API_KEY"));
 
-        // 1. Write key
+        // 1. Write a key
         client.put("session:auth:88", "{\\"active\\": true}");
 
-        // 2. Read key
-        String value = client.get("session:auth:88");
-        System.out.println("Result: " + value);
+        // 2. Read it back (null if the key does not exist)
+        System.out.println("Result: " + client.get("session:auth:88"));
+
+        // 3. Atomic counter (returns the new value)
+        System.out.println("Pageviews: " + client.incr("metrics:pageviews", 1));
     }
 }`,
 
-  rust: `#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = DistriKV::new("http://localhost:8080", "dkv_live_YOUR_KEY");
+  rust: `// main.rs — after adding distrikv.rs as a module (mod distrikv;)
+mod distrikv;
+use distrikv::DistriKV;
 
-    // 1. Write key
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let api_key = std::env::var("DISTRIKV_API_KEY")?;
+    let client = DistriKV::new("https://distrikv.visheshgupta.dev", &api_key)?;
+
+    // 1. Write a key
     client.put("cache:session:402", r#"{"user_id": 99}"#).await?;
 
-    // 2. Read key (returns Option<String>)
+    // 2. Read it back (None if the key does not exist)
     if let Some(val) = client.get("cache:session:402").await? {
         println!("Received: {}", val);
     }
+
+    // 3. Atomic counter (returns the new value)
+    println!("Pageviews: {}", client.incr("metrics:pageviews", 1).await?);
 
     Ok(())
 }`,
 
   php: `<?php
-require_once 'distrikv.php';
+// example.php — after saving the client above as distrikv.php
+require_once __DIR__ . '/distrikv.php';
 
-$client = new DistriKV('http://localhost:8080', 'dkv_live_YOUR_KEY');
+$client = new DistriKV('https://distrikv.visheshgupta.dev', getenv('DISTRIKV_API_KEY'));
 
-// 1. Write key
+// 1. Write a key
 $client->put('user:session:1001', json_encode(['role' => 'editor']));
 
-// 2. Read key
-$data = $client->get('user:session:1001');
-echo "Stored: " . $data;`,
+// 2. Read it back (null if the key does not exist)
+echo 'Stored: ' . $client->get('user:session:1001') . PHP_EOL;
 
-  curl: `# 1. Write key
-curl -X PUT "http://localhost:8080/kv/cache:session:402" \\
-  -H "Authorization: Bearer $DKV_KEY" \\
+// 3. Atomic counter (returns the new value)
+echo 'Pageviews: ' . $client->incr('metrics:pageviews', 1) . PHP_EOL;`,
+
+  curl: `export DISTRIKV_API_KEY="dkv_live_YOUR_API_KEY"   # from the console; keep it server-side
+
+# 1. Write a key
+curl -X PUT "https://distrikv.visheshgupta.dev/kv/cache:session:402" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{"value":"{\\"user_id\\":\\"usr_99\\"}"}'
 
-# 2. Read back
-curl -X GET "http://localhost:8080/kv/cache:session:402" \\
-  -H "Authorization: Bearer $DKV_KEY"
+# 2. Read it back
+curl "https://distrikv.visheshgupta.dev/kv/cache:session:402" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY"
 
-# 3. Atomic CAS
-curl -X POST "http://localhost:8080/kv" \\
-  -H "Authorization: Bearer $DKV_KEY" \\
+# 3. Atomic CAS: set only if the key is absent -> {"applied":true|false}
+curl -X POST "https://distrikv.visheshgupta.dev/kv" \\
+  -H "Authorization: Bearer $DISTRIKV_API_KEY" \\
   -H "Content-Type: application/json" \\
-  -d '{"op":"cas","key":"lock:job","expected":"idle","value":"busy"}'`,
+  -d '{"op":"cas","key":"lock:job","value":"worker-1"}'`,
 }
-

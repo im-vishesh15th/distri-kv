@@ -6,12 +6,12 @@
       "destination": "https://distrikv-vishesh.eastasia.cloudapp.azure.com/api/v1/:path*"
     },
     {
-      "source": "/kv/:path*",
-      "destination": "https://distrikv-vishesh.eastasia.cloudapp.azure.com/kv/:path*"
-    },
-    {
       "source": "/kv",
       "destination": "https://distrikv-vishesh.eastasia.cloudapp.azure.com/kv"
+    },
+    {
+      "source": "/kv/:path*",
+      "destination": "https://distrikv-vishesh.eastasia.cloudapp.azure.com/kv/:path*"
     },
     {
       "source": "/(.*)",

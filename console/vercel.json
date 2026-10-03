@@ -1,6 +1,5 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-
   "rewrites": [
     {
       "source": "/kv",
@@ -10,7 +9,6 @@
       "source": "/kv/:path*",
       "destination": "https://distrikv-vishesh.eastasia.cloudapp.azure.com/kv/:path*"
     },
-
     {
       "source": "/api/v1",
       "destination": "https://distrikv-vishesh.eastasia.cloudapp.azure.com/api/v1"
@@ -19,22 +17,15 @@
       "source": "/api/v1/:path*",
       "destination": "https://distrikv-vishesh.eastasia.cloudapp.azure.com/api/v1/:path*"
     },
-
     {
       "source": "/v1/usage",
       "destination": "https://distrikv-vishesh.eastasia.cloudapp.azure.com/v1/usage"
     },
     {
-      "source": "/tenant/usage/series",
-      "destination": "https://distrikv-vishesh.eastasia.cloudapp.azure.com/tenant/usage/series"
-    },
-
-    {
       "source": "/(.*)",
       "destination": "/index.html"
     }
   ],
-
   "headers": [
     {
       "source": "/kv",
@@ -74,15 +65,6 @@
     },
     {
       "source": "/v1/usage",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "no-store"
-        }
-      ]
-    },
-    {
-      "source": "/tenant/usage/series",
       "headers": [
         {
           "key": "Cache-Control",

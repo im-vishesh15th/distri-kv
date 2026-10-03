@@ -101,7 +101,7 @@ func TestSQLiteUsageIsPerTenant(t *testing.T) {
 	if err := gw.Metrics().Flush(ctx); err != nil {
 		t.Fatal(err)
 	}
-	
+
 	ser, err := gw.Metrics().Series("beta", "24h")
 	if err != nil {
 		t.Fatal(err)

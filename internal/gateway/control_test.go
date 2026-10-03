@@ -823,3 +823,178 @@ func TestCreateAdminUserAndResetPassword(t *testing.T) {
 		t.Fatalf("reset unknown user: %v", err)
 	}
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// API-key UX contract tests (signup one-time reveal requirements)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// TestSignupCreatesExactlyOneDefaultKey verifies that a fresh signup creates
+// exactly one active API key and that it is included in the listing endpoint.
+func TestSignupCreatesExactlyOneDefaultKey(t *testing.T) {
+	e := newCtl(t, nil)
+	a := e.signup("a@x.io", "tenant-a")
+
+	// The signup helper already asserts a 201 and extracts the key.
+	// Now verify via the listing endpoint that exactly one key exists.
+	l := e.do("GET", "/api/v1/tenant/keys", nil, withCookie(a.cookie))
+	if l.Code != 200 {
+		t.Fatalf("list keys: %d %s", l.Code, l.Body.String())
+	}
+	keys, ok := l.json()["keys"].([]any)
+	if !ok {
+		t.Fatalf("keys field missing or wrong type: %s", l.Body.String())
+	}
+	if len(keys) != 1 {
+		t.Fatalf("want exactly 1 default key after signup, got %d", len(keys))
+	}
+	k := keys[0].(map[string]any)
+	if k["name"] != "default" {
+		t.Fatalf("default key name: %v", k["name"])
+	}
+	if k["status"] != "active" {
+		t.Fatalf("default key status: %v", k["status"])
+	}
+}
+
+// TestSignupResponseContainsFullSecretOnlyOnce verifies that:
+//  1. The signup response contains the full plaintext key.
+//  2. A subsequent GET /api/v1/tenant/keys (the normal listing path used by the
+//     dashboard) does NOT expose the plaintext or its hash.
+//  3. Creating another key via POST also returns a full secret, but only in
+//     that specific response — listing still does not expose it.
+func TestSignupResponseContainsFullSecretOnlyOnce(t *testing.T) {
+	e := newCtl(t, nil)
+
+	// --- 1. Signup response contains the full secret ---
+	body := map[string]string{"email": "b@x.io", "password": "a-good-password", "tenant_id": "tenant-b"}
+	r := e.do("POST", "/api/v1/auth/signup", body, withIP("10.10.0.1"))
+	if r.Code != 201 {
+		t.Fatalf("signup: %d %s", r.Code, r.Body.String())
+	}
+	apiKeyBlock, ok := r.json()["api_key"].(map[string]any)
+	if !ok {
+		t.Fatal("signup response missing api_key block")
+	}
+	plain, ok := apiKeyBlock["key"].(string)
+	if !ok || plain == "" {
+		t.Fatalf("signup api_key.key missing or empty: %v", apiKeyBlock)
+	}
+	if !strings.HasPrefix(plain, KeyPrefix) || len(plain) != keyLen {
+		t.Fatalf("unexpected key shape: %q", plain)
+	}
+
+	// --- 2. Listing endpoint does NOT expose the plaintext or hash ---
+	ck := r.cookie()
+	l := e.do("GET", "/api/v1/tenant/keys", nil, withCookie(ck))
+	if l.Code != 200 {
+		t.Fatalf("list: %d %s", l.Code, l.Body.String())
+	}
+	if strings.Contains(l.Body.String(), plain) {
+		t.Fatal("listing leaked the plaintext key")
+	}
+	if strings.Contains(l.Body.String(), hashKey(plain)) {
+		t.Fatal("listing leaked the key hash")
+	}
+
+	// --- 3. Creating another key also returns a secret only in that response ---
+	cr := e.do("POST", "/api/v1/tenant/keys", map[string]any{"name": "prod"}, withCookie(ck))
+	if cr.Code != 201 {
+		t.Fatalf("create key: %d %s", cr.Code, cr.Body.String())
+	}
+	plain2, _ := cr.json()["key"].(string)
+	if plain2 == "" {
+		t.Fatal("create-key response missing plaintext")
+	}
+	l2 := e.do("GET", "/api/v1/tenant/keys", nil, withCookie(ck))
+	if strings.Contains(l2.Body.String(), plain2) {
+		t.Fatal("listing leaked the second key plaintext")
+	}
+	if strings.Contains(l2.Body.String(), hashKey(plain2)) {
+		t.Fatal("listing leaked the second key hash")
+	}
+}
+
+// TestKeyListNeverExposesFullSecret is a focused assertion that the tenant
+// key listing endpoint's JSON body never contains any string that looks like
+// a full plaintext key (starts with KeyPrefix and is keyLen characters long).
+func TestKeyListNeverExposesFullSecret(t *testing.T) {
+	e := newCtl(t, nil)
+	a := e.signup("a@x.io", "tenant-a")
+
+	// Create a couple more keys.
+	for _, name := range []string{"staging", "ci"} {
+		r := e.do("POST", "/api/v1/tenant/keys", map[string]any{"name": name}, withCookie(a.cookie))
+		if r.Code != 201 {
+			t.Fatalf("create %s: %d %s", name, r.Code, r.Body.String())
+		}
+	}
+
+	l := e.do("GET", "/api/v1/tenant/keys", nil, withCookie(a.cookie))
+	if l.Code != 200 {
+		t.Fatalf("list: %d %s", l.Code, l.Body.String())
+	}
+	body := l.Body.String()
+
+	// Check that no token in the response body looks like a full API key.
+	for _, tok := range strings.Fields(body) {
+		// Strip common JSON punctuation characters.
+		tok = strings.Trim(tok, `",[]{}`)
+		if strings.HasPrefix(tok, KeyPrefix) && len(tok) == keyLen {
+			t.Fatalf("listing contains a full plaintext key: %q", tok)
+		}
+	}
+
+	// Three keys in total (default + staging + ci), none has a "key" field.
+	keys := l.json()["keys"].([]any)
+	if len(keys) != 3 {
+		t.Fatalf("expected 3 keys, got %d", len(keys))
+	}
+	for _, raw := range keys {
+		k := raw.(map[string]any)
+		if _, hasKey := k["key"]; hasKey {
+			t.Fatalf("key listing item contains 'key' field: %v", k)
+		}
+		if _, hasHash := k["hash"]; hasHash {
+			t.Fatalf("key listing item contains 'hash' field: %v", k)
+		}
+	}
+}
+
+// TestSignupResponseApiKeyShape checks the exact shape of the api_key field
+// in the signup response so the frontend can rely on key, prefix, and name.
+func TestSignupResponseApiKeyShape(t *testing.T) {
+	e := newCtl(t, nil)
+	r := e.do("POST", "/api/v1/auth/signup", map[string]string{
+		"email": "c@x.io", "password": "a-good-password", "tenant_id": "tenant-c", "name": "Corp",
+	}, withIP("10.20.0.1"))
+	if r.Code != 201 {
+		t.Fatalf("signup: %d %s", r.Code, r.Body.String())
+	}
+	ak, ok := r.json()["api_key"].(map[string]any)
+	if !ok {
+		t.Fatal("api_key block missing from signup response")
+	}
+	// key: full plaintext
+	key, _ := ak["key"].(string)
+	if !strings.HasPrefix(key, KeyPrefix) || len(key) != keyLen {
+		t.Fatalf("api_key.key shape: %q", key)
+	}
+	// prefix: the first displayPrefix chars of the plaintext key
+	prefix, _ := ak["prefix"].(string)
+	if prefix == "" {
+		t.Fatal("api_key.prefix missing")
+	}
+	if !strings.HasPrefix(key, prefix) {
+		t.Fatalf("api_key.prefix %q is not a prefix of the key %q", prefix, key)
+	}
+	// name: "default"
+	if ak["name"] != "default" {
+		t.Fatalf("api_key.name: %v", ak["name"])
+	}
+	// The full key must NOT appear anywhere in the listing.
+	ck := r.cookie()
+	l := e.do("GET", "/api/v1/tenant/keys", nil, withCookie(ck))
+	if strings.Contains(l.Body.String(), key) {
+		t.Fatal("key appeared in listing after signup")
+	}
+}

@@ -1,3 +1,5 @@
+import { useLocation, useNavigate } from 'react-router-dom'
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useAuth, api } from '../../context/AuthContext'
 import {
@@ -30,6 +32,19 @@ import {
 } from 'recharts'
 
 export function DashboardPage() {
+  const location = useLocation()
+  const navigate = useNavigate()
+
+  const firstKey = location.state?.firstKey
+
+  const [copied, setCopied] = useState(false)
+
+  const [showKeyReveal, setShowKeyReveal] = useState(
+
+    Boolean(firstKey)
+
+  )
+
   const { user } = useAuth()
 
   const { data: tenant, isLoading: isTenantLoading } = useQuery({
@@ -153,9 +168,9 @@ export function DashboardPage() {
             isStorageError
               ? 'Storage usage is temporarily unavailable'
               : `${bytesToGB(storage?.bytes ?? 0)} GB · ${(storage?.keys ?? 0).toLocaleString()} keys` +
-                (storage?.as_of
-                  ? ` · updated ${formatDistanceToNowStrict(new Date(storage.as_of), { addSuffix: true })}`
-                  : '')
+              (storage?.as_of
+                ? ` · updated ${formatDistanceToNowStrict(new Date(storage.as_of), { addSuffix: true })}`
+                : '')
           }
           icon={<CircleStackIcon className="h-5 w-5" />}
           loading={isStorageLoading}
@@ -398,6 +413,79 @@ export function DashboardPage() {
           </div>
         )}
       </Card>
+      {showKeyReveal && firstKey && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl mx-4">
+            <h2 className="text-2xl font-semibold text-ink-black">
+              Your API key is ready
+            </h2>
+
+            <p className="mt-2 text-gray-600">
+              Your default API key has been created successfully.
+              Save it somewhere secure.
+            </p>
+
+            <div className="mt-5 rounded-lg bg-gray-100 p-4">
+              <p className="mb-2 text-xs font-medium text-gray-500">
+                API KEY
+              </p>
+
+              <div className="break-all font-mono text-sm text-gray-900">
+                {firstKey.key}
+              </div>
+            </div>
+
+            <button
+              onClick={async () => {
+                try {
+                  if (navigator.clipboard?.writeText) {
+                    await navigator.clipboard.writeText(firstKey.key)
+                  } else {
+                    const textarea = document.createElement('textarea')
+                    textarea.value = firstKey.key
+                    textarea.style.position = 'fixed'
+                    textarea.style.opacity = '0'
+                    document.body.appendChild(textarea)
+                    textarea.focus()
+                    textarea.select()
+                    document.execCommand('copy')
+                    document.body.removeChild(textarea)
+                  }
+
+                  setCopied(true)
+
+                  setTimeout(() => {
+                    setCopied(false)
+                  }, 2000)
+                } catch {
+                  setCopied(false)
+                }
+              }}
+              className="mt-3 w-full rounded-lg border border-gray-300 px-4 py-2"
+            >
+              {copied ? 'Copied!' : 'Copy API Key'}
+            </button>
+
+            <p className="mt-4 text-sm text-red-600">
+              ⚠️ Save this key now. The full secret will not be shown again.
+            </p>
+
+            <button
+              onClick={() => {
+                setShowKeyReveal(false)
+
+                navigate('/dashboard', {
+                  replace: true,
+                  state: null,
+                })
+              }}
+              className="mt-5 w-full rounded-lg bg-ink-black px-4 py-2 text-white"
+            >
+              Continue to Dashboard
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

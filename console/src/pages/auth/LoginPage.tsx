@@ -92,12 +92,32 @@ export function LoginPage() {
         }}
       >
         {/* Logo */}
-        <Link to="/" className="inline-flex items-center">
+        <Link
+          to="/"
+          className="inline-flex items-center gap-2.5"
+        >
+          <img
+            src="/distrikv-logo.png"
+            alt="Distri-KV"
+            className="h-9 w-9 object-contain"
+          />
+
           <span
             className="text-[20px] font-normal tracking-tight text-ink-black"
-            style={{ fontFamily: "'Georgia', ui-serif, serif", letterSpacing: '-0.02em' }}
+            style={{
+              fontFamily: "'Georgia', ui-serif, serif",
+              letterSpacing: '-0.02em',
+            }}
           >
-            Distri<span style={{ fontStyle: 'italic', color: '#5d2a1a' }}>KV</span>
+            Distri
+            <span
+              style={{
+                fontStyle: 'italic',
+                color: '#5d2a1a',
+              }}
+            >
+              KV
+            </span>
           </span>
         </Link>
 
@@ -157,12 +177,32 @@ export function LoginPage() {
 
           {/* Mobile logo */}
           <div className="lg:hidden mb-8">
-            <Link to="/" className="inline-flex items-center">
+            <Link
+              to="/"
+              className="inline-flex items-center gap-2.5"
+            >
+              <img
+                src="/distrikv-logo.png"
+                alt="Distri-KV"
+                className="h-8 w-8 object-contain"
+              />
+
               <span
                 className="text-[20px] font-normal tracking-tight text-ink-black"
-                style={{ fontFamily: "'Georgia', ui-serif, serif", letterSpacing: '-0.02em' }}
+                style={{
+                  fontFamily: "'Georgia', ui-serif, serif",
+                  letterSpacing: '-0.02em',
+                }}
               >
-                Distri<span style={{ fontStyle: 'italic', color: '#5d2a1a' }}>KV</span>
+                Distri
+                <span
+                  style={{
+                    fontStyle: 'italic',
+                    color: '#5d2a1a',
+                  }}
+                >
+                  KV
+                </span>
               </span>
             </Link>
           </div>
@@ -200,11 +240,10 @@ export function LoginPage() {
                 type="email"
                 autoComplete="email"
                 placeholder="you@company.com"
-                className={`w-full text-[14px] text-ink-black rounded-[12px] px-3.5 py-2.5 transition-all duration-150 focus:outline-none ${
-                  errors.email
-                    ? 'border-red-400 focus:border-red-500'
-                    : 'focus:border-ink-black focus:shadow-[0_0_0_3px_rgba(23,25,28,0.07)]'
-                }`}
+                className={`w-full text-[14px] text-ink-black rounded-[12px] px-3.5 py-2.5 transition-all duration-150 focus:outline-none ${errors.email
+                  ? 'border-red-400 focus:border-red-500'
+                  : 'focus:border-ink-black focus:shadow-[0_0_0_3px_rgba(23,25,28,0.07)]'
+                  }`}
                 style={{
                   background: '#f2f2f3',
                   border: `1px solid ${errors.email ? '#f87171' : 'transparent'}`,
@@ -221,11 +260,10 @@ export function LoginPage() {
                   type={showPassword ? 'text' : 'password'}
                   autoComplete="current-password"
                   placeholder="Your password"
-                  className={`w-full text-[14px] text-ink-black rounded-[12px] pl-3.5 pr-10 py-2.5 transition-all duration-150 focus:outline-none ${
-                    errors.password
-                      ? 'border-red-400 focus:border-red-500'
-                      : 'focus:border-ink-black focus:shadow-[0_0_0_3px_rgba(23,25,28,0.07)]'
-                  }`}
+                  className={`w-full text-[14px] text-ink-black rounded-[12px] pl-3.5 pr-10 py-2.5 transition-all duration-150 focus:outline-none ${errors.password
+                    ? 'border-red-400 focus:border-red-500'
+                    : 'focus:border-ink-black focus:shadow-[0_0_0_3px_rgba(23,25,28,0.07)]'
+                    }`}
                   style={{
                     background: '#f2f2f3',
                     border: `1px solid ${errors.password ? '#f87171' : 'transparent'}`,

@@ -69,8 +69,8 @@ const FieldInput = forwardRef<
       ref={ref}
       {...props}
       className={`${INPUT_BASE} ${mono ? 'font-mono text-[13px]' : ''} ${hasError
-          ? 'border-red-400 focus:border-red-500'
-          : 'focus:border-ink-black focus:shadow-[0_0_0_3px_rgba(23,25,28,0.07)]'
+        ? 'border-red-400 focus:border-red-500'
+        : 'focus:border-ink-black focus:shadow-[0_0_0_3px_rgba(23,25,28,0.07)]'
         }`}
       style={{
         background: '#f2f2f3',
@@ -144,12 +144,32 @@ export function SignupPage() {
         }}
       >
         {/* Logo */}
-        <Link to="/" className="inline-flex items-center">
+        <Link
+          to="/"
+          className="inline-flex items-center gap-2.5"
+        >
+          <img
+            src="/distrikv-logo.png"
+            alt="Distri-KV"
+            className="h-9 w-9 object-contain"
+          />
+
           <span
             className="text-[20px] font-normal tracking-tight text-ink-black"
-            style={{ fontFamily: "'Georgia', ui-serif, serif", letterSpacing: '-0.02em' }}
+            style={{
+              fontFamily: "'Georgia', ui-serif, serif",
+              letterSpacing: '-0.02em',
+            }}
           >
-            Distri<span style={{ fontStyle: 'italic', color: '#5d2a1a' }}>KV</span>
+            Distri
+            <span
+              style={{
+                fontStyle: 'italic',
+                color: '#5d2a1a',
+              }}
+            >
+              KV
+            </span>
           </span>
         </Link>
 
@@ -200,12 +220,32 @@ export function SignupPage() {
 
           {/* Mobile logo */}
           <div className="lg:hidden mb-8">
-            <Link to="/" className="inline-flex items-center">
+            <Link
+              to="/"
+              className="inline-flex items-center gap-2.5"
+            >
+              <img
+                src="/distrikv-logo.png"
+                alt="Distri-KV"
+                className="h-8 w-8 object-contain"
+              />
+
               <span
                 className="text-[20px] font-normal tracking-tight text-ink-black"
-                style={{ fontFamily: "'Georgia', ui-serif, serif", letterSpacing: '-0.02em' }}
+                style={{
+                  fontFamily: "'Georgia', ui-serif, serif",
+                  letterSpacing: '-0.02em',
+                }}
               >
-                Distri<span style={{ fontStyle: 'italic', color: '#5d2a1a' }}>KV</span>
+                Distri
+                <span
+                  style={{
+                    fontStyle: 'italic',
+                    color: '#5d2a1a',
+                  }}
+                >
+                  KV
+                </span>
               </span>
             </Link>
           </div>

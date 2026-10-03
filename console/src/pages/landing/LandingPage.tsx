@@ -262,10 +262,32 @@ Response: {"ok": true}`,
       >
         <div className="max-w-[1240px] mx-auto px-6 sm:px-8 flex items-center justify-between" style={{ height: '64px' }}>
           {/* Logo */}
-          <Link to="/" className="inline-flex items-center gap-2" style={{ textDecoration: 'none' }}>
-            <span style={{ fontFamily: "'Georgia', ui-serif, serif", fontSize: '20px', fontWeight: 400, letterSpacing: '-0.02em', color: '#17191c' }}>
-              Distri<span style={{ fontStyle: 'italic', color: '#5d2a1a' }}>KV</span>
+          <Link
+            to="/"
+            className="inline-flex items-center gap-2.5"
+            style={{ textDecoration: 'none' }}
+          >
+            <img
+              src="/distrikv-logo.png"
+              alt="Distri-KV"
+              className="h-9 w-9 object-contain"
+            />
+
+            <span
+              style={{
+                fontFamily: "'Georgia', ui-serif, serif",
+                fontSize: '20px',
+                fontWeight: 400,
+                letterSpacing: '-0.02em',
+                color: '#17191c',
+              }}
+            >
+              Distri
+              <span style={{ fontStyle: 'italic', color: '#5d2a1a' }}>
+                KV
+              </span>
             </span>
+
             <span
               style={{
                 fontSize: '10.5px',
@@ -365,6 +387,18 @@ Response: {"ok": true}`,
         </div>
 
         <div className="max-w-[1100px] mx-auto text-center relative space-y-7">
+          {/* Brand Mark */}
+          <div className="flex justify-center">
+            <div className="relative">
+              <div className="absolute inset-0 rounded-full bg-blush-peach/30 blur-2xl scale-125" />
+
+              <img
+                src="/distrikv-logo.png"
+                alt="Distri-KV"
+                className="relative h-28 w-28 sm:h-32 sm:w-32 object-contain drop-shadow-sm"
+              />
+            </div>
+          </div>
           {/* Status Badge */}
           <div className="inline-flex items-center gap-2.5 px-4 py-1.5 rounded-full bg-paper-white border border-[#e2e2e4] shadow-subtle text-xs font-medium text-slate-gray">
             <span className="relative flex h-2 w-2">
@@ -385,7 +419,7 @@ Response: {"ok": true}`,
 
           {/* Subtitle */}
           <p className="max-w-[660px] mx-auto text-base sm:text-lg text-slate-gray font-normal leading-relaxed">
-            Hardware-isolated multi-tenancy, sub-millisecond p99 latency, and strict linearizability. 
+            Hardware-isolated multi-tenancy, sub-millisecond p99 latency, and strict linearizability.
             Engineered in Go for mission-critical session hierarchies, distributed locking, and fast operational caches.
           </p>
 
@@ -502,11 +536,10 @@ Response: {"ok": true}`,
                   <button
                     key={tab}
                     onClick={() => setActiveTab(tab)}
-                    className={`px-3 py-1 rounded-lg text-xs font-medium transition-all ${
-                      activeTab === tab
-                        ? 'bg-[#2b2d35] text-paper-white shadow-sm font-semibold'
-                        : 'text-[#8a8f98] hover:text-[#eaeaea]'
-                    }`}
+                    className={`px-3 py-1 rounded-lg text-xs font-medium transition-all ${activeTab === tab
+                      ? 'bg-[#2b2d35] text-paper-white shadow-sm font-semibold'
+                      : 'text-[#8a8f98] hover:text-[#eaeaea]'
+                      }`}
                   >
                     {tab === 'curl' ? 'cURL' : tab === 'ts' ? 'TypeScript' : tab === 'python' ? 'Python' : tab === 'go' ? 'Go' : 'Rust'}
                   </button>
@@ -744,9 +777,8 @@ Response: {"ok": true}`,
                 <div className="flex items-center justify-between font-serif text-lg text-ink-black">
                   <span>{faq.q}</span>
                   <ChevronDownIcon
-                    className={`h-5 w-5 text-slate-gray transition-transform duration-200 ${
-                      openFaq === i ? 'rotate-180 text-ink-black' : ''
-                    }`}
+                    className={`h-5 w-5 text-slate-gray transition-transform duration-200 ${openFaq === i ? 'rotate-180 text-ink-black' : ''
+                      }`}
                   />
                 </div>
                 {openFaq === i && (
@@ -787,16 +819,30 @@ Response: {"ok": true}`,
       {/* ─── Footer ────────────────────────────────────────── */}
       <footer className="border-t border-[#ececec] py-12 px-6 sm:px-8 bg-mist-gray/40 text-xs text-slate-gray">
         <div className="max-w-[1240px] mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-2 font-serif text-lg text-ink-black">
-            <span>Distri<span className="italic text-sienna-brown">KV</span></span>
-            <span className="text-[11px] font-sans text-slate-gray">Systems Inc.</span>
+          <div className="flex items-center gap-2.5 text-ink-black">
+            <img
+              src="/distrikv-logo.png"
+              alt="Distri-KV"
+              className="h-8 w-8 object-contain"
+            />
+
+            <div className="flex items-baseline gap-2">
+              <span className="font-serif text-lg">
+                Distri
+                <span className="italic text-sienna-brown">KV</span>
+              </span>
+
+              <span className="text-[11px] text-slate-gray">
+                Systems Inc.
+              </span>
+            </div>
           </div>
           <div>
             &copy; {new Date().getFullYear()} DistriKV Systems Inc. All rights reserved. Open-source distributed architecture.
           </div>
           <div className="flex items-center gap-6">
             <Link to="/docs" className="hover:text-ink-black transition-colors">Docs</Link>
-            <a href="https://github.com" target="_blank" rel="noreferrer" className="hover:text-ink-black transition-colors">GitHub</a>
+            <a href="https://github.com/im-vishesh15th" target="_blank" rel="noreferrer" className="hover:text-ink-black transition-colors">GitHub</a>
             <Link to="/login" className="hover:text-ink-black transition-colors">Sign in</Link>
           </div>
         </div>
